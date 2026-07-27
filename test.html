@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Auction WebSocket Test</title>
+    <style>
+        body { font-family: Arial; padding: 20px; }
+        #messages {
+            border: 1px solid #ccc;
+            height: 400px;
+            overflow-y: scroll;
+            padding: 10px;
+            background: #f5f5f5;
+        }
+        .message {
+            margin: 5px 0;
+            padding: 8px;
+            background: white;
+            border-left: 3px solid #4CAF50;
+        }
+        .error { border-left-color: #f44336; }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            cursor: pointer;
+        }
+        input { padding: 8px; margin: 5px; }
+    </style>
+</head>
+<body>
+    <h1>🔨 Auction WebSocket Tester</h1>
+
+    <div>
+        <input type="text" id="auctionId" placeholder="Auction ID" value="1">
+        <button onclick="connect()">Connect</button>
+        <button onclick="disconnect()">Disconnect</button>
+        <button onclick="ping()">Send Ping</button>
+    </div>
+
+    <div>
+        <input type="number" id="bidAmount" placeholder="Bid Amount" value="150">
+        <input type="text" id="token" placeholder="Auth Token">
+        <button onclick="placeBid()">Place Bid</button>
+    </div>
+
+    <h3>Messages:</h3>
+    <div id="messages"></div>
+
+    <script>
+        let ws = null;
+
+        function addMessage(msg, isError = false) {
+            const div = document.createElement('div');
+            div.className = 'message' + (isError ? ' error' : '');
+            div.innerHTML = `<strong>${new Date().toLocaleTimeString()}</strong>: ${msg}`;
+            document.getElementById('messages').prepend(div);
+        }
+
+        function connect() {
+            const auctionId = document.getElementById('auctionId').value;
+            const url = `ws://localhost:8000/ws/auction/${auctionId}/`;
+
+            ws = new WebSocket(url);
+
+            ws.onopen = () => {
+                addMessage('✅ Connected to auction ' + auctionId);
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                const type = data.type;
+
+                if (type === 'auction_state') {
+                    addMessage(`📊 Current Price: $${data.data.current_price}`);
+                } else if (type === 'auction_update' && data.event === 'new_bid') {
+                    const d = data.data;
+                    addMessage(`🔨 NEW BID: $${d.bid_amount} by ${d.bidder_username} (Next min: $${d.minimum_next_bid})`);
+                } else if (type === 'pong') {
+                    addMessage('💓 Pong received');
+                } else {
+                    addMessage(`📨 ${JSON.stringify(data)}`);
+                }
+            };
+
+            ws.onerror = (error) => {
+                addMessage('❌ WebSocket error', true);
+            };
+
+            ws.onclose = () => {
+                addMessage('🔌 Disconnected');
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+
+        function ping() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'ping' }));
+                addMessage('⬆️ Ping sent');
+            } else {
+                addMessage('❌ Not connected', true);
+            }
+        }
+
+        async function placeBid() {
+            const auctionId = document.getElementById('auctionId').value;
+            const amount = document.getElementById('bidAmount').value;
+            const token = document.getElementById('token').value;
+
+            if (!token) {
+                addMessage('❌ Need auth token to place bid', true);
+                return;
+            }
+
+            try {
+                const response = await fetch(`http://localhost:8000/api/auctions/${auctionId}/place_bid/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({ amount: parseFloat(amount) })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    addMessage(`✅ Bid placed: $${amount}`);
+                } else {
+                    addMessage(`❌ Bid failed: ${result.message}`, true);
+                }
+            } catch (error) {
+                addMessage(`❌ Error: ${error.message}`, true);
+            }
+        }
+    </script>
+</body>
+</html>

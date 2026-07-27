@@ -1,0 +1,138 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+<div class="flex flex-col gap-6 max-w-4xl">
+
+  <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-6">
+    <div class="flex items-center justify-between gap-4 mb-2">
+      <h1 class="text-lg font-semibold">نزاع #{{ dispute.id }} — {{ dispute.title }}</h1>
+      <span class="text-xs px-3 py-1 rounded-full font-semibold whitespace-nowrap"
+            style="background:{% if dispute.status == 'open' %}#AC3A3120;color:#AC3A31{% elif dispute.status == 'investigating' %}#9C621620;color:#9C6216{% elif dispute.status == 'resolved' %}#2E7D5720;color:#2E7D57{% else %}#6B728020;color:#6B7280{% endif %}">
+        {{ dispute.get_status_display }}
+      </span>
+    </div>
+    <p class="text-sm text-font-subtle-light dark:text-font-subtle-dark mb-4">{{ dispute.description }}</p>
+    <dl class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">المنتج</dt>
+        <dd><a class="text-primary-600 dark:text-primary-400" href="{% url 'admin:core_item_change' dispute.item_id %}">{{ dispute.item.title }}</a></dd>
+      </div>
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">السبب</dt>
+        <dd>{{ dispute.reason|default:"—" }}</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">المشتكي</dt>
+        <dd>
+          <a class="text-primary-600 dark:text-primary-400" href="{% url 'admin:core_user_change' dispute.complainant_id %}">{{ dispute.complainant.username }}</a>
+          <span class="text-font-subtle-light dark:text-font-subtle-dark">— الثقة {{ dispute.complainant.trust_score }}</span>
+        </dd>
+      </div>
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">المُشتكى عليه</dt>
+        <dd>
+          <a class="text-primary-600 dark:text-primary-400" href="{% url 'admin:core_user_change' dispute.defendant_id %}">{{ dispute.defendant.username }}</a>
+          <span class="text-font-subtle-light dark:text-font-subtle-dark">— الثقة {{ dispute.defendant.trust_score }}</span>
+        </dd>
+      </div>
+    </dl>
+  </div>
+
+  {% if reservation %}
+  <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-6">
+    <h2 class="text-sm font-semibold mb-3">تفاصيل الحجز #{{ reservation.id }}</h2>
+    <dl class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm mb-4">
+      <div><dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">حالة الحجز</dt><dd>{{ reservation.get_status_display }}</dd></div>
+      <div><dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">الكمية</dt><dd>{{ reservation.quantity }}</dd></div>
+      <div><dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">السعر الكلي</dt><dd>{{ reservation.total_price }}</dd></div>
+      <div><dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">المبلغ المُحصَّل فعليًا</dt><dd>{{ reservation.amount_charged }}</dd></div>
+    </dl>
+    {% if reservation.proof_screenshot %}
+      <div>
+        <div class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-2">لقطة الإثبات (من البث المباشر وقت الحجز)</div>
+        <a href="{{ reservation.proof_screenshot.url }}" target="_blank" rel="noopener">
+          <img src="{{ reservation.proof_screenshot.url }}" class="max-h-64 rounded-default border border-base-200 dark:border-base-700" alt="لقطة الإثبات">
+        </a>
+      </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-6">
+    <h2 class="text-sm font-semibold mb-3">سجل المحادثة بين الطرفين</h2>
+    {% if chat %}
+      <div class="flex flex-col gap-2 max-h-80 overflow-y-auto text-sm">
+        {% for m in chat_messages %}
+          <div>
+            <span class="font-semibold">{{ m.sender.username|default:"النظام" }}</span>
+            <span class="text-font-subtle-light dark:text-font-subtle-dark text-xs">{{ m.created_at }}</span>
+            <div>{{ m.content }}</div>
+          </div>
+        {% empty %}
+          <div class="text-font-subtle-light dark:text-font-subtle-dark">لا توجد رسائل بعد.</div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="text-sm text-font-subtle-light dark:text-font-subtle-dark">لا توجد محادثة مسجّلة بين الطرفين حول هذا المنتج.</div>
+    {% endif %}
+  </div>
+
+  <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-6">
+    <h2 class="text-sm font-semibold mb-4">قرار الحسم</h2>
+
+    {% if dispute.status == 'resolved' or dispute.status == 'closed' %}
+      <p class="text-sm text-font-subtle-light dark:text-font-subtle-dark">
+        هذا النزاع محسوم بالفعل ({{ dispute.get_resolution_action_display }}) بتاريخ {{ dispute.resolved_at }}.
+      </p>
+      {% if dispute.resolution %}<p class="text-sm mt-2">{{ dispute.resolution }}</p>{% endif %}
+    {% else %}
+      <form method="post" onsubmit="return confirm('تأكيد اتخاذ هذا القرار؟ سيُحرّك أموالًا فورًا ولا يمكن التراجع عنه من هنا.');">
+        {% csrf_token %}
+        <div class="flex flex-col gap-4">
+          <div>
+            <label class="block text-sm font-medium mb-2" for="resolution_action">الإجراء</label>
+            <select name="resolution_action" id="resolution_action" required
+                    class="w-full rounded-default border border-base-200 dark:border-base-700 bg-base-50 dark:bg-base-900 px-3 py-2 text-sm">
+              <option value="">اختر إجراءً</option>
+              {% for value, label in resolution_choices %}
+                <option value="{{ value }}">{{ label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div id="partial-amount-field" class="hidden">
+            <label class="block text-sm font-medium mb-2" for="partial_refund_amount">مبلغ الاسترداد الجزئي</label>
+            <input type="number" step="0.01" min="0" name="partial_refund_amount" id="partial_refund_amount"
+                   class="w-full rounded-default border border-base-200 dark:border-base-700 bg-base-50 dark:bg-base-900 px-3 py-2 text-sm">
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2" for="resolution">تفاصيل القرار (تُعرض للطرفين)</label>
+            <textarea name="resolution" id="resolution" rows="3"
+                      class="w-full rounded-default border border-base-200 dark:border-base-700 bg-base-50 dark:bg-base-900 px-3 py-2 text-sm"></textarea>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2" for="admin_notes">ملاحظات داخلية</label>
+            <textarea name="admin_notes" id="admin_notes" rows="3"
+                      class="w-full rounded-default border border-base-200 dark:border-base-700 bg-base-50 dark:bg-base-900 px-3 py-2 text-sm">{{ dispute.admin_notes }}</textarea>
+          </div>
+          <button type="submit"
+                  class="self-start px-5 py-2.5 rounded-default text-white text-sm font-semibold"
+                  style="background:var(--color-primary-600);">
+            تنفيذ القرار
+          </button>
+        </div>
+      </form>
+      <script>
+        (function () {
+          var select = document.getElementById('resolution_action');
+          var field = document.getElementById('partial-amount-field');
+          function sync() { field.classList.toggle('hidden', select.value !== 'partial_refund'); }
+          select.addEventListener('change', sync);
+          sync();
+        })();
+      </script>
+    {% endif %}
+  </div>
+
+</div>
+{% endblock %}

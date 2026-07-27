@@ -1,0 +1,42 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+<div class="max-w-2xl">
+  <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-6">
+    <h1 class="text-lg font-semibold mb-2">تعليق {{ queryset|length }} حساب</h1>
+    <p class="text-sm text-font-subtle-light dark:text-font-subtle-dark mb-4">
+      سيُمنع هؤلاء المستخدمون من تسجيل الدخول فورًا (بما في ذلك جلساتهم الحالية). العملية قابلة للتراجع من خلال
+      إجراء "إعادة تفعيل الحسابات المحددة".
+    </p>
+
+    <ul class="text-sm mb-4 list-disc list-inside text-font-subtle-light dark:text-font-subtle-dark">
+      {% for user in queryset %}
+        <li>{{ user.username }}{% if user.email %} — {{ user.email }}{% endif %}</li>
+      {% endfor %}
+    </ul>
+
+    <form method="post">
+      {% csrf_token %}
+      {% for user in queryset %}
+        <input type="hidden" name="{{ action_checkbox_name }}" value="{{ user.pk }}">
+      {% endfor %}
+      <input type="hidden" name="action" value="suspend_users_action">
+      <input type="hidden" name="apply" value="1">
+
+      <label class="block text-sm font-medium mb-2" for="reason">سبب التعليق (إلزامي)</label>
+      <textarea name="reason" id="reason" rows="3" required
+                class="w-full rounded-default border border-base-200 dark:border-base-700 bg-base-50 dark:bg-base-900 px-3 py-2 text-sm mb-4"></textarea>
+
+      <div class="flex gap-3">
+        <button type="submit" class="px-5 py-2.5 rounded-default text-white text-sm font-semibold" style="background:#AC3A31;">
+          تأكيد التعليق
+        </button>
+        <a href="{% url 'admin:core_user_changelist' %}" class="px-5 py-2.5 rounded-default border border-base-200 dark:border-base-700 text-sm font-semibold">
+          إلغاء
+        </a>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,46 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+<div class="flex flex-col gap-6 max-w-2xl">
+
+  <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-6">
+    <h1 class="text-lg font-semibold mb-1">محادثة الدعم مع {{ chat.buyer.username }}</h1>
+    <p class="text-xs text-font-subtle-light dark:text-font-subtle-dark">
+      الثقة: {{ chat.buyer.trust_score }} — عضو منذ {{ chat.buyer.created_at|date:"Y-m-d" }}
+    </p>
+  </div>
+
+  <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-6">
+    <h2 class="text-sm font-semibold mb-3">سجل المحادثة</h2>
+    <div class="flex flex-col gap-3 max-h-96 overflow-y-auto text-sm">
+      {% for m in chat_messages %}
+        <div class="flex flex-col {% if m.sender_id == chat.buyer_id %}items-start{% else %}items-end{% endif %}">
+          <div class="max-w-[80%] rounded-default px-3 py-2 {% if m.sender_id == chat.buyer_id %}bg-base-100 dark:bg-base-900{% else %}bg-primary-600 text-white{% endif %}">
+            {{ m.content }}
+          </div>
+          <span class="text-xs text-font-subtle-light dark:text-font-subtle-dark mt-1">
+            {% if m.sender_id == chat.buyer_id %}{{ chat.buyer.username }}{% else %}فريق الدعم{% endif %}
+            — {{ m.created_at }}
+          </span>
+        </div>
+      {% empty %}
+        <div class="text-font-subtle-light dark:text-font-subtle-dark">لا توجد رسائل بعد.</div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-6">
+    <h2 class="text-sm font-semibold mb-4">إرسال رد</h2>
+    <form method="post">
+      {% csrf_token %}
+      <textarea name="content" rows="3" required placeholder="اكتب ردك هنا..."
+                class="w-full rounded-default border border-base-200 dark:border-base-700 bg-base-50 dark:bg-base-900 px-3 py-2 text-sm mb-4"></textarea>
+      <button type="submit" class="px-5 py-2.5 rounded-default text-white text-sm font-semibold" style="background:var(--color-primary-600);">
+        إرسال
+      </button>
+    </form>
+  </div>
+
+</div>
+{% endblock %}

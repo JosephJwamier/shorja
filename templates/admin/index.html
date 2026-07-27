@@ -1,0 +1,203 @@
+{% extends 'admin/base.html' %}
+{% load i18n %}
+
+{% block title %}{{ title }} | {{ site_title|default:_('Django site admin') }}{% endblock %}
+
+{% block branding %}
+    {% include "unfold/helpers/site_branding.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="flex flex-col gap-6">
+
+  <div class="flex items-center justify-between">
+    <div>
+      <h1 class="text-lg font-semibold">نبض المنصة</h1>
+      <p class="text-xs text-font-subtle-light dark:text-font-subtle-dark">
+        آخر تحديث: {{ dashboard.generated_at }} — تُحدَّث كل 5 دقائق
+      </p>
+    </div>
+  </div>
+
+  {# ---------------------------------------------------------------- KPIs #}
+  <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+
+    <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-5">
+      <div class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">تسجيلات جديدة (اليوم)</div>
+      <div class="text-2xl font-semibold">{{ dashboard.registrations.today }}</div>
+      <div class="text-xs mt-1 text-font-subtle-light dark:text-font-subtle-dark">
+        هذا الأسبوع {{ dashboard.registrations.this_week }} · هذا الشهر {{ dashboard.registrations.this_month }}
+        · نمو أسبوعي
+        <span style="color:{% if dashboard.registrations.growth_pct >= 0 %}#2E7D57{% else %}#AC3A31{% endif %};font-weight:600;">
+          {{ dashboard.registrations.growth_pct }}%
+        </span>
+      </div>
+    </div>
+
+    <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-5">
+      <div class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">مستخدمون نشطون (7 أيام)</div>
+      <div class="text-2xl font-semibold">{{ dashboard.active_users }}</div>
+    </div>
+
+    <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-5">
+      <div class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">إجمالي المبيعات GMV (30 يوم)</div>
+      <div class="text-2xl font-semibold">{{ dashboard.gmv.gmv }}</div>
+      <div class="text-xs mt-1 text-font-subtle-light dark:text-font-subtle-dark">{{ dashboard.gmv.orders }} طلب مكتمل</div>
+    </div>
+
+    <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-5">
+      <div class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">نزاعات مفتوحة</div>
+      <div class="text-2xl font-semibold" style="{% if dashboard.disputes.open_count > 0 %}color:#AC3A31{% endif %}">
+        {{ dashboard.disputes.open_count }}
+      </div>
+      <div class="text-xs mt-1 text-font-subtle-light dark:text-font-subtle-dark">
+        {% if dashboard.disputes.avg_resolution_hours %}
+          متوسط الحل {{ dashboard.disputes.avg_resolution_hours }} ساعة (30 يوم)
+        {% else %}
+          لا نزاعات محسومة مؤخرًا
+        {% endif %}
+      </div>
+      <a href="{% url 'admin:core_dispute_changelist' %}" class="text-xs text-primary-600 dark:text-primary-400">فتح مركز النزاعات →</a>
+    </div>
+
+    <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-5">
+      <div class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">طلبات سحب معلّقة</div>
+      <div class="text-2xl font-semibold">{{ dashboard.withdrawals.pending_count }}</div>
+      <div class="text-xs mt-1 text-font-subtle-light dark:text-font-subtle-dark">بقيمة {{ dashboard.withdrawals.pending_amount }}</div>
+      <a href="{% url 'admin:core_withdrawalrequest_changelist' %}" class="text-xs text-primary-600 dark:text-primary-400">مراجعة الطلبات →</a>
+    </div>
+
+    <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-5">
+      <div class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">بث مباشر الآن</div>
+      <div class="text-2xl font-semibold">{{ dashboard.live_now.sessions }}</div>
+      <div class="text-xs mt-1 text-font-subtle-light dark:text-font-subtle-dark">{{ dashboard.live_now.viewers }} مشاهد</div>
+    </div>
+
+    <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-5">
+      <div class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">عمولات المندوبين (30 يوم)</div>
+      <div class="text-2xl font-semibold">{{ dashboard.commissions.total }}</div>
+      <div class="text-xs mt-1 text-font-subtle-light dark:text-font-subtle-dark">{{ dashboard.commissions.count }} عملية</div>
+    </div>
+
+    <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-5">
+      <div class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">متاجر نشطة</div>
+      <div class="text-2xl font-semibold">{{ dashboard.active_stores }}</div>
+    </div>
+
+    <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-5">
+      <div class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">محافظ بأرصدة غير طبيعية</div>
+      <div class="text-2xl font-semibold" style="{% if dashboard.wallet_anomalies > 0 %}color:#AC3A31{% endif %}">
+        {{ dashboard.wallet_anomalies }}
+      </div>
+      {% if dashboard.wallet_anomalies > 0 %}
+        <a href="{% url 'admin:core_wallet_changelist' %}?anomaly=negative" class="text-xs text-primary-600 dark:text-primary-400">مراجعة فورية →</a>
+      {% endif %}
+    </div>
+
+  </div>
+
+  {# ------------------------------------------------------------- Charts #}
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-5">
+      <h2 class="text-sm font-semibold mb-3">التسجيلات (آخر 30 يوم)</h2>
+      <canvas id="registrations-chart" height="90"></canvas>
+    </div>
+    <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-5">
+      <h2 class="text-sm font-semibold mb-3">المبيعات (آخر 30 يوم)</h2>
+      <canvas id="sales-chart" height="90"></canvas>
+    </div>
+  </div>
+
+  {# --------------------------------------------------- Top lists + governorates #}
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+
+    <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-5">
+      <h2 class="text-sm font-semibold mb-3">أعلى الفئات مبيعًا (30 يوم)</h2>
+      <div class="flex flex-col gap-2 text-sm">
+        {% for row in dashboard.top_categories %}
+          <div class="flex justify-between">
+            <span>{{ row.name }}</span>
+            <span class="text-font-subtle-light dark:text-font-subtle-dark">{{ row.total }} · {{ row.orders }} طلب</span>
+          </div>
+        {% empty %}
+          <div class="text-font-subtle-light dark:text-font-subtle-dark">لا مبيعات بعد.</div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-5">
+      <h2 class="text-sm font-semibold mb-3">أعلى المتاجر أداءً (30 يوم)</h2>
+      <div class="flex flex-col gap-2 text-sm">
+        {% for row in dashboard.top_stores %}
+          <div class="flex justify-between">
+            <span>{{ row.name }}</span>
+            <span class="text-font-subtle-light dark:text-font-subtle-dark">{{ row.total }} · {{ row.orders }} طلب</span>
+          </div>
+        {% empty %}
+          <div class="text-font-subtle-light dark:text-font-subtle-dark">لا مبيعات بعد.</div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-5">
+      <h2 class="text-sm font-semibold mb-3">المحافظات النشطة (30 يوم)</h2>
+      <div class="flex flex-col gap-2">
+        {% for row in dashboard.active_governorates %}
+          <div class="text-xs">
+            <div class="flex justify-between mb-1">
+              <span>{{ row.name }}</span>
+              <span class="text-font-subtle-light dark:text-font-subtle-dark">{{ row.orders }}</span>
+            </div>
+            <div class="h-1.5 rounded-full bg-base-100 dark:bg-base-700 overflow-hidden">
+              {% if dashboard.active_governorates.0.orders %}
+                <div class="h-full rounded-full" style="width:{% widthratio row.orders dashboard.active_governorates.0.orders 100 %}%;background:var(--color-primary-600);"></div>
+              {% endif %}
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+
+  </div>
+
+</div>
+
+{{ dashboard.registrations_series|json_script:"registrations-series-data" }}
+{{ dashboard.sales_series|json_script:"sales-series-data" }}
+<script>
+(function () {
+  var style = getComputedStyle(document.documentElement);
+  var primary = style.getPropertyValue('--color-primary-600').trim();
+  var gridColor = style.getPropertyValue('--color-base-200').trim();
+
+  var regSeries = JSON.parse(document.getElementById('registrations-series-data').textContent);
+  var salesSeries = JSON.parse(document.getElementById('sales-series-data').textContent);
+
+  var commonScales = {
+    x: { grid: { display: false } },
+    y: { beginAtZero: true, grid: { color: gridColor } },
+  };
+
+  new Chart(document.getElementById('registrations-chart'), {
+    type: 'line',
+    data: {
+      labels: regSeries.map(function (d) { return d.date.slice(5); }),
+      datasets: [{
+        data: regSeries.map(function (d) { return d.value; }),
+        borderColor: primary, backgroundColor: primary, tension: 0.3, pointRadius: 0, fill: false,
+      }],
+    },
+    options: { plugins: { legend: { display: false } }, scales: commonScales },
+  });
+
+  new Chart(document.getElementById('sales-chart'), {
+    type: 'bar',
+    data: {
+      labels: salesSeries.map(function (d) { return d.date.slice(5); }),
+      datasets: [{ data: salesSeries.map(function (d) { return d.value; }), backgroundColor: primary }],
+    },
+    options: { plugins: { legend: { display: false } }, scales: commonScales },
+  });
+})();
+</script>
+{% endblock %}

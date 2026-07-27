@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Shopping Tester</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            min-height: 100vh;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .card {
+            background: white;
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2.2em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+        .subtitle {
+            color: rgba(255,255,255,0.85);
+            text-align: center;
+            margin-bottom: 25px;
+        }
+        h2 { margin-bottom: 15px; }
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 10px;
+            margin-bottom: 10px;
+            align-items: center;
+        }
+        input, select {
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 15px;
+        }
+        input:focus, select:focus { outline: none; border-color: #667eea; }
+        button {
+            padding: 12px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            color: white;
+        }
+        button.primary { background: #667eea; }
+        button.primary:hover { background: #5568d3; transform: translateY(-2px); }
+        button.success { background: #38ef7d; }
+        button.success:hover { background: #2dd36f; }
+        button.danger { background: #f45c43; }
+        button.danger:hover { background: #e14b33; }
+        button.warn { background: #f0a500; }
+        button.warn:hover { background: #d99000; }
+        .connection-status {
+            padding: 10px;
+            border-radius: 6px;
+            text-align: center;
+            font-weight: 600;
+            margin-bottom: 20px;
+        }
+        .connection-status.connected { background: #d4edda; color: #155724; }
+        .connection-status.disconnected { background: #f8d7da; color: #721c24; }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 15px;
+            margin-bottom: 10px;
+        }
+        .info-box {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+        .info-label { font-size: 0.85em; color: #666; margin-bottom: 5px; }
+        .info-value { font-size: 1.4em; font-weight: bold; color: #333; }
+        .now-showing-box {
+            background: #fff3cd;
+            border-left: 4px solid #f0a500;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            display: none;
+        }
+        .log {
+            background: #1e1e1e;
+            color: #00ff00;
+            padding: 15px;
+            border-radius: 8px;
+            height: 320px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+        }
+        .log-entry { margin: 5px 0; padding: 5px; border-left: 3px solid #00ff00; padding-left: 10px; }
+        .log-entry.error { border-left-color: #ff0000; color: #ff6b6b; }
+        .log-entry.success { border-left-color: #00ff00; color: #51cf66; }
+        .log-entry.info { border-left-color: #0099ff; color: #4dabf7; }
+        .log-entry.event { border-left-color: #f0a500; color: #ffd479; }
+        small { color: #888; display: block; margin-top: -6px; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>🔴 Live Shopping Tester</h1>
+    <div class="subtitle">Exercises the REST + WebSocket control channel only — no Agora account needed (video is never touched by this page or by Django).</div>
+
+    <div id="connectionStatus" class="connection-status disconnected">❌ Not connected to ws/live/</div>
+
+    <div class="card">
+        <h2>⚙️ Connection</h2>
+        <div class="controls">
+            <input type="text" id="baseUrl" value="http://localhost:8000">
+            <input type="text" id="token" placeholder="Auth Token (Bearer) — leave blank to watch anonymously">
+            <input type="text" id="sessionId" placeholder="Live Session ID">
+            <button class="primary" onclick="connectWs()">🔌 Connect WS</button>
+            <button class="danger" onclick="disconnectWs()">❌ Disconnect</button>
+        </div>
+        <small>Open this page in two tabs — one with the store owner's token, one anonymous or with a viewer's token — to watch events fan out live.</small>
+    </div>
+
+    <div class="card">
+        <div class="now-showing-box" id="nowShowingBox">
+            <strong>📺 Now showing:</strong> <span id="nowShowingText"></span>
+        </div>
+        <div class="stats">
+            <div class="info-box"><div class="info-label">Viewers</div><div class="info-value" id="viewerCount">--</div></div>
+            <div class="info-box"><div class="info-label">Likes</div><div class="info-value" id="likesCount">--</div></div>
+            <div class="info-box"><div class="info-label">Status</div><div class="info-value" id="sessionStatus">--</div></div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>🎬 Store Owner — Session Controls</h2>
+        <div class="controls">
+            <input type="text" id="newTitle" placeholder="Session title" value="My Live Show">
+            <button class="success" onclick="createSession(true)">🔴 Create &amp; Go Live</button>
+            <button class="primary" onclick="createSession(false)">🗓️ Create Scheduled</button>
+            <button class="warn" onclick="goLive()">▶️ Go Live</button>
+            <button class="danger" onclick="endSession()">⏹️ End Session</button>
+        </div>
+        <div class="controls">
+            <input type="number" id="queueItemIdInput" placeholder="Item ID">
+            <input type="number" id="queuePrice" placeholder="Price" step="0.01" value="100.00">
+            <input type="number" id="queueDeposit" placeholder="Deposit amount" step="0.01" value="20.00">
+            <button class="primary" onclick="addQueueItem()">➕ Add to Queue</button>
+        </div>
+        <div class="controls">
+            <input type="number" id="showQueueItemId" placeholder="Queue item ID to show now">
+            <button class="warn" onclick="nowShowing()">📺 Mark Now Showing (manual, 2-step)</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>🎯 Store Owner — One-Tap Show (from your existing catalog)</h2>
+        <div class="controls">
+            <button class="primary" onclick="loadCatalog()">🔄 Load My Catalog</button>
+        </div>
+        <div id="catalogList"></div>
+    </div>
+
+    <div class="card">
+        <h2>🆕 Store Owner — Quick Show (product NOT in the app yet)</h2>
+        <small>For something the seller is just holding up on camera — never added to the catalog before. Only title/price/deposit are required.</small>
+        <div class="controls">
+            <input type="text" id="quickTitle" placeholder="Product title (e.g. قميص أزرق)">
+            <input type="number" id="quickPrice" placeholder="Price" step="0.01" value="35.00">
+            <input type="number" id="quickDeposit" placeholder="Deposit amount" step="0.01" value="5.00">
+            <button class="success" onclick="quickShow()">⚡ Show Now (creates item automatically)</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>🛍️ Viewer — Reserve</h2>
+        <div class="controls">
+            <input type="number" id="reserveQueueItemId" placeholder="Queue item ID">
+            <input type="number" id="reserveQuantity" placeholder="Quantity" value="1">
+            <input type="file" id="reserveScreenshot" accept="image/*">
+            <button class="success" onclick="reserveItem()">🙋 Reserve (charges deposit)</button>
+        </div>
+        <div class="controls">
+            <button class="primary" onclick="likeSession()">❤️ Like</button>
+            <button class="primary" onclick="unlikeSession()">💔 Unlike</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>💬 Live Comments</h2>
+        <div class="controls">
+            <input type="text" id="commentInput" placeholder="Write a comment...">
+            <button class="success" onclick="postComment()">📤 Send</button>
+            <button class="primary" onclick="loadComments()">🔄 Load History</button>
+        </div>
+        <div class="log" id="comments" style="height: 180px; color: #fff; background: #2a2a3d;"></div>
+    </div>
+
+    <div class="card">
+        <h2>📋 Activity Log</h2>
+        <div class="log" id="log"></div>
+    </div>
+</div>
+
+<script>
+    let ws = null;
+
+    function base() { return document.getElementById('baseUrl').value.replace(/\/$/, ''); }
+    function sessionId() { return document.getElementById('sessionId').value; }
+    function token() { return document.getElementById('token').value; }
+
+    function log(message, type = 'info') {
+        const logDiv = document.getElementById('log');
+        const entry = document.createElement('div');
+        entry.className = `log-entry ${type}`;
+        const time = new Date().toLocaleTimeString();
+        entry.textContent = `[${time}] ${message}`;
+        logDiv.insertBefore(entry, logDiv.firstChild);
+    }
+
+    function authHeaders(extra) {
+        const headers = Object.assign({}, extra);
+        if (token()) headers['Authorization'] = `Bearer ${token()}`;
+        return headers;
+    }
+
+    async function api(path, options = {}) {
+        const response = await fetch(`${base()}${path}`, options);
+        let data;
+        try { data = await response.json(); } catch (e) { data = null; }
+        return { status: response.status, data };
+    }
+
+    function updateConnectionStatus(connected) {
+        const el = document.getElementById('connectionStatus');
+        el.className = `connection-status ${connected ? 'connected' : 'disconnected'}`;
+        el.textContent = connected ? '✅ Connected to ws/live/' : '❌ Not connected to ws/live/';
+    }
+
+    function connectWs() {
+        if (!sessionId()) { log('Enter a session ID first', 'error'); return; }
+        if (ws && ws.readyState === WebSocket.OPEN) { log('Already connected', 'error'); return; }
+
+        const wsBase = base().replace('http://', 'ws://').replace('https://', 'wss://');
+        const url = token()
+            ? `${wsBase}/ws/live/${sessionId()}/?token=${encodeURIComponent(token())}`
+            : `${wsBase}/ws/live/${sessionId()}/`;
+        log(`Connecting to ${url}...`, 'info');
+        ws = new WebSocket(url);
+
+        ws.onopen = () => { log('✅ WebSocket connected', 'success'); updateConnectionStatus(true); };
+        ws.onerror = () => { log('❌ WebSocket error', 'error'); };
+        ws.onclose = () => { log('🔌 WebSocket disconnected', 'info'); updateConnectionStatus(false); };
+
+        ws.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            log(`📡 ${msg.type}: ${JSON.stringify(msg.data)}`, 'event');
+            handleEvent(msg);
+        };
+    }
+
+    function disconnectWs() {
+        if (ws) { ws.close(); ws = null; }
+    }
+
+    function handleEvent(msg) {
+        if (msg.type === 'viewer_count') {
+            document.getElementById('viewerCount').textContent = msg.data.current_viewer_count;
+        } else if (msg.type === 'like_update') {
+            document.getElementById('likesCount').textContent = msg.data.likes_count;
+        } else if (msg.type === 'product_now_showing') {
+            const box = document.getElementById('nowShowingBox');
+            box.style.display = 'block';
+            document.getElementById('nowShowingText').textContent =
+                `#${msg.data.queue_item_id} — ${msg.data.item_title} — price ${msg.data.price}, deposit ${msg.data.deposit_amount}`;
+        } else if (msg.type === 'item_reserved') {
+            log(`🙋 Reserved by ${msg.data.buyer_username}, ${msg.data.remaining_quantity} left`, 'success');
+        } else if (msg.type === 'item_sold_out') {
+            log(`🚫 Queue item #${msg.data.queue_item_id} sold out`, 'error');
+        } else if (msg.type === 'stream_started') {
+            document.getElementById('sessionStatus').textContent = 'live';
+        } else if (msg.type === 'stream_ended') {
+            document.getElementById('sessionStatus').textContent = 'ended';
+            document.getElementById('nowShowingBox').style.display = 'none';
+        } else if (msg.type === 'comment_posted') {
+            appendComment(msg.data);
+        } else if (msg.type === 'comment_deleted') {
+            const el = document.getElementById(`comment-${msg.data.comment_id}`);
+            if (el) el.remove();
+        }
+    }
+
+    async function createSession(startImmediately) {
+        const title = document.getElementById('newTitle').value;
+        const body = new FormData();
+        body.append('title', title);
+        body.append('start_immediately', startImmediately ? 'true' : 'false');
+
+        const { status, data } = await api('/api/live-sessions/', {
+            method: 'POST', headers: authHeaders({}), body,
+        });
+
+        if (data && data.success) {
+            document.getElementById('sessionId').value = data.data.id;
+            document.getElementById('sessionStatus').textContent = data.data.status;
+            log(`✅ Session #${data.data.id} created (${data.data.status})`, 'success');
+        } else {
+            log(`❌ [${status}] ${JSON.stringify(data)}`, 'error');
+        }
+    }
+
+    async function goLive() {
+        const { status, data } = await api(`/api/live-sessions/${sessionId()}/go_live/`, {
+            method: 'POST', headers: authHeaders({}),
+        });
+        log(status === 200 ? `✅ Now live` : `❌ [${status}] ${JSON.stringify(data)}`, status === 200 ? 'success' : 'error');
+        if (data && data.data) document.getElementById('sessionStatus').textContent = data.data.status;
+    }
+
+    async function endSession() {
+        const { status, data } = await api(`/api/live-sessions/${sessionId()}/end-session/`, {
+            method: 'POST', headers: authHeaders({}),
+        });
+        log(status === 200 ? `✅ Session ended` : `❌ [${status}] ${JSON.stringify(data)}`, status === 200 ? 'success' : 'error');
+    }
+
+    async function addQueueItem() {
+        const body = new URLSearchParams({
+            item_id: document.getElementById('queueItemIdInput').value,
+            price: document.getElementById('queuePrice').value,
+            deposit_amount: document.getElementById('queueDeposit').value,
+        });
+        const { status, data } = await api(`/api/live-sessions/${sessionId()}/queue-items/`, {
+            method: 'POST',
+            headers: authHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
+            body,
+        });
+        if (data && data.success) {
+            log(`✅ Queued entry #${data.data.id} for item ${data.data.item.id}`, 'success');
+            document.getElementById('showQueueItemId').value = data.data.id;
+            document.getElementById('reserveQueueItemId').value = data.data.id;
+        } else {
+            log(`❌ [${status}] ${JSON.stringify(data)}`, 'error');
+        }
+    }
+
+    async function nowShowing() {
+        const body = new URLSearchParams({ queue_item_id: document.getElementById('showQueueItemId').value });
+        const { status, data } = await api(`/api/live-sessions/${sessionId()}/now-showing/`, {
+            method: 'POST',
+            headers: authHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
+            body,
+        });
+        log(status === 200 ? `✅ Now showing updated` : `❌ [${status}] ${JSON.stringify(data)}`, status === 200 ? 'success' : 'error');
+    }
+
+    async function reserveItem() {
+        const fileInput = document.getElementById('reserveScreenshot');
+        if (!fileInput.files.length) { log('Choose a screenshot image first', 'error'); return; }
+
+        const body = new FormData();
+        body.append('queue_item_id', document.getElementById('reserveQueueItemId').value);
+        body.append('quantity', document.getElementById('reserveQuantity').value || '1');
+        body.append('screenshot', fileInput.files[0]);
+
+        const { status, data } = await api(`/api/live-sessions/${sessionId()}/reserve/`, {
+            method: 'POST', headers: authHeaders({}), body,
+        });
+        log(status === 201 ? `✅ Reserved! Reservation #${data.data.id}, deposit ${data.data.deposit_amount}` : `❌ [${status}] ${JSON.stringify(data)}`,
+            status === 201 ? 'success' : 'error');
+    }
+
+    async function likeSession() {
+        const { status, data } = await api(`/api/live-sessions/${sessionId()}/like/`, { method: 'POST', headers: authHeaders({}) });
+        log(status === 200 ? `❤️ likes_count=${data.likes_count}` : `❌ [${status}] ${JSON.stringify(data)}`, status === 200 ? 'success' : 'error');
+    }
+
+    async function unlikeSession() {
+        const { status, data } = await api(`/api/live-sessions/${sessionId()}/unlike/`, { method: 'POST', headers: authHeaders({}) });
+        log(status === 200 ? `💔 likes_count=${data.likes_count}` : `❌ [${status}] ${JSON.stringify(data)}`, status === 200 ? 'success' : 'error');
+    }
+
+    async function loadCatalog() {
+        const { status, data } = await api(`/api/live-sessions/${sessionId()}/catalog/`, { headers: authHeaders({}) });
+        const listEl = document.getElementById('catalogList');
+        listEl.innerHTML = '';
+
+        if (status !== 200) { log(`❌ [${status}] ${JSON.stringify(data)}`, 'error'); return; }
+
+        data.data.forEach(row => {
+            const box = document.createElement('div');
+            box.className = 'info-box';
+            box.style.marginBottom = '8px';
+            box.innerHTML = `
+                <strong>${row.title}</strong> (item #${row.item_id}) — qty ${row.quantity}<br>
+                suggested price: ${row.suggested_price ?? '—'}, deposit: ${row.suggested_deposit_amount ?? '—'}<br>
+                session status: <em>${row.session_status}</em>
+                <button class="warn" style="margin-top:6px" onclick="showItem(${row.item_id})">📺 Show now (1 tap)</button>
+            `;
+            listEl.appendChild(box);
+        });
+        log(`Loaded ${data.data.length} catalog item(s)`, 'info');
+    }
+
+    async function showItem(itemId) {
+        const body = new URLSearchParams({ item_id: itemId });
+        const { status, data } = await api(`/api/live-sessions/${sessionId()}/show-item/`, {
+            method: 'POST',
+            headers: authHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
+            body,
+        });
+        if (status === 200) {
+            log(`✅ Showing item ${itemId} now — queue entry #${data.data.id}`, 'success');
+            document.getElementById('reserveQueueItemId').value = data.data.id;
+        } else {
+            log(`❌ [${status}] ${JSON.stringify(data)}`, 'error');
+        }
+    }
+
+    async function quickShow() {
+        const body = new URLSearchParams({
+            title: document.getElementById('quickTitle').value,
+            price: document.getElementById('quickPrice').value,
+            deposit_amount: document.getElementById('quickDeposit').value,
+        });
+        const { status, data } = await api(`/api/live-sessions/${sessionId()}/quick-show/`, {
+            method: 'POST',
+            headers: authHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
+            body,
+        });
+        if (status === 201) {
+            log(`⚡ New item "${data.data.item.name}" created and showing now — queue entry #${data.data.id}`, 'success');
+            document.getElementById('reserveQueueItemId').value = data.data.id;
+        } else {
+            log(`❌ [${status}] ${JSON.stringify(data)}`, 'error');
+        }
+    }
+
+    function appendComment(c) {
+        const box = document.getElementById('comments');
+        const entry = document.createElement('div');
+        entry.className = 'log-entry info';
+        entry.id = `comment-${c.id}`;
+        entry.innerHTML = `<strong>${c.username}</strong>: ${c.content} <button onclick="deleteComment(${c.id})" style="float:right;padding:2px 8px;">🗑️</button>`;
+        box.appendChild(entry);
+        box.scrollTop = box.scrollHeight;
+    }
+
+    async function loadComments() {
+        const { status, data } = await api(`/api/live-sessions/${sessionId()}/comments/`, { headers: authHeaders({}) });
+        if (status !== 200) { log(`❌ [${status}] ${JSON.stringify(data)}`, 'error'); return; }
+        document.getElementById('comments').innerHTML = '';
+        data.data.forEach(appendComment);
+    }
+
+    async function postComment() {
+        const input = document.getElementById('commentInput');
+        const body = new URLSearchParams({ content: input.value });
+        const { status, data } = await api(`/api/live-sessions/${sessionId()}/comments/`, {
+            method: 'POST',
+            headers: authHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
+            body,
+        });
+        if (status === 201) {
+            input.value = '';
+        } else {
+            log(`❌ [${status}] ${JSON.stringify(data)}`, 'error');
+        }
+    }
+
+    async function deleteComment(commentId) {
+        const { status, data } = await api(`/api/live-sessions/${sessionId()}/comments/${commentId}/`, {
+            method: 'DELETE', headers: authHeaders({}),
+        });
+        if (status !== 200) log(`❌ [${status}] ${JSON.stringify(data)}`, 'error');
+    }
+
+    log('Tester ready. Create a session, connect the WebSocket, then queue/show/reserve items.', 'info');
+</script>
+</body>
+</html>

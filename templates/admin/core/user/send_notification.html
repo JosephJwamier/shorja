@@ -1,0 +1,45 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+<div class="max-w-2xl">
+  <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-6">
+    <h1 class="text-lg font-semibold mb-2">إرسال إشعار إلى {{ queryset|length }} مستخدم</h1>
+    <p class="text-sm text-font-subtle-light dark:text-font-subtle-dark mb-4">
+      يُحفظ الإشعار داخل التطبيق فورًا، ويُرسل كإشعار push لمن لديه جهاز مسجَّل.
+    </p>
+
+    <ul class="text-sm mb-4 list-disc list-inside text-font-subtle-light dark:text-font-subtle-dark max-h-40 overflow-y-auto">
+      {% for user in queryset %}
+        <li>{{ user.username }}</li>
+      {% endfor %}
+    </ul>
+
+    <form method="post">
+      {% csrf_token %}
+      {% for user in queryset %}
+        <input type="hidden" name="{{ action_checkbox_name }}" value="{{ user.pk }}">
+      {% endfor %}
+      <input type="hidden" name="action" value="send_notification_action">
+      <input type="hidden" name="apply" value="1">
+
+      <label class="block text-sm font-medium mb-2" for="notif_title">العنوان</label>
+      <input type="text" name="notif_title" id="notif_title" required
+             class="w-full rounded-default border border-base-200 dark:border-base-700 bg-base-50 dark:bg-base-900 px-3 py-2 text-sm mb-4">
+
+      <label class="block text-sm font-medium mb-2" for="notif_body">النص</label>
+      <textarea name="notif_body" id="notif_body" rows="4" required
+                class="w-full rounded-default border border-base-200 dark:border-base-700 bg-base-50 dark:bg-base-900 px-3 py-2 text-sm mb-4"></textarea>
+
+      <div class="flex gap-3">
+        <button type="submit" class="px-5 py-2.5 rounded-default text-white text-sm font-semibold" style="background:var(--color-primary-600);">
+          إرسال
+        </button>
+        <a href="{% url 'admin:core_user_changelist' %}" class="px-5 py-2.5 rounded-default border border-base-200 dark:border-base-700 text-sm font-semibold">
+          إلغاء
+        </a>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

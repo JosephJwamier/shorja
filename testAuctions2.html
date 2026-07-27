@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Auction Status Tester</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .card {
+            background: white;
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+        .status-banner {
+            padding: 30px;
+            border-radius: 12px;
+            text-align: center;
+            margin-bottom: 20px;
+            animation: slideIn 0.5s ease;
+        }
+        .status-banner.winning {
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            color: white;
+        }
+        .status-banner.losing {
+            background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
+            color: white;
+        }
+        .status-banner.no-bid {
+            background: linear-gradient(135deg, #ffd89b 0%, #19547b 100%);
+            color: white;
+        }
+        .status-icon {
+            font-size: 4em;
+            margin-bottom: 10px;
+            animation: bounce 1s infinite;
+        }
+        .status-title {
+            font-size: 2em;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .status-details {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        input {
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: border 0.3s;
+        }
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            color: white;
+        }
+        button.primary { background: #667eea; }
+        button.primary:hover { background: #5568d3; transform: translateY(-2px); }
+        button.success { background: #38ef7d; }
+        button.success:hover { background: #2dd36f; }
+        button.danger { background: #f45c43; }
+        button.danger:hover { background: #e14b33; }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .connection-status {
+            padding: 10px;
+            border-radius: 6px;
+            text-align: center;
+            font-weight: 600;
+            margin-bottom: 20px;
+        }
+        .connection-status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+        .connection-status.disconnected {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .auction-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+        .info-box {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+        .info-label {
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 5px;
+        }
+        .info-value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #333;
+        }
+        .log {
+            background: #1e1e1e;
+            color: #00ff00;
+            padding: 15px;
+            border-radius: 8px;
+            height: 300px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+        }
+        .log-entry {
+            margin: 5px 0;
+            padding: 5px;
+            border-left: 3px solid #00ff00;
+            padding-left: 10px;
+        }
+        .log-entry.error {
+            border-left-color: #ff0000;
+            color: #ff6b6b;
+        }
+        .log-entry.success {
+            border-left-color: #00ff00;
+            color: #51cf66;
+        }
+        .log-entry.info {
+            border-left-color: #0099ff;
+            color: #4dabf7;
+        }
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        @keyframes bounce {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-10px); }
+        }
+        .bid-history {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .bid-item {
+            padding: 10px;
+            margin: 5px 0;
+            background: #f8f9fa;
+            border-radius: 6px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .bid-item.winning {
+            background: #d4edda;
+            border-left: 4px solid #28a745;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔨 Live Auction Status Dashboard</h1>
+
+        <!-- Status Banner -->
+        <div id="statusBanner" class="status-banner no-bid" style="display: none;">
+            <div class="status-icon" id="statusIcon">👀</div>
+            <div class="status-title" id="statusTitle">Loading...</div>
+            <div class="status-details" id="statusDetails"></div>
+        </div>
+
+        <!-- Connection Status -->
+        <div id="connectionStatus" class="connection-status disconnected">
+            ❌ Disconnected from WebSocket
+        </div>
+
+        <div class="card">
+            <h2>⚙️ Controls</h2>
+            <div class="controls">
+                <input type="text" id="auctionId" placeholder="Auction ID" value="5">
+                <input type="text" id="token" placeholder="Auth Token (Bearer)">
+                <button class="primary" onclick="connect()">🔌 Connect</button>
+                <button class="danger" onclick="disconnect()">❌ Disconnect</button>
+                <button class="success" onclick="checkStatus()">🔄 Refresh Status</button>
+            </div>
+        </div>
+
+        <!-- Auction Info -->
+        <div class="card">
+            <h2>📊 Auction Information</h2>
+            <div class="auction-info" id="auctionInfo">
+                <div class="info-box">
+                    <div class="info-label">Current Price</div>
+                    <div class="info-value" id="currentPrice">--</div>
+                </div>
+                <div class="info-box">
+                    <div class="info-label">Your Highest Bid</div>
+                    <div class="info-value" id="yourBid">--</div>
+                </div>
+                <div class="info-box">
+                    <div class="info-label">Next Minimum Bid</div>
+                    <div class="info-value" id="minBid">--</div>
+                </div>
+                <div class="info-box">
+                    <div class="info-label">Total Bids</div>
+                    <div class="info-value" id="totalBids">--</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Bidding -->
+        <div class="card">
+            <h2>💰 Place Bid</h2>
+            <div class="controls">
+                <input type="number" id="bidAmount" placeholder="Bid Amount" step="0.01">
+                <button class="success" onclick="placeBid()">🔨 Place Bid</button>
+            </div>
+        </div>
+
+        <!-- Activity Log -->
+        <div class="card">
+            <h2>📋 Activity Log</h2>
+            <div class="log" id="log"></div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let statusCheckInterval = null;
+
+        function log(message, type = 'info') {
+            const logDiv = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            const time = new Date().toLocaleTimeString();
+            entry.textContent = `[${time}] ${message}`;
+            logDiv.insertBefore(entry, logDiv.firstChild);
+        }
+
+        function updateConnectionStatus(connected) {
+            const status = document.getElementById('connectionStatus');
+            if (connected) {
+                status.className = 'connection-status connected';
+                status.textContent = '✅ Connected to WebSocket';
+            } else {
+                status.className = 'connection-status disconnected';
+                status.textContent = '❌ Disconnected from WebSocket';
+            }
+        }
+
+        function updateStatusBanner(data) {
+            const banner = document.getElementById('statusBanner');
+            const icon = document.getElementById('statusIcon');
+            const title = document.getElementById('statusTitle');
+            const details = document.getElementById('statusDetails');
+
+            banner.style.display = 'block';
+
+            if (!data.has_bid) {
+                banner.className = 'status-banner no-bid';
+                icon.textContent = '👀';
+                title.textContent = 'You Haven\'t Bid Yet';
+                details.innerHTML = `Current price: $${data.current_price}<br>Minimum bid: $${data.minimum_bid}`;
+            } else if (data.is_winning) {
+                banner.className = 'status-banner winning';
+                icon.textContent = '🏆';
+                title.textContent = 'YOU\'RE WINNING!';
+                details.innerHTML = `Your bid: $${data.your_highest_bid}<br>Keep watching - others can still outbid you!`;
+
+                // Play victory sound (if you have one)
+                // new Audio('/sounds/winning.mp3').play();
+            } else {
+                banner.className = 'status-banner losing';
+                icon.textContent = '😢';
+                title.textContent = 'You\'ve Been Outbid';
+                details.innerHTML = `Your bid: $${data.your_highest_bid}<br>Current price: $${data.current_price}<br>You're $${data.amount_behind || '?'} behind`;
+            }
+        }
+
+        function updateAuctionInfo(data) {
+            document.getElementById('currentPrice').textContent = `$${data.current_price}`;
+            document.getElementById('yourBid').textContent = data.has_bid ? `$${data.your_highest_bid}` : '--';
+            document.getElementById('minBid').textContent = `$${data.minimum_next_bid}`;
+            document.getElementById('totalBids').textContent = data.total_bids;
+        }
+
+        async function checkStatus() {
+            const auctionId = document.getElementById('auctionId').value;
+            const token = document.getElementById('token').value;
+
+            if (!token) {
+                log('Please enter auth token', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch(`http://localhost:8000/api/auctions/${auctionId}/my_status/`, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+
+                const data = await response.json();
+                log(`Status checked: ${data.is_winning ? 'WINNING' : 'NOT WINNING'}`, data.is_winning ? 'success' : 'info');
+
+                updateStatusBanner(data);
+                updateAuctionInfo(data);
+
+            } catch (error) {
+                log(`Error checking status: ${error.message}`, 'error');
+            }
+        }
+
+        function connect() {
+            const auctionId = document.getElementById('auctionId').value;
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                log('Already connected', 'error');
+                return;
+            }
+
+            const url = `ws://localhost:8000/ws/auction/${auctionId}/`;
+            log(`Connecting to ${url}...`, 'info');
+
+            ws = new WebSocket(url);
+
+            ws.onopen = () => {
+                log('✅ WebSocket connected!', 'success');
+                updateConnectionStatus(true);
+                checkStatus();
+
+                // Auto-refresh status every 10 seconds
+                statusCheckInterval = setInterval(checkStatus, 10000);
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+
+                if (data.type === 'auction_state') {
+                    log('📊 Received auction state', 'info');
+                } else if (data.type === 'auction_update' && data.event === 'new_bid') {
+                    const d = data.data;
+                    log(`🔨 NEW BID: $${d.bid_amount} by ${d.bidder_username}`, 'success');
+
+                    // Refresh status to see if we're still winning
+                    setTimeout(checkStatus, 500);
+                }
+            };
+
+            ws.onerror = () => {
+                log('❌ WebSocket error', 'error');
+                updateConnectionStatus(false);
+            };
+
+            ws.onclose = () => {
+                log('🔌 WebSocket disconnected', 'info');
+                updateConnectionStatus(false);
+                if (statusCheckInterval) {
+                    clearInterval(statusCheckInterval);
+                }
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+                if (statusCheckInterval) {
+                    clearInterval(statusCheckInterval);
+                }
+            }
+        }
+
+        async function placeBid() {
+            const auctionId = document.getElementById('auctionId').value;
+            const token = document.getElementById('token').value;
+            const amount = document.getElementById('bidAmount').value;
+
+            if (!token || !amount) {
+                log('Please enter token and bid amount', 'error');
+                return;
+            }
+
+            try {
+                log(`Placing bid of $${amount}...`, 'info');
+
+                const response = await fetch(`http://localhost:8000/api/auctions/${auctionId}/place_bid/`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ amount: parseFloat(amount) })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    log(`✅ ${data.message}`, 'success');
+
+                    // Update status immediately
+                    setTimeout(checkStatus, 500);
+                } else {
+                    log(`❌ ${data.message}`, 'error');
+                }
+
+            } catch (error) {
+                log(`❌ Error: ${error.message}`, 'error');
+            }
+        }
+
+        // Initialize
+        log('Dashboard ready. Enter auction ID and token, then click Connect.', 'info');
+    </script>
+</body>
+</html>

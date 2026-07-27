@@ -1,0 +1,93 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+<div class="flex flex-col gap-6 max-w-2xl">
+
+  <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-6">
+    <h1 class="text-lg font-semibold mb-4">طلب سحب #{{ withdrawal.id }}</h1>
+    <dl class="grid grid-cols-2 gap-4 text-sm">
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">المستخدم</dt>
+        <dd><a class="text-primary-600 dark:text-primary-400" href="{% url 'admin:core_user_change' withdrawal.user_id %}">{{ withdrawal.user.username }}</a></dd>
+      </div>
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">المبلغ المطلوب</dt>
+        <dd class="font-semibold">{{ withdrawal.amount }}</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">البطاقة</dt>
+        <dd>•••• {{ withdrawal.card_last4|default:"—" }}</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">تاريخ الطلب</dt>
+        <dd>{{ withdrawal.created_at }}</dd>
+      </div>
+    </dl>
+  </div>
+
+  {% if wallet %}
+  <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-6">
+    <h2 class="text-sm font-semibold mb-3">محفظة المستخدم</h2>
+    <dl class="grid grid-cols-3 gap-4 text-sm">
+      <div><dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">الرصيد الكلي</dt><dd>{{ wallet.balance }}</dd></div>
+      <div><dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">المحجوز (يشمل هذا الطلب)</dt><dd>{{ wallet.held_balance }}</dd></div>
+      <div><dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">المتاح</dt><dd>{{ wallet.available_balance }}</dd></div>
+    </dl>
+  </div>
+  {% endif %}
+
+  <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-6">
+    <h2 class="text-sm font-semibold mb-4">القرار</h2>
+
+    {% if withdrawal.status != 'pending' %}
+      <p class="text-sm text-font-subtle-light dark:text-font-subtle-dark">
+        تمت مراجعة هذا الطلب بالفعل: {{ withdrawal.get_status_display }}
+        {% if withdrawal.reviewed_by %} بواسطة {{ withdrawal.reviewed_by.username }}{% endif %}
+        {% if withdrawal.reviewed_at %} بتاريخ {{ withdrawal.reviewed_at }}{% endif %}.
+      </p>
+      {% if withdrawal.admin_notes %}<p class="text-sm mt-2">{{ withdrawal.admin_notes }}</p>{% endif %}
+    {% else %}
+      <form method="post" id="review-form">
+        {% csrf_token %}
+        <div class="flex flex-col gap-4">
+          <div>
+            <label class="block text-sm font-medium mb-2" for="admin_notes">ملاحظات (إلزامية عند الرفض)</label>
+            <textarea name="admin_notes" id="admin_notes" rows="3"
+                      class="w-full rounded-default border border-base-200 dark:border-base-700 bg-base-50 dark:bg-base-900 px-3 py-2 text-sm"></textarea>
+          </div>
+          <div class="flex gap-3">
+            <button type="submit" name="decision" value="approve"
+                    class="px-5 py-2.5 rounded-default text-white text-sm font-semibold"
+                    style="background:#2E7D57;">
+              اعتماد وصرف المبلغ
+            </button>
+            <button type="submit" name="decision" value="reject" id="reject-button"
+                    class="px-5 py-2.5 rounded-default text-white text-sm font-semibold"
+                    style="background:#AC3A31;">
+              رفض وإعادة المبلغ
+            </button>
+          </div>
+        </div>
+      </form>
+      <script>
+        (function () {
+          document.getElementById('review-form').addEventListener('submit', function (e) {
+            var clicked = e.submitter && e.submitter.value;
+            var notes = document.getElementById('admin_notes').value.trim();
+            if (clicked === 'reject' && !notes) {
+              e.preventDefault();
+              alert('سبب الرفض إلزامي.');
+              return;
+            }
+            if (!confirm('تأكيد هذا القرار؟ سيُحرّك أموالًا فورًا.')) {
+              e.preventDefault();
+            }
+          });
+        })();
+      </script>
+    {% endif %}
+  </div>
+
+</div>
+{% endblock %}
