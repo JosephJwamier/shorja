@@ -10,8 +10,8 @@ from rest_framework.test import APIClient
 
 from core.models import (
     AuctionListing, Bid, Category, FixedPriceListing, Item, LiveSession,
-    LiveSessionComment, LiveSessionItem, LiveSessionLike, Reservation, User,
-    get_or_create_wallet,
+    LiveSessionComment, LiveSessionItem, LiveSessionLike, Location, Reservation,
+    User, get_or_create_wallet,
 )
 from core.models import UserStore
 from core.tasks import finalize_live_auction
@@ -107,7 +107,12 @@ def category():
 
 @pytest.fixture
 def buyer():
-    return make_user('buyer')
+    user = make_user('buyer')
+    Location.objects.create(
+        user=user, name='home', address_line1='x', city='Baghdad', state='بغداد',
+        country='Iraq', contact_person='p', contact_phone='1',
+    )
+    return user
 
 
 def auth(client, user):
@@ -206,6 +211,26 @@ def test_reserve_happy_path_debits_wallet_and_decrements_stock(client, owner, st
 
     wallet = get_or_create_wallet(buyer)
     assert wallet.balance == Decimal('980.00')
+
+
+def test_reserve_rejects_when_buyer_has_no_delivery_address(client, owner, store, category):
+    buyer_without_address = make_user('buyer_no_address')
+    session = make_session(store, status='live')
+    item = make_item(owner, category, quantity=5)
+    entry = make_queue_item(session, item, price='100.00', deposit='20.00')
+    fund_wallet(buyer_without_address, '1000.00')
+    auth(client, buyer_without_address)
+
+    response = client.post(
+        f'/api/live-sessions/{session.id}/reserve/',
+        {'queue_item_id': entry.id, 'quantity': 1, 'screenshot': make_screenshot()},
+        format='multipart',
+    )
+
+    assert response.status_code == 400
+    item.refresh_from_db()
+    assert item.quantity == 5
+    assert not Reservation.objects.filter(item=item).exists()
 
 
 def test_reserve_rejects_item_not_currently_showing(client, owner, store, category, buyer):

@@ -538,9 +538,24 @@ def notify_new_message(message):
     ReSell Trust Team
     """
 
-    NotificationService.send_email(recipient.email, subject, email_message)
+    # الدفع (FCM) أولاً: هذه الدالة تُستدعى من داخل ChatConsumer.receive أثناء
+    # جلسة محادثة حيّة، والبريد الإلكتروني (SMTP) قد يستغرق ثوانٍ — استدعاؤه
+    # قبل الدفع كان يؤخّر وصول الإشعار الفوري على الجوال بلا داعٍ، رغم أن لا
+    # أحد ينتظر البريد بنفس السرعة.
+    #
+    # الحقول الإضافية (content/message_type/created_at) تتيح لتطبيق الجوال
+    # (ChatsProvider.handleIncomingMessagePush) تحديث صف المحادثة في القائمة
+    # محلياً فوراً من حمولة FCM نفسها، بدل طلب REST كامل لإعادة تحميل القائمة
+    # بعد وصول كل إشعار — يحذف جولة شبكة كاملة من زمن الوصول المُدرَك.
     notify_push(recipient, subject, f"New message from {message.sender.username}: {message.content[:80]}",
-                data={'type': 'new_message', 'chat_id': str(message.chat.id)})
+                data={
+                    'type': 'new_message',
+                    'chat_id': str(message.chat.id),
+                    'content': message.content,
+                    'message_type': message.message_type,
+                    'created_at': message.created_at.isoformat(),
+                })
+    NotificationService.send_email(recipient.email, subject, email_message)
 
 
 def notify_dispute_created(dispute):
