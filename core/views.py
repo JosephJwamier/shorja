@@ -8,6 +8,7 @@ from .wallet_utils import credit_earnings, debit_balance, release_reservation_pa
 from .services.disputes import resolve_dispute, DisputeResolutionError
 from .services.withdrawals import approve_withdrawal, reject_withdrawal, WithdrawalReviewError
 from .services.support import start_support_chat
+from .services.moderation import archive_item
 
 logger = logging.getLogger(__name__)
 from .models import get_or_create_wallet
@@ -160,6 +161,17 @@ class UserViewSet(viewsets.ModelViewSet):
         if self.request.user.is_staff:
             return User.objects.all()
         return User.objects.filter(id=self.request.user.id)
+
+    def destroy(self, request, *args, **kwargs):
+        # A raw hard-delete here would CASCADE through owned_items and
+        # everything that in turn references those items (reservations,
+        # disputes, delivery orders, transfers...) — including other users'
+        # records. Account removal must go through delete-account, which
+        # deactivates + scrubs PII instead of deleting the row.
+        return Response({
+            'success': False,
+            'message': 'لا يمكن حذف الحساب مباشرة. استخدم /users/delete-account/ لحذف حسابك.'
+        }, status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
     @action(detail=False, methods=['get'])
     def me(self, request):
@@ -314,6 +326,27 @@ class ItemViewSet(viewsets.ModelViewSet):
         if self.action in ('update', 'partial_update', 'destroy'):
             return [IsAuthenticated(), IsOwnerOrReadOnly()]
         return super().get_permissions()
+
+    def destroy(self, request, *args, **kwargs):
+        # Never hard-delete: Item is CASCADE-referenced by Reservation,
+        # ItemTransfer, Dispute (via Reservation), DeliveryOrder (via
+        # Reservation), ProductReview, Chat and more — a real delete would
+        # silently wipe financial/legal history tied to this listing. Reuse
+        # the same archive_item() the admin moderation action calls, so a
+        # seller "deleting" their own item behaves identically to an admin
+        # archiving it (item.status='archived', pulled from listings, and
+        # every other model just sees the item it already knows about).
+        item = self.get_object()
+
+        if item.status != 'archived':
+            reason = (request.data.get('reason') or '').strip() or 'حذف بواسطة المالك عبر التطبيق'
+            archive_item(item, reason=reason, actor=request.user)
+
+        return Response({
+            'success': True,
+            'message': 'تم حذف المنتج بنجاح',
+            'data': None,
+        })
 
     def perform_update(self, serializer):
         """
@@ -1039,6 +1072,8 @@ from .notifications import (
     notify_cash_collected,
     notify_auction_won,
     notify_dispute_created,
+    notify_new_message,
+    notify_push,
 )
 from .models import DeliveryOrder
 from .serializers import DeliveryOrderSerializer
@@ -2530,6 +2565,12 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 else:
                     delivery_location = Location.objects.filter(user=request.user).first()
 
+                if not delivery_location:
+                    return Response({
+                        'success': False,
+                        'message': 'Please add a delivery address before reserving an item'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
                 reservation = Reservation.objects.create(
                     item=item,
                     buyer=request.user,
@@ -2665,7 +2706,9 @@ def _mark_reservation_received(reservation):
     release_reservation_payment(reservation)
 
 
-class ReservationViewSet(viewsets.ModelViewSet):
+class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
+                          mixins.UpdateModelMixin, mixins.ListModelMixin,
+                          viewsets.GenericViewSet):
     """
     Manage reservations for regular items and resale items
 
@@ -2674,6 +2717,11 @@ class ReservationViewSet(viewsets.ModelViewSet):
     - Automatic commission calculation
     - Payment distribution to original owner and reseller
     """
+    # No DestroyModelMixin — a reservation is cancelled (see the `cancel`
+    # action below), never deleted: hard-deleting it would CASCADE-wipe any
+    # linked Dispute/DeliveryOrder rows (see Dispute.reservation and
+    # DeliveryOrder.reservation), destroying financial/legal history. Same
+    # pattern as LiveSessionViewSet above.
     queryset = Reservation.objects.all()
     serializer_class = ReservationSerializer
     permission_classes = [IsAuthenticated]
@@ -2947,6 +2995,12 @@ class ReservationViewSet(viewsets.ModelViewSet):
         Pass `payment_type` as `"deposit"` to pay only the deposit now (the
         remainder is collected in cash at delivery, outside the app), or
         `"full"` (default) to pay the entire price now.
+
+        If the reservation has no delivery address yet (e.g. an auction win,
+        whose Reservation is created automatically with no address on file),
+        pass `delivery_location_id` to attach one of the buyer's saved
+        locations in the same call. Required in that case — otherwise this
+        returns 400.
         """
     )
     @action(detail=True, methods=['post'])
@@ -2971,6 +3025,24 @@ class ReservationViewSet(viewsets.ModelViewSet):
                 'success': False,
                 'message': 'Reservation has expired'
             }, status=status.HTTP_400_BAD_REQUEST)
+
+        if not reservation.delivery_location_id:
+            delivery_location_id = request.data.get('delivery_location_id')
+            if not delivery_location_id:
+                return Response({
+                    'success': False,
+                    'message': 'Please add a delivery address before completing this reservation'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                reservation.delivery_location = Location.objects.get(
+                    id=delivery_location_id, user=request.user
+                )
+            except Location.DoesNotExist:
+                return Response({
+                    'success': False,
+                    'message': 'Delivery location not found or does not belong to you'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            reservation.save(update_fields=['delivery_location'])
 
         payment_type = request.data.get('payment_type', 'full')
         if payment_type not in ('full', 'deposit'):
@@ -3027,6 +3099,52 @@ class ReservationViewSet(viewsets.ModelViewSet):
                 'message': 'Failed to complete reservation',
                 'errors': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @swagger_auto_schema(
+        operation_description="Buyer changes the delivery address on their own reservation. "
+                               "Only allowed before the seller hands it off to the delivery "
+                               "company (see send_to_delivery) — once an outbound delivery "
+                               "order exists, the address is locked."
+    )
+    @action(detail=True, methods=['post'], url_path='update-delivery-location')
+    def update_delivery_location(self, request, pk=None):
+        reservation = self.get_object()
+
+        if reservation.buyer != request.user:
+            return Response({
+                'success': False,
+                'message': 'Only the buyer can change the delivery address'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        if reservation.delivery_orders.filter(direction='outbound').exists():
+            return Response({
+                'success': False,
+                'message': 'This reservation was already sent to delivery — the address can no longer be changed'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        delivery_location_id = request.data.get('delivery_location_id')
+        if not delivery_location_id:
+            return Response({
+                'success': False,
+                'message': 'delivery_location_id is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            location = Location.objects.get(id=delivery_location_id, user=request.user)
+        except Location.DoesNotExist:
+            return Response({
+                'success': False,
+                'message': 'Delivery location not found or does not belong to you'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        reservation.delivery_location = location
+        reservation.save(update_fields=['delivery_location'])
+
+        return Response({
+            'success': True,
+            'message': 'Delivery address updated',
+            'data': ReservationSerializer(reservation, context={'request': request}).data
+        }, status=status.HTTP_200_OK)
 
     @swagger_auto_schema(
         operation_description="Approve and release payment to the seller"
@@ -3750,6 +3868,15 @@ class DisputeViewSet(viewsets.ModelViewSet):
             Q(complainant=self.request.user) |
             Q(defendant=self.request.user)
         )
+
+    def destroy(self, request, *args, **kwargs):
+        # Disputes are a legal/audit record for both parties — neither the
+        # complainant, the defendant, nor staff may erase one. resolve()
+        # (admin-only) is the only way a dispute is ever closed out.
+        return Response({
+            'success': False,
+            'message': 'لا يمكن حذف النزاع. يتم إغلاقه فقط عبر قرار الإدارة (resolve).'
+        }, status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
     @swagger_auto_schema(
         operation_description="Create a dispute for an item or reservation",
@@ -4594,6 +4721,15 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
             return ResaleRejectSerializer
         return ItemTransferSerializer
 
+    def destroy(self, request, *args, **kwargs):
+        # A hard delete here would CASCADE every StorageFeePayment tied to
+        # this agreement — real financial records. reject/cancel already
+        # end the agreement via status without erasing that history.
+        return Response({
+            'success': False,
+            'message': 'لا يمكن حذف اتفاقية النقل نهائيًا. استخدم reject أو cancel لإنهائها.'
+        }, status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
     # ==================== WHOLESALE TRANSFER ENDPOINTS ====================
 
     @action(detail=False, methods=['post'])
@@ -4790,7 +4926,20 @@ class ChatViewSet(viewsets.ModelViewSet):
                     Q(seller=user, is_archived_by_seller=True)
                 )
 
-        return queryset
+        # صراحةً بدل الاتكال على Chat.Meta.ordering فقط — الأحدث نشاطاً أولاً
+        # (Message.save() يحدّث chat.updated_at في كل رسالة)، حتى تبقى
+        # المحادثات النشطة بأعلى القائمة كما تتوقّع شاشة "المحادثات".
+        return queryset.order_by('-updated_at')
+
+    def destroy(self, request, *args, **kwargs):
+        # A hard delete here would CASCADE every Message in the thread for
+        # BOTH parties, not just the caller. archive/unarchive already give
+        # each side their own "remove from my inbox" without touching the
+        # other party's copy.
+        return Response({
+            'success': False,
+            'message': 'لا يمكن حذف المحادثة نهائيًا. استخدم أرشفة المحادثة (archive) لإخفائها من قائمتك.'
+        }, status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
     def get_serializer_class(self):
         if self.action == 'retrieve':
@@ -5041,6 +5190,15 @@ class ChatViewSet(viewsets.ModelViewSet):
             except Exception:
                 pass
 
+            # الإشعار الفعلي (FCM + بريد) — send_websocket_notification أعلاه
+            # يبث فقط إلى ws/notifications/ الذي لا يستمع له تطبيق الجوال
+            # حالياً (الإشعارات هناك تعتمد على FCM حصراً)، فبدونه لا يصل أي
+            # إشعار لرسائل الصور إطلاقاً.
+            try:
+                notify_new_message(message)
+            except Exception as e:
+                logger.error(f"Failed to send push notification for image message: {e}")
+
             # Push into the live WebSocket group so a connected participant
             # sees it immediately (the socket itself can't carry the upload).
             response_data = MessageSerializer(message, context={'request': request}).data
@@ -5143,6 +5301,12 @@ class ChatViewSet(viewsets.ModelViewSet):
             except Exception as e:
                 logger.error(f"Failed to send offer notification: {e}", exc_info=True)
 
+            # الإشعار الفعلي (FCM + بريد) — انظر التعليق في send_message أعلاه
+            try:
+                notify_new_message(message)
+            except Exception as e:
+                logger.error(f"Failed to send push notification for offer message: {e}")
+
             return Response({
                 'success': True,
                 'message': 'Offer sent',
@@ -5195,6 +5359,10 @@ class ChatViewSet(viewsets.ModelViewSet):
             qs = qs.filter(is_deleted_by_receiver=False)
         elif request.user == chat.seller:
             qs = qs.exclude(sender=chat.buyer, is_deleted_by_receiver=True)
+        # A message the viewer sent and then deleted (destroy() sets
+        # is_deleted_by_sender) must stay hidden from *their own* view on
+        # every subsequent fetch, regardless of buyer/seller role above.
+        qs = qs.exclude(sender=request.user, is_deleted_by_sender=True)
 
         before = request.query_params.get('before')
         if before:
@@ -5447,16 +5615,38 @@ class MessageViewSet(viewsets.ModelViewSet):
                 logger.error(f"Error broadcasting offer-accepted message: {str(e)}")
 
             # Notify buyer
+            offer_accepted_title = 'تم قبول عرضك'
+            offer_accepted_body = (
+                f'وافق البائع على عرضك بقيمة {message.offer_amount} '
+                f'لمنتج "{message.chat.item.title if message.chat.item else ""}".'
+            )
             try:
                 send_websocket_notification(
                     user_id=message.chat.buyer_id,
                     notification_type='offer_accepted',
-                    title='تم قبول عرضك',
-                    message=f'وافق البائع على عرضك بقيمة {message.offer_amount} لمنتج "{message.chat.item.title if message.chat.item else ""}".',
+                    title=offer_accepted_title,
+                    message=offer_accepted_body,
                     data={'chat_id': message.chat_id, 'message_id': message.id}
                 )
             except Exception as e:
                 logger.error(f"Failed to send offer accepted notification: {e}", exc_info=True)
+
+            # الإشعار الفعلي (FCM + بريد) — انظر التعليق في send_message أعلاه.
+            # system_message مُرسلها None فلا يمكن استخدام notify_new_message
+            # مباشرة (تفترض مُرسلاً حقيقياً)، لذا نستدعي notify_push مباشرة.
+            try:
+                notify_push(
+                    message.chat.buyer, offer_accepted_title, offer_accepted_body,
+                    data={
+                        'type': 'new_message',
+                        'chat_id': str(message.chat_id),
+                        'content': system_message.content,
+                        'message_type': system_message.message_type,
+                        'created_at': system_message.created_at.isoformat(),
+                    },
+                )
+            except Exception as e:
+                logger.error(f"Failed to send offer accepted push: {e}")
 
             return Response({
                 'success': True,
@@ -5519,6 +5709,25 @@ class MessageViewSet(viewsets.ModelViewSet):
             except Exception as e:
                 logger.error(f"Error broadcasting offer-rejected message: {str(e)}")
 
+            # الإشعار الفعلي (FCM + بريد) للمشتري — لم يكن هناك أي إشعار على
+            # الإطلاق عند رفض العرض (بعكس القبول أعلاه).
+            try:
+                notify_push(
+                    message.chat.buyer,
+                    'تم رفض عرضك',
+                    f'رفض البائع عرضك بقيمة {message.offer_amount} '
+                    f'لمنتج "{message.chat.item.title if message.chat.item else ""}".',
+                    data={
+                        'type': 'new_message',
+                        'chat_id': str(message.chat_id),
+                        'content': system_message.content,
+                        'message_type': system_message.message_type,
+                        'created_at': system_message.created_at.isoformat(),
+                    },
+                )
+            except Exception as e:
+                logger.error(f"Failed to send offer rejected push: {e}")
+
             return Response({
                 'success': True,
                 'message': 'Offer rejected',
@@ -5578,6 +5787,16 @@ class UserStoreViewSet(viewsets.ModelViewSet):
         elif self.action in ['update', 'partial_update']:
             return UserStoreUpdateSerializer
         return UserStoreSerializer
+
+    def destroy(self, request, *args, **kwargs):
+        # A hard delete here would CASCADE every StoreReview, StoreFollow,
+        # StoreCoupon (+ CouponCollection), LiveSession (+ its items/likes/
+        # comments) and Chat tied to this store. toggle_active already gives
+        # the owner a reversible "close my store" without wiping that history.
+        return Response({
+            'success': False,
+            'message': 'لا يمكن حذف المتجر نهائيًا. استخدم toggle_active لإغلاق المتجر مؤقتًا.'
+        }, status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
     @swagger_auto_schema(
         operation_description="""
@@ -6033,7 +6252,11 @@ class UserStoreViewSet(viewsets.ModelViewSet):
         coupon = get_object_or_404(StoreCoupon, pk=coupon_id, store=store)
 
         if request.method == 'DELETE':
-            coupon.delete()
+            # Soft-delete: CouponCollection CASCADEs from StoreCoupon, so a
+            # hard delete would silently wipe every customer's "collected"
+            # record for it. is_active=False just stops it being usable/listed.
+            coupon.is_active = False
+            coupon.save(update_fields=['is_active'])
             return Response({
                 'success': True,
                 'message': 'تم حذف الكوبون'
@@ -6665,6 +6888,18 @@ class RatingViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(rater=self.request.user)
 
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.rater != request.user:
+            return Response({'detail': 'لا يمكنك تعديل تقييم شخص آخر'}, status=status.HTTP_403_FORBIDDEN)
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.rater != request.user:
+            return Response({'detail': 'لا يمكنك حذف تقييم شخص آخر'}, status=status.HTTP_403_FORBIDDEN)
+        return super().destroy(request, *args, **kwargs)
+
 
 class ProductReviewViewSet(viewsets.ModelViewSet):
     """تقييمات المنتجات - نجوم وتعليق وصورة اختيارية"""
@@ -6799,6 +7034,17 @@ class CategoryViewSet(viewsets.ModelViewSet):  # Changed from ReadOnlyModelViewS
             else:
                 qs = qs.filter(parent_id=parent_param)
         return qs
+
+    def destroy(self, request, *args, **kwargs):
+        # A hard delete here would CASCADE every child category, and raise
+        # an unhandled ProtectedError (500) the moment any Item still
+        # references it (Item.category is on_delete=PROTECT). Soft-deleting
+        # matches the is_active flag every other list/detail view already
+        # filters on, so the category just stops appearing anywhere.
+        category = self.get_object()
+        category.is_active = False
+        category.save(update_fields=['is_active'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=['get'])
     def items(self, request, pk=None):
@@ -6962,10 +7208,14 @@ class AdminWithdrawalViewSet(viewsets.ReadOnlyModelViewSet):
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
+class NotificationViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet):
     """
     Notifications per user — persisted in DB, delivered via Firebase.
     The app fetches these on login to show missed notifications.
+
+    Nothing else references a Notification row, so unlike Item/Reservation/
+    Chat/etc. there's no cascade risk — a real hard delete is safe here, and
+    it was simply never wired up (the app had no way to clear one at all).
     """
     serializer_class = NotificationSerializer
     permission_classes = [IsAuthenticated]
@@ -6996,3 +7246,9 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
         """Return count of unread notifications"""
         count = self.get_queryset().filter(is_read=False).count()
         return Response({'unread_count': count})
+
+    @action(detail=False, methods=['delete'], url_path='clear-all')
+    def clear_all(self, request):
+        """Delete every notification for the current user"""
+        self.get_queryset().delete()
+        return Response({'status': 'ok'})

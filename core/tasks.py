@@ -1235,3 +1235,43 @@ def send_commission_paid_notification(reservation_id, representative_id):
         logger.error(f"Error notifying representative: {str(e)}")
         return None
 
+
+@shared_task
+def purge_archived_items(retention_days=365):
+    """
+    Permanently deletes Item rows that have sat archived (status='archived',
+    see ItemViewSet.destroy / archive_item) for at least `retention_days`.
+
+    Item is CASCADE-referenced by Reservation/ItemTransfer/Representative/
+    ProductReview/Chat/LiveSessionItem, and Reservation is in turn
+    CASCADE-referenced by Dispute/DeliveryOrder — so this only deletes items
+    with no reservation still open (pending/completed/disputed), no dispute
+    still open (open/investigating), and no delivery order still in flight
+    (assigned/picked_up/delivered). Anything mid-transaction is left alone
+    no matter how long ago it was archived; it'll be picked up on a later
+    run once it settles into a terminal state.
+    """
+    from .models import Item
+
+    cutoff_date = timezone.now() - timedelta(days=retention_days)
+
+    candidates = Item.objects.filter(
+        status='archived', updated_at__lt=cutoff_date
+    ).exclude(
+        reservations__status__in=['pending', 'completed', 'disputed']
+    ).exclude(
+        disputes__status__in=['open', 'investigating']
+    ).exclude(
+        reservations__delivery_orders__status__in=['assigned', 'picked_up', 'delivered']
+    ).distinct()
+
+    item_ids = list(candidates.values_list('id', flat=True))
+    if not item_ids:
+        logger.info("purge_archived_items: no items eligible for permanent deletion")
+        return "No items eligible"
+
+    deleted_count = Item.objects.filter(id__in=item_ids).delete()[0]
+    logger.info(f"purge_archived_items: permanently deleted {len(item_ids)} item(s) "
+                f"(ids={item_ids}), {deleted_count} row(s) total across related tables")
+    return f"Deleted {len(item_ids)} items"
+

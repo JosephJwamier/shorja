@@ -1470,6 +1470,9 @@ class ChatDetailSerializer(serializers.ModelSerializer):
                     sender=obj.buyer,
                     is_deleted_by_receiver=True
                 )
+            # A message the viewer sent and then deleted (destroy() sets
+            # is_deleted_by_sender) must stay hidden from their own view.
+            messages = messages.exclude(sender=request.user, is_deleted_by_sender=True)
 
         return messages
 

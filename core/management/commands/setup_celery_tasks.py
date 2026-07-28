@@ -37,6 +37,7 @@ class Command(BaseCommand):
             (daily_2am, 'calculate-trust-scores', 'core.tasks.calculate_user_trust_scores'),
             (sunday_3am, 'cleanup-old-messages', 'core.tasks.cleanup_old_messages'),
             (every_15_min, 'auto-end-stale-live-sessions', 'core.tasks.auto_end_stale_live_sessions'),
+            (sunday_3am, 'purge-archived-items', 'core.tasks.purge_archived_items'),
         ]
 
         for schedule, name, task in tasks:

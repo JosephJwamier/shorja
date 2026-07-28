@@ -338,6 +338,14 @@ class ItemAdmin(ModelAdmin):
         )
         return TemplateResponse(request, 'admin/core/item/archive_confirmation.html', context)
 
+    def has_delete_permission(self, request, obj=None):
+        # Item is CASCADE-referenced by Reservation, ItemTransfer, Dispute,
+        # DeliveryOrder (via Reservation), ProductReview, Chat, etc. — a hard
+        # delete from here would silently wipe that history. Use
+        # "أرشفة المنتجات المحددة" above instead (same status='archived' path
+        # the app's own delete button uses via archive_item()).
+        return False
+
 
 @admin.register(ItemLocationHistory)
 class ItemLocationHistoryAdmin(ModelAdmin):
@@ -426,6 +434,12 @@ class ReservationAdmin(ExportActionMixin, ModelAdmin):
     list_select_related = ('item', 'item__owner', 'buyer')
     resource_classes = [ReservationExportResource]
     export_form_class = SelectableFieldsExportForm
+
+    def has_delete_permission(self, request, obj=None):
+        # Reservation is CASCADE-referenced by Dispute and DeliveryOrder — a
+        # hard delete from here would silently wipe that history. Cancel it
+        # instead (status='cancelled'), same as ReservationViewSet.cancel.
+        return False
 
 
 @admin.register(Transaction)
