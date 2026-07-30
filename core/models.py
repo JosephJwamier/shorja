@@ -18,6 +18,12 @@ class User(AbstractUser):
     phone_verified = models.BooleanField(default=False)
     email_verified = models.BooleanField(default=False)
     identity_verified = models.BooleanField(default=False)
+    avatar = models.ImageField(upload_to='avatars/', null=True, blank=True)
+    bio = models.TextField(max_length=500, blank=True)
+    date_of_birth = models.DateField(null=True, blank=True)
+    # Updated from ChatConsumer on connect/disconnect — see
+    # is_user_present_in_chat() for the live "online now" signal this backs.
+    last_seen_at = models.DateTimeField(null=True, blank=True)
     trust_score = models.DecimalField(
         max_digits=3,
         decimal_places=2,
@@ -425,6 +431,11 @@ class FixedPriceListing(models.Model):
     class Meta:
         verbose_name = 'قائمة سعر ثابت'
         verbose_name_plural = 'قوائم السعر الثابت'
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if self.original_price is not None and self.price is not None and self.price >= self.original_price:
+            raise ValidationError({'price': 'Price must be lower than the original price when a discount is set.'})
 
     def save(self, *args, **kwargs):
         self.deposit_amount = (self.price * self.deposit_percentage) / 100
@@ -1716,6 +1727,71 @@ class LiveSessionComment(models.Model):
         return f"{self.user.username}: {self.content[:40]}"
 
 
+class LiveSessionViewer(models.Model):
+    """Tracks which signed-in users have watched a live session, upserted by
+    LiveSessionConsumer on connect/disconnect. Anonymous viewers have no
+    identity to track here — they still count toward
+    LiveSession.current_viewer_count, they just can't appear in this list.
+    active_connections counts simultaneous open sockets (multiple tabs/
+    devices) so closing one doesn't flip is_watching off while another from
+    the same user is still connected."""
+    session = models.ForeignKey(LiveSession, on_delete=models.CASCADE, related_name='viewers')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='live_session_views')
+    is_watching = models.BooleanField(default=True)
+    active_connections = models.PositiveIntegerField(default=0)
+    joined_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ['session', 'user']
+        ordering = ['-last_seen_at']
+        indexes = [models.Index(fields=['session', 'is_watching'])]
+        verbose_name = 'مشاهد بث مباشر'
+        verbose_name_plural = 'مشاهدو البث المباشر'
+
+    def __str__(self):
+        return f"{self.user.username} watching {self.session.title}"
+
+
+class LiveSessionModerator(models.Model):
+    """A user the store owner has granted moderator powers (delete comments,
+    ban/unban viewers) for one specific live session — scoped to that session
+    only, not the store's other broadcasts."""
+    session = models.ForeignKey(LiveSession, on_delete=models.CASCADE, related_name='moderators')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='moderated_live_sessions')
+    added_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ['session', 'user']
+        ordering = ['-created_at']
+        verbose_name = 'مشرف بث مباشر'
+        verbose_name_plural = 'مشرفو البث المباشر'
+
+    def __str__(self):
+        return f"{self.user.username} moderates {self.session.title}"
+
+
+class LiveSessionBan(models.Model):
+    """A viewer banned from one specific live session — can't post comments
+    or reconnect to its WebSocket room. Scoped to this session only; it does
+    not carry over to the store's other broadcasts."""
+    session = models.ForeignKey(LiveSession, on_delete=models.CASCADE, related_name='bans')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='live_session_bans')
+    banned_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='+')
+    reason = models.CharField(max_length=200, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ['session', 'user']
+        ordering = ['-created_at']
+        verbose_name = 'حظر بث مباشر'
+        verbose_name_plural = 'حظورات البث المباشر'
+
+    def __str__(self):
+        return f"{self.user.username} banned from {self.session.title}"
+
+
 from django.db import models, transaction as db_transaction
 from django.db.models import F
 from django.conf import settings
@@ -1898,3 +1974,107 @@ class WithdrawalRequest(models.Model):
 
     def __str__(self):
         return f"Withdrawal {self.amount} by {self.user.username} [{self.status}]"
+
+
+# =============================================================================
+# الوثائق القانونية (سياسة الخصوصية / شروط الاستخدام) + تسجيل موافقة المستخدم
+# -----------------------------------------------------------------------------
+# كل (نوع + لغة) له سلسلة إصدارات متصاعدة؛ "النسخة الحالية" = أعلى إصدار منشور.
+# تُسجَّل موافقة كل مستخدم على إصدار محدّد (بوقت و IP) لأغراض الإثبات القانوني.
+# =============================================================================
+class LegalDocument(models.Model):
+    """وثيقة قانونية منشورة ومُصدَّرة (سياسة خصوصية أو شروط استخدام)."""
+
+    DOC_PRIVACY = 'privacy'
+    DOC_TERMS = 'terms'
+    DOC_TYPE_CHOICES = [
+        (DOC_PRIVACY, 'سياسة الخصوصية'),
+        (DOC_TERMS, 'شروط الاستخدام'),
+    ]
+
+    LANG_AR = 'ar'
+    LANG_EN = 'en'
+    LANG_CHOICES = [
+        (LANG_AR, 'العربية'),
+        (LANG_EN, 'English'),
+    ]
+
+    doc_type = models.CharField('النوع', max_length=20, choices=DOC_TYPE_CHOICES)
+    language = models.CharField('اللغة', max_length=5, choices=LANG_CHOICES, default=LANG_AR)
+    version = models.PositiveIntegerField(
+        'الإصدار', default=1,
+        help_text='رقم إصدار متصاعد لكل (نوع + لغة). أعلى إصدار منشور هو الحالي.',
+    )
+    title = models.CharField('العنوان', max_length=200)
+    content = models.TextField(
+        'المحتوى (HTML)',
+        help_text='محتوى الوثيقة بصيغة HTML — يُعرض كما هو في التطبيق والصفحة العلنية.',
+    )
+    summary = models.CharField(
+        'ملخّص التغيير', max_length=300, blank=True,
+        help_text='سبب/ملخّص هذا الإصدار يُعرض للمستخدم عند طلب الموافقة (اختياري).',
+    )
+    effective_at = models.DateTimeField('تاريخ السريان', default=timezone.now)
+    is_published = models.BooleanField('منشور', default=True)
+    requires_reacceptance = models.BooleanField(
+        'يتطلب موافقة جديدة', default=True,
+        help_text='إذا كان هذا الإصدار يُلزم المستخدمين الحاليين بإعادة الموافقة.',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'وثيقة قانونية'
+        verbose_name_plural = 'الوثائق القانونية'
+        ordering = ['doc_type', 'language', '-version']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['doc_type', 'language', 'version'],
+                name='uniq_legal_doc_type_lang_version',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.get_doc_type_display()} [{self.language}] v{self.version}"
+
+    @classmethod
+    def current(cls, doc_type, language=LANG_AR):
+        """أحدث إصدار منشور لنوع/لغة معيّنين، أو None."""
+        return (
+            cls.objects.filter(
+                doc_type=doc_type, language=language, is_published=True
+            )
+            .order_by('-version')
+            .first()
+        )
+
+
+class LegalAcceptance(models.Model):
+    """سجلّ موافقة مستخدم على إصدار محدّد من وثيقة قانونية (دليل إثبات)."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name='legal_acceptances',
+    )
+    # PROTECT: لا يُحذف إصدار سبق أن وافق عليه مستخدمون — يبقى الأثر القانوني.
+    document = models.ForeignKey(
+        LegalDocument, on_delete=models.PROTECT, related_name='acceptances',
+    )
+    accepted_at = models.DateTimeField(auto_now_add=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    app_version = models.CharField(max_length=40, blank=True)
+    user_agent = models.CharField(max_length=300, blank=True)
+
+    class Meta:
+        verbose_name = 'موافقة قانونية'
+        verbose_name_plural = 'الموافقات القانونية'
+        ordering = ['-accepted_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'document'],
+                name='uniq_user_legal_document_acceptance',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} ✓ {self.document}"

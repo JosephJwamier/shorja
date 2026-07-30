@@ -477,6 +477,8 @@ UNFOLD = {
                 'items': [
                     {'title': 'شركات التوصيل', 'icon': 'local_shipping', 'link': reverse_lazy('admin:core_deliverycompany_changelist')},
                     {'title': 'طلبات التوصيل', 'icon': 'package_2', 'link': reverse_lazy('admin:core_deliveryorder_changelist')},
+                    {'title': 'دفعات التوصيل المجمّعة', 'icon': 'merge_type', 'link': reverse_lazy('admin:core_deliverybatch_changelist')},
+                    {'title': 'التسويات النقدية', 'icon': 'price_check', 'link': reverse_lazy('admin:core_cashsettlement_changelist')},
                 ],
             },
             {

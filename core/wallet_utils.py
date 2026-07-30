@@ -203,15 +203,4 @@ def release_reservation_payment(reservation, amount=None):
             reservation=reservation
         )
 
-    if reservation.auction_id:
-        # Auction items are a single unique unit (quantity=1), so ownership
-        # transfers here instead of a stock decrement — and only now, once
-        # the sale is actually settled, so a refused delivery beforehand
-        # (see execute_return_refund) never has to unwind an ownership change.
-        item = reservation.item
-        item.owner = reservation.buyer
-        item.current_holder = reservation.buyer
-        item.status = 'sold'
-        item.save(update_fields=['owner', 'current_holder', 'status'])
-
     reservation.save(update_fields=update_fields)

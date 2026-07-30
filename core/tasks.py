@@ -469,7 +469,7 @@ def send_reservation_expiry_reminder(reservation_id):
     Send reminder to buyer before reservation expires
     """
     from .models import Reservation
-    from .notifications import NotificationService
+    from .notifications import NotificationService, bidi_isolate
 
     try:
         reservation = Reservation.objects.get(id=reservation_id)
@@ -479,14 +479,14 @@ def send_reservation_expiry_reminder(reservation_id):
             hours_remaining = int(time_remaining.total_seconds() / 3600)
 
             message = (
-                f"Reminder: Your reservation for '{reservation.item.title}' "
-                f"expires in {hours_remaining} hours. "
-                f"Please complete your purchase to avoid losing your reservation."
+                f"تذكير: حجزك لمنتج '{bidi_isolate(reservation.item.title)}' "
+                f"ينتهي خلال {hours_remaining} ساعة. "
+                f"يرجى إتمام عملية الشراء لتجنب خسارة حجزك."
             )
 
             NotificationService.send_email(
                 to_email=reservation.buyer.email,
-                subject="Reservation Expiring Soon",
+                subject="حجزك على وشك الانتهاء",
                 message=message
             )
 
@@ -505,29 +505,30 @@ def send_payment_release_notification(reservation_id, release_type='auto_release
         release_type: 'auto_release', 'buyer_approved', or 'admin_approved'
     """
     from .models import Reservation
-    from .notifications import NotificationService
+    from .notifications import NotificationService, bidi_isolate
 
     try:
         reservation = Reservation.objects.get(id=reservation_id)
         seller = reservation.item.owner
+        item_title = bidi_isolate(reservation.item.title)
 
         if release_type == 'auto_release':
-            subject = "Payment Released - 7 Days Passed"
+            subject = "تم تحرير الدفعة - مرور 7 أيام"
             message = (
-                f"Payment of ${reservation.total_price} for '{reservation.item.title}' "
-                f"has been automatically released to you after 7 days without disputes."
+                f"تم تحرير دفعة بمبلغ ${reservation.total_price} لمنتج '{item_title}' "
+                f"إليك تلقائياً بعد مرور 7 أيام دون أي نزاع."
             )
         elif release_type == 'buyer_approved':
-            subject = "Payment Released - Buyer Approved"
+            subject = "تم تحرير الدفعة - موافقة المشتري"
             message = (
-                f"Payment of ${reservation.total_price} for '{reservation.item.title}' "
-                f"has been released after buyer approval."
+                f"تم تحرير دفعة بمبلغ ${reservation.total_price} لمنتج '{item_title}' "
+                f"بعد موافقة المشتري."
             )
         else:  # admin_approved
-            subject = "Payment Released - Admin Approved"
+            subject = "تم تحرير الدفعة - موافقة الإدارة"
             message = (
-                f"Payment of ${reservation.total_price} for '{reservation.item.title}' "
-                f"has been released after admin dispute resolution."
+                f"تم تحرير دفعة بمبلغ ${reservation.total_price} لمنتج '{item_title}' "
+                f"بعد قرار الإدارة في النزاع."
             )
 
         NotificationService.send_email(
@@ -548,21 +549,21 @@ def send_cancellation_restriction_notification(reservation_id):
     Notify buyer that 2-hour cancellation window has passed
     """
     from .models import Reservation
-    from .notifications import NotificationService
+    from .notifications import NotificationService, bidi_isolate
 
     try:
         reservation = Reservation.objects.get(id=reservation_id)
 
         if reservation.status == 'pending' and not reservation.seller_cancellation_approved:
             message = (
-                f"The 2-hour free cancellation window for '{reservation.item.title}' has passed. "
-                f"You can no longer cancel this reservation without seller approval. "
-                f"Please contact the seller if you need to cancel, or file a dispute if there's an issue."
+                f"انتهت مهلة الإلغاء المجاني (ساعتان) لحجز منتج '{bidi_isolate(reservation.item.title)}'. "
+                f"لم يعد بإمكانك إلغاء هذا الحجز دون موافقة البائع. "
+                f"يرجى التواصل مع البائع إذا أردت الإلغاء، أو فتح نزاع إذا كانت هناك مشكلة."
             )
 
             NotificationService.send_email(
                 to_email=reservation.buyer.email,
-                subject="Cancellation Window Closed",
+                subject="انتهت مهلة الإلغاء",
                 message=message
             )
 
@@ -579,7 +580,7 @@ def send_purchase_approval_reminder(reservation_id):
     Send at 1 day and 5 days after completion
     """
     from .models import Reservation
-    from .notifications import NotificationService
+    from .notifications import NotificationService, bidi_isolate
 
     try:
         reservation = Reservation.objects.get(id=reservation_id)
@@ -589,14 +590,14 @@ def send_purchase_approval_reminder(reservation_id):
             days_remaining = 7 - days_since_completion
 
             message = (
-                f"Your purchase of '{reservation.item.title}' was completed {days_since_completion} day(s) ago. "
-                f"If you're satisfied with your purchase, please approve it to release payment to the seller. "
-                f"Payment will be automatically released in {days_remaining} days if no disputes are filed."
+                f"اكتملت عملية شرائك لمنتج '{bidi_isolate(reservation.item.title)}' منذ {days_since_completion} يوم(أيام). "
+                f"إذا كنت راضياً عن عملية الشراء، يرجى الموافقة عليها لتحرير المبلغ للبائع. "
+                f"سيتم تحرير المبلغ تلقائياً خلال {days_remaining} يوم إذا لم يُفتح أي نزاع."
             )
 
             NotificationService.send_email(
                 to_email=reservation.buyer.email,
-                subject="Please Review Your Purchase",
+                subject="يرجى تقييم عملية شرائك",
                 message=message
             )
 
@@ -615,55 +616,56 @@ def send_dispute_notification(dispute_id, notification_type='created'):
         notification_type: 'created', 'resolved', 'investigating'
     """
     from .models import Dispute
-    from .notifications import NotificationService
+    from .notifications import NotificationService, bidi_isolate
 
     try:
         dispute = Dispute.objects.get(id=dispute_id)
+        item_title = bidi_isolate(dispute.item.title)
 
         if notification_type == 'created':
             # Notify defendant
             message = (
-                f"A dispute has been filed against you regarding '{dispute.item.title}'. "
-                f"Title: {dispute.title}. "
-                f"Please check your dashboard for details."
+                f"تم فتح نزاع ضدك بخصوص '{item_title}'. "
+                f"العنوان: {bidi_isolate(dispute.title)}. "
+                f"يرجى مراجعة لوحة التحكم للتفاصيل."
             )
             NotificationService.send_email(
                 to_email=dispute.defendant.email,
-                subject="Dispute Filed",
+                subject="تم فتح نزاع",
                 message=message
             )
 
         elif notification_type == 'resolved':
             # Notify both parties
             complainant_message = (
-                f"Your dispute regarding '{dispute.item.title}' has been resolved. "
-                f"Resolution: {dispute.resolution}"
+                f"تم حل النزاع الخاص بـ '{item_title}'. "
+                f"القرار: {dispute.resolution}"
             )
             defendant_message = (
-                f"The dispute filed against you regarding '{dispute.item.title}' has been resolved. "
-                f"Resolution: {dispute.resolution}"
+                f"تم حل النزاع المفتوح ضدك بخصوص '{item_title}'. "
+                f"القرار: {dispute.resolution}"
             )
 
             NotificationService.send_email(
                 to_email=dispute.complainant.email,
-                subject="Dispute Resolved",
+                subject="تم حل النزاع",
                 message=complainant_message
             )
             NotificationService.send_email(
                 to_email=dispute.defendant.email,
-                subject="Dispute Resolved",
+                subject="تم حل النزاع",
                 message=defendant_message
             )
 
         elif notification_type == 'investigating':
             # Notify complainant
             message = (
-                f"Your dispute regarding '{dispute.item.title}' is now under investigation. "
-                f"We'll notify you once a decision has been made."
+                f"نزاعك بخصوص '{item_title}' قيد المراجعة الآن. "
+                f"سنُبلغك فور اتخاذ قرار."
             )
             NotificationService.send_email(
                 to_email=dispute.complainant.email,
-                subject="Dispute Under Investigation",
+                subject="النزاع قيد المراجعة",
                 message=message
             )
 
@@ -679,7 +681,7 @@ def send_auction_ending_reminder(auction_id):
     Send reminder to bidders that auction is ending soon
     """
     from .models import AuctionListing
-    from .notifications import NotificationService
+    from .notifications import NotificationService, bidi_isolate
 
     try:
         auction = AuctionListing.objects.get(id=auction_id)
@@ -692,14 +694,14 @@ def send_auction_ending_reminder(auction_id):
             bidders = auction.bids.values_list('bidder__email', flat=True).distinct()
 
             message = (
-                f"Auction for '{auction.item.title}' ends in {minutes_remaining} minutes! "
-                f"Current price: ${auction.current_price}"
+                f"المزاد على '{bidi_isolate(auction.item.title)}' ينتهي خلال {minutes_remaining} دقيقة! "
+                f"السعر الحالي: ${auction.current_price}"
             )
 
             for email in bidders:
                 NotificationService.send_email(
                     to_email=email,
-                    subject="Auction Ending Soon",
+                    subject="المزاد ينتهي قريباً",
                     message=message
                 )
 
@@ -764,21 +766,28 @@ def generate_sales_report(user_id, start_date, end_date):
 def send_representative_request_notification(representative_id):
     """Notify owner about new representative request"""
     from .models import Representative
-    from .notifications import NotificationService
+    from .notifications import NotificationService, notify_push, bidi_isolate
 
     try:
         representative = Representative.objects.get(id=representative_id)
+        item_title = bidi_isolate(representative.item.title)
 
         message = (
-            f"{representative.representative.username} wants to represent your item '{representative.item.title}'. "
-            f"Commission: {representative.commission_percentage}%. "
-            f"Message: {representative.request_message or 'No message provided'}"
+            f"يريد {bidi_isolate(representative.representative.username)} تمثيل منتجك '{item_title}'. "
+            f"العمولة: {representative.commission_percentage}%. "
+            f"الرسالة: {representative.request_message or 'لا توجد رسالة'}"
         )
 
         NotificationService.send_email(
             to_email=representative.owner.email,
-            subject="New Representative Request",
+            subject="طلب تمثيل جديد",
             message=message
+        )
+        notify_push(
+            representative.owner,
+            title="طلب تمثيل جديد",
+            body=f'يريد {bidi_isolate(representative.representative.username)} تمثيل منتجك "{item_title}".',
+            data={'type': 'representative_request', 'representative_id': str(representative.id)},
         )
 
         logger.info(f"Sent representative request notification for {representative_id}")
@@ -791,21 +800,28 @@ def send_representative_request_notification(representative_id):
 def send_representative_accepted_notification(representative_id):
     """Notify representative that request was accepted"""
     from .models import Representative
-    from .notifications import NotificationService
+    from .notifications import NotificationService, notify_push, bidi_isolate
 
     try:
         representative = Representative.objects.get(id=representative_id)
+        item_title = bidi_isolate(representative.item.title)
 
         message = (
-            f"Your request to represent '{representative.item.title}' has been accepted! "
-            f"Commission: {representative.commission_percentage}%. "
-            f"You can now start representing this item."
+            f"تم قبول طلبك لتمثيل '{item_title}'! "
+            f"العمولة: {representative.commission_percentage}%. "
+            f"يمكنك الآن البدء بتمثيل هذا المنتج."
         )
 
         NotificationService.send_email(
             to_email=representative.representative.email,
-            subject="Representative Request Accepted",
+            subject="تم قبول طلب التمثيل",
             message=message
+        )
+        notify_push(
+            representative.representative,
+            title="تم قبول طلب التمثيل",
+            body=f'تم قبول طلبك لتمثيل "{item_title}"! العمولة: {representative.commission_percentage}%.',
+            data={'type': 'representative_accepted', 'representative_id': str(representative.id)},
         )
 
         logger.info(f"Sent acceptance notification for representative {representative_id}")
@@ -818,20 +834,28 @@ def send_representative_accepted_notification(representative_id):
 def send_representative_rejected_notification(representative_id):
     """Notify representative that request was rejected"""
     from .models import Representative
-    from .notifications import NotificationService
+    from .notifications import NotificationService, notify_push, bidi_isolate
 
     try:
         representative = Representative.objects.get(id=representative_id)
+        item_title = bidi_isolate(representative.item.title)
 
         message = (
-            f"Your request to represent '{representative.item.title}' has been rejected. "
-            f"{f'Reason: {representative.rejection_reason}' if representative.rejection_reason else ''}"
+            f"تم رفض طلبك لتمثيل '{item_title}'. "
+            f"{f'السبب: {representative.rejection_reason}' if representative.rejection_reason else ''}"
         )
 
         NotificationService.send_email(
             to_email=representative.representative.email,
-            subject="Representative Request Rejected",
+            subject="تم رفض طلب التمثيل",
             message=message
+        )
+        notify_push(
+            representative.representative,
+            title="تم رفض طلب التمثيل",
+            body=f'تم رفض طلبك لتمثيل "{item_title}".'
+                 + (f' السبب: {representative.rejection_reason}' if representative.rejection_reason else ''),
+            data={'type': 'representative_rejected', 'representative_id': str(representative.id)},
         )
 
         logger.info(f"Sent rejection notification for representative {representative_id}")
@@ -844,24 +868,31 @@ def send_representative_rejected_notification(representative_id):
 def send_representative_cancelled_notification(representative_id, cancelled_by_user_id):
     """Notify party about cancellation"""
     from .models import Representative, User
-    from .notifications import NotificationService
+    from .notifications import NotificationService, notify_push, bidi_isolate
 
     try:
         representative = Representative.objects.get(id=representative_id)
         cancelled_by = User.objects.get(id=cancelled_by_user_id)
+        item_title = bidi_isolate(representative.item.title)
 
         # Determine who to notify
         if cancelled_by == representative.owner:
             notify_user = representative.representative
-            message = f"The owner has cancelled your representative assignment for '{representative.item.title}'"
+            message = f"ألغى المالك تكليفك بتمثيل '{item_title}'"
         else:
             notify_user = representative.owner
-            message = f"{representative.representative.username} has cancelled their representative request for '{representative.item.title}'"
+            message = f"ألغى {bidi_isolate(representative.representative.username)} طلبه لتمثيل '{item_title}'"
 
         NotificationService.send_email(
             to_email=notify_user.email,
-            subject="Representative Assignment Cancelled",
+            subject="تم إلغاء تكليف التمثيل",
             message=message
+        )
+        notify_push(
+            notify_user,
+            title="تم إلغاء تكليف التمثيل",
+            body=message,
+            data={'type': 'representative_cancelled', 'representative_id': str(representative.id)},
         )
 
         logger.info(f"Sent cancellation notification for representative {representative_id}")
@@ -874,23 +905,30 @@ def send_representative_cancelled_notification(representative_id, cancelled_by_u
 def send_representative_permissions_updated_notification(representative_id):
     """Notify representative about permission changes"""
     from .models import Representative
-    from .notifications import NotificationService
+    from .notifications import NotificationService, notify_push, bidi_isolate
 
     try:
         representative = Representative.objects.get(id=representative_id)
+        item_title = bidi_isolate(representative.item.title)
 
         message = (
-            f"Your permissions for representing '{representative.item.title}' have been updated. "
-            f"Can list: {representative.can_list}, "
-            f"Can negotiate: {representative.can_negotiate}, "
-            f"Can complete sale: {representative.can_complete_sale}, "
-            f"Commission: {representative.commission_percentage}%"
+            f"تم تحديث صلاحياتك لتمثيل '{item_title}'. "
+            f"يمكنه الإدراج: {'نعم' if representative.can_list else 'لا'}, "
+            f"يمكنه التفاوض: {'نعم' if representative.can_negotiate else 'لا'}, "
+            f"يمكنه إتمام البيع: {'نعم' if representative.can_complete_sale else 'لا'}, "
+            f"العمولة: {representative.commission_percentage}%"
         )
 
         NotificationService.send_email(
             to_email=representative.representative.email,
-            subject="Representative Permissions Updated",
+            subject="تم تحديث صلاحيات التمثيل",
             message=message
+        )
+        notify_push(
+            representative.representative,
+            title="تم تحديث صلاحيات التمثيل",
+            body=f'تم تحديث صلاحياتك لتمثيل "{item_title}". العمولة: {representative.commission_percentage}%.',
+            data={'type': 'representative_permissions_updated', 'representative_id': str(representative.id)},
         )
 
         logger.info(f"Sent permissions update notification for representative {representative_id}")
@@ -903,29 +941,30 @@ def send_representative_permissions_updated_notification(representative_id):
 def send_payment_release_request_notification(reservation_id, seller_username, buyer_id):
     """Send notification to buyer when seller requests payment release"""
     from .models import Reservation, User
-    from .notifications import NotificationService, notify_push
+    from .notifications import NotificationService, notify_push, bidi_isolate
 
     try:
         reservation = Reservation.objects.get(id=reservation_id)
         buyer = User.objects.get(id=buyer_id)
+        item_title = bidi_isolate(reservation.item.title)
 
         message = (
-            f"{seller_username} has requested that you approve and release payment for your completed reservation. "
-            f"Item: {reservation.item.title}, "
-            f"Amount: ${reservation.total_price}. "
-            f"If you're satisfied with the transaction, please approve the reservation to release payment to the seller."
+            f"طلب منك {seller_username} الموافقة على تحرير الدفعة لحجزك المكتمل. "
+            f"المنتج: {item_title}، "
+            f"المبلغ: ${reservation.total_price}. "
+            f"إذا كنت راضياً عن العملية، يرجى الموافقة على الحجز لتحرير المبلغ للبائع."
         )
 
         NotificationService.send_email(
             to_email=buyer.email,
-            subject=f"Payment Release Request - Reservation #{reservation_id}",
+            subject=f"طلب تحرير الدفعة - الحجز رقم #{reservation_id}",
             message=message
         )
 
         notify_push(
             buyer,
             title='طلب تحرير الدفعة',
-            body=f'{seller_username} يطلب تأكيدك على استلام "{reservation.item.title}" لتحرير المبلغ له.',
+            body=f'{bidi_isolate(seller_username)} يطلب تأكيدك على استلام "{item_title}" لتحرير المبلغ له.',
             data={
                 'type': 'payment_release_requested',
                 'reservation_id': str(reservation.id),
@@ -943,23 +982,23 @@ def send_payment_release_request_notification(reservation_id, seller_username, b
 def send_payment_released_notification(reservation_id, seller_id):
     """Send notification to seller when payment is released"""
     from .models import Reservation, User
-    from .notifications import NotificationService
+    from .notifications import NotificationService, bidi_isolate
 
     try:
         reservation = Reservation.objects.get(id=reservation_id)
         seller = User.objects.get(id=seller_id)
 
         message = (
-            f"Payment has been released for reservation #{reservation_id}. "
-            f"Item: {reservation.item.title}, "
-            f"Amount: ${reservation.total_price}, "
-            f"Buyer: {reservation.buyer.username}. "
-            f"The payment is now available in your account."
+            f"تم تحرير الدفعة الخاصة بالحجز رقم #{reservation_id}. "
+            f"المنتج: {bidi_isolate(reservation.item.title)}, "
+            f"المبلغ: ${reservation.total_price}, "
+            f"المشتري: {bidi_isolate(reservation.buyer.username)}. "
+            f"أصبح المبلغ متاحاً الآن في حسابك."
         )
 
         NotificationService.send_email(
             to_email=seller.email,
-            subject=f"Payment Released - Reservation #{reservation_id}",
+            subject=f"تم تحرير الدفعة - الحجز رقم #{reservation_id}",
             message=message
         )
 
@@ -973,21 +1012,21 @@ def send_payment_released_notification(reservation_id, seller_id):
 def send_cancellation_restriction_notification(reservation_id):
     """Send notification to buyer about cancellation restrictions"""
     from .models import Reservation
-    from .notifications import NotificationService
+    from .notifications import NotificationService, bidi_isolate
 
     try:
         reservation = Reservation.objects.get(id=reservation_id)
 
         message = (
-            f"The 2-hour cancellation window for your reservation has expired. "
-            f"Item: {reservation.item.title}, "
-            f"Reservation ID: #{reservation_id}. "
-            f"You can no longer cancel this reservation without seller approval. Please complete the purchase or contact the seller."
+            f"انتهت مهلة الإلغاء المجاني (ساعتان) لحجزك. "
+            f"المنتج: {bidi_isolate(reservation.item.title)}, "
+            f"رقم الحجز: #{reservation_id}. "
+            f"لم يعد بإمكانك إلغاء هذا الحجز دون موافقة البائع. يرجى إتمام الشراء أو التواصل مع البائع."
         )
 
         NotificationService.send_email(
             to_email=reservation.buyer.email,
-            subject=f"Cancellation Period Expired - Reservation #{reservation_id}",
+            subject=f"انتهت مهلة الإلغاء - الحجز رقم #{reservation_id}",
             message=message
         )
 
@@ -1001,37 +1040,38 @@ def send_cancellation_restriction_notification(reservation_id):
 def send_reservation_expired_notification(reservation_id):
     """Send notification when reservation expires"""
     from .models import Reservation
-    from .notifications import NotificationService
+    from .notifications import NotificationService, bidi_isolate
 
     try:
         reservation = Reservation.objects.get(id=reservation_id)
+        item_title = bidi_isolate(reservation.item.title)
 
         # Notify buyer
         buyer_message = (
-            f"Your reservation has expired. "
-            f"Item: {reservation.item.title}, "
-            f"Reservation ID: #{reservation_id}. "
-            f"The reserved quantity has been returned to available stock."
+            f"انتهى حجزك. "
+            f"المنتج: {item_title}, "
+            f"رقم الحجز: #{reservation_id}. "
+            f"تمت إعادة الكمية المحجوزة إلى المخزون المتاح."
         )
 
         NotificationService.send_email(
             to_email=reservation.buyer.email,
-            subject=f"Reservation Expired - Reservation #{reservation_id}",
+            subject=f"انتهى الحجز - الحجز رقم #{reservation_id}",
             message=buyer_message
         )
 
         # Notify seller
         seller_message = (
-            f"A reservation for your item has expired. "
-            f"Item: {reservation.item.title}, "
-            f"Reservation ID: #{reservation_id}, "
-            f"Buyer: {reservation.buyer.username}. "
-            f"The item is now available for other buyers."
+            f"انتهى حجز لأحد منتجاتك. "
+            f"المنتج: {item_title}, "
+            f"رقم الحجز: #{reservation_id}, "
+            f"المشتري: {bidi_isolate(reservation.buyer.username)}. "
+            f"أصبح المنتج متاحاً الآن للمشترين الآخرين."
         )
 
         NotificationService.send_email(
             to_email=reservation.item.owner.email,
-            subject=f"Reservation Expired - {reservation.item.title}",
+            subject=f"انتهى الحجز - {item_title}",
             message=seller_message
         )
 
@@ -1045,34 +1085,35 @@ def send_reservation_expired_notification(reservation_id):
 def send_reservation_cancelled_notification(reservation_id, cancelled_by_user_id):
     """Notify parties about reservation cancellation"""
     from .models import Reservation, User
-    from .notifications import NotificationService
+    from .notifications import NotificationService, bidi_isolate
 
     try:
         reservation = Reservation.objects.get(id=reservation_id)
         cancelled_by = User.objects.get(id=cancelled_by_user_id)
+        item_title = bidi_isolate(reservation.item.title)
 
         # Determine who to notify
         if cancelled_by == reservation.buyer:
             notify_user = reservation.item.owner
             message = (
-                f"{reservation.buyer.username} has cancelled their reservation for your item. "
-                f"Item: {reservation.item.title}, "
-                f"Reservation ID: #{reservation_id}, "
-                f"Quantity: {reservation.quantity}. "
-                f"The item is now available for other buyers."
+                f"ألغى {bidi_isolate(reservation.buyer.username)} حجزه لمنتجك. "
+                f"المنتج: {item_title}, "
+                f"رقم الحجز: #{reservation_id}, "
+                f"الكمية: {reservation.quantity}. "
+                f"أصبح المنتج متاحاً الآن للمشترين الآخرين."
             )
         else:
             notify_user = reservation.buyer
             message = (
-                f"Your reservation has been cancelled by the seller. "
-                f"Item: {reservation.item.title}, "
-                f"Reservation ID: #{reservation_id}. "
-                f"Any deposit paid will be refunded."
+                f"ألغى البائع حجزك. "
+                f"المنتج: {item_title}, "
+                f"رقم الحجز: #{reservation_id}. "
+                f"سيتم استرداد أي عربون مدفوع."
             )
 
         NotificationService.send_email(
             to_email=notify_user.email,
-            subject=f"Reservation Cancelled - Reservation #{reservation_id}",
+            subject=f"تم إلغاء الحجز - الحجز رقم #{reservation_id}",
             message=message
         )
 
@@ -1088,7 +1129,7 @@ def send_representative_sale_notification(reservation_id, representative_assignm
     Notify representative that they made a sale and will earn commission
     """
     from .models import Reservation, Representative
-    from .notifications import NotificationService
+    from .notifications import NotificationService, notify_push, bidi_isolate
 
     try:
         reservation = Reservation.objects.select_related(
@@ -1100,18 +1141,29 @@ def send_representative_sale_notification(reservation_id, representative_assignm
         ).get(id=representative_assignment_id)
 
         representative = representative_assignment.representative
+        item_title = bidi_isolate(reservation.item.title)
 
         message = (
-            f"Great news! {reservation.buyer.username} purchased '{reservation.item.title}' through your representative link. "
-            f"Sale amount: ${reservation.total_price}, "
-            f"Your commission: ${reservation.commission_amount} ({representative_assignment.commission_percentage}%). "
-            f"Commission will be paid when the buyer approves the purchase or after 7 days."
+            f"أخبار رائعة! اشترى {bidi_isolate(reservation.buyer.username)} منتج '{item_title}' عبر رابط تمثيلك. "
+            f"مبلغ البيع: ${reservation.total_price}, "
+            f"عمولتك: ${reservation.commission_amount} ({representative_assignment.commission_percentage}%). "
+            f"ستُدفع العمولة عند موافقة المشتري على الشراء أو بعد 7 أيام."
         )
 
         NotificationService.send_email(
             to_email=representative.email,
-            subject=f"You earned ${reservation.commission_amount} commission!",
+            subject=f"حصلت على عمولة ${reservation.commission_amount}!",
             message=message
+        )
+        notify_push(
+            representative,
+            title=f"حصلت على عمولة ${reservation.commission_amount}!",
+            body=f'اشترى {bidi_isolate(reservation.buyer.username)} "{item_title}" عبر رابط تمثيلك.',
+            data={
+                'type': 'representative_sale',
+                'reservation_id': str(reservation.id),
+                'representative_id': str(representative_assignment.id),
+            },
         )
 
         logger.info(
@@ -1138,7 +1190,7 @@ def send_reservation_created_notification(reservation_id, owner_id):
     Notify item owner that a reservation was created
     """
     from .models import Reservation, User
-    from .notifications import NotificationService
+    from .notifications import NotificationService, bidi_isolate
 
     try:
         reservation = Reservation.objects.select_related(
@@ -1146,27 +1198,28 @@ def send_reservation_created_notification(reservation_id, owner_id):
         ).get(id=reservation_id)
 
         owner = User.objects.get(id=owner_id)
+        item_title = bidi_isolate(reservation.item.title)
 
         if reservation.representative:
             message = (
-                f"New reservation created by {reservation.buyer.username} "
-                f"through representative {reservation.representative.username} "
-                f"for your item '{reservation.item.title}'. "
-                f"Quantity: {reservation.quantity}, "
-                f"Total: ${reservation.total_price}, "
-                f"Representative commission: ${reservation.commission_amount}. "
-                f"Reservation ID: #{reservation.id}"
+                f"حجز جديد من {bidi_isolate(reservation.buyer.username)} "
+                f"عبر الممثل {bidi_isolate(reservation.representative.username)} "
+                f"لمنتجك '{item_title}'. "
+                f"الكمية: {reservation.quantity}, "
+                f"الإجمالي: ${reservation.total_price}, "
+                f"عمولة الممثل: ${reservation.commission_amount}. "
+                f"رقم الحجز: #{reservation.id}"
             )
-            subject = f"New Reservation (via Representative) - {reservation.item.title}"
+            subject = f"حجز جديد (عبر ممثل) - {item_title}"
         else:
             message = (
-                f"New reservation created by {reservation.buyer.username} "
-                f"for your item '{reservation.item.title}'. "
-                f"Quantity: {reservation.quantity}, "
-                f"Total: ${reservation.total_price}. "
-                f"Reservation ID: #{reservation.id}"
+                f"حجز جديد من {bidi_isolate(reservation.buyer.username)} "
+                f"لمنتجك '{item_title}'. "
+                f"الكمية: {reservation.quantity}, "
+                f"الإجمالي: ${reservation.total_price}. "
+                f"رقم الحجز: #{reservation.id}"
             )
-            subject = f"New Reservation - {reservation.item.title}"
+            subject = f"حجز جديد - {item_title}"
 
         NotificationService.send_email(
             to_email=owner.email,
@@ -1195,7 +1248,7 @@ def send_commission_paid_notification(reservation_id, representative_id):
     Notify representative that their commission has been paid
     """
     from .models import Reservation, User
-    from .notifications import NotificationService
+    from .notifications import NotificationService, notify_push, bidi_isolate
 
     try:
         reservation = Reservation.objects.select_related(
@@ -1203,19 +1256,26 @@ def send_commission_paid_notification(reservation_id, representative_id):
         ).get(id=reservation_id)
 
         representative = User.objects.get(id=representative_id)
+        item_title = bidi_isolate(reservation.item.title)
 
         message = (
-            f"Your commission has been paid! "
-            f"Amount: ${reservation.commission_amount} "
-            f"for the sale of '{reservation.item.title}' to {reservation.buyer.username}. "
-            f"Reservation ID: #{reservation.id}. "
-            f"The commission is now available in your account."
+            f"تم دفع عمولتك! "
+            f"المبلغ: ${reservation.commission_amount} "
+            f"مقابل بيع '{item_title}' إلى {bidi_isolate(reservation.buyer.username)}. "
+            f"رقم الحجز: #{reservation.id}. "
+            f"أصبح المبلغ متاحاً الآن في حسابك."
         )
 
         NotificationService.send_email(
             to_email=representative.email,
-            subject=f"Commission Payment: ${reservation.commission_amount}",
+            subject=f"دفعة عمولة: ${reservation.commission_amount}",
             message=message
+        )
+        notify_push(
+            representative,
+            title=f"دفعة عمولة: ${reservation.commission_amount}",
+            body=f'تم دفع عمولتك مقابل بيع "{item_title}". أصبح المبلغ متاحاً الآن في حسابك.',
+            data={'type': 'representative_commission_paid', 'reservation_id': str(reservation.id)},
         )
 
         logger.info(
@@ -1234,6 +1294,107 @@ def send_commission_paid_notification(reservation_id, representative_id):
     except Exception as e:
         logger.error(f"Error notifying representative: {str(e)}")
         return None
+
+
+@shared_task
+def send_resale_agreement_request_notification(transfer_id):
+    """Notify the item owner about a new wholesale resale agreement request"""
+    from .models import ItemTransfer
+    from .notifications import notify_push, bidi_isolate
+
+    try:
+        transfer = ItemTransfer.objects.select_related('item', 'from_user', 'to_user').get(id=transfer_id)
+        item_title = bidi_isolate(transfer.item.title)
+
+        notify_push(
+            transfer.from_user,
+            title="طلب نقل ملكية بالجملة",
+            body=f'يريد {bidi_isolate(transfer.to_user.username)} شراء {transfer.quantity} من "{item_title}" لإعادة البيع.',
+            data={'type': 'resale_agreement_request', 'transfer_id': str(transfer.id)},
+        )
+
+        logger.info(f"Sent resale agreement request notification for transfer {transfer_id}")
+
+    except Exception as e:
+        logger.error(f"Error sending resale agreement request notification: {str(e)}")
+
+
+@shared_task
+def send_resale_agreement_approved_notification(transfer_id):
+    """Notify the reseller that the owner approved their resale agreement"""
+    from .models import ItemTransfer
+    from .notifications import notify_push, bidi_isolate
+
+    try:
+        transfer = ItemTransfer.objects.select_related('item', 'from_user', 'to_user').get(id=transfer_id)
+        item_title = bidi_isolate(transfer.item.title)
+
+        notify_push(
+            transfer.to_user,
+            title="تمت الموافقة على اتفاقية إعادة البيع",
+            body=f'وافق {bidi_isolate(transfer.from_user.username)} على طلبك. أصبحت الآن تملك {transfer.quantity} من "{item_title}" في متجرك.',
+            data={'type': 'resale_agreement_approved', 'transfer_id': str(transfer.id)},
+        )
+
+        logger.info(f"Sent resale agreement approval notification for transfer {transfer_id}")
+
+    except Exception as e:
+        logger.error(f"Error sending resale agreement approval notification: {str(e)}")
+
+
+@shared_task
+def send_resale_agreement_rejected_notification(transfer_id):
+    """Notify the reseller that the owner rejected their resale agreement request"""
+    from .models import ItemTransfer
+    from .notifications import notify_push, bidi_isolate
+
+    try:
+        transfer = ItemTransfer.objects.select_related('item', 'from_user', 'to_user').get(id=transfer_id)
+        item_title = bidi_isolate(transfer.item.title)
+
+        notify_push(
+            transfer.to_user,
+            title="تم رفض اتفاقية إعادة البيع",
+            body=f'رفض {bidi_isolate(transfer.from_user.username)} طلبك لإعادة بيع "{item_title}".'
+                 + (f' السبب: {transfer.rejection_reason}' if transfer.rejection_reason else ''),
+            data={'type': 'resale_agreement_rejected', 'transfer_id': str(transfer.id)},
+        )
+
+        logger.info(f"Sent resale agreement rejection notification for transfer {transfer_id}")
+
+    except Exception as e:
+        logger.error(f"Error sending resale agreement rejection notification: {str(e)}")
+
+
+@shared_task
+def send_resale_agreement_cancelled_notification(transfer_id, cancelled_by_user_id):
+    """Notify the other party that a resale agreement was cancelled/ended"""
+    from .models import ItemTransfer, User
+    from .notifications import notify_push, bidi_isolate
+
+    try:
+        transfer = ItemTransfer.objects.select_related('item', 'from_user', 'to_user').get(id=transfer_id)
+        cancelled_by = User.objects.get(id=cancelled_by_user_id)
+        item_title = bidi_isolate(transfer.item.title)
+
+        if cancelled_by == transfer.from_user:
+            notify_user = transfer.to_user
+            body = f'أنهى {bidi_isolate(transfer.from_user.username)} اتفاقية استضافة "{item_title}".'
+        else:
+            notify_user = transfer.from_user
+            body = f'ألغى {bidi_isolate(transfer.to_user.username)} اتفاقية إعادة بيع "{item_title}".'
+
+        notify_push(
+            notify_user,
+            title="تم إنهاء اتفاقية إعادة البيع",
+            body=body,
+            data={'type': 'resale_agreement_cancelled', 'transfer_id': str(transfer.id)},
+        )
+
+        logger.info(f"Sent resale agreement cancellation notification for transfer {transfer_id}")
+
+    except Exception as e:
+        logger.error(f"Error sending resale agreement cancellation notification: {str(e)}")
 
 
 @shared_task

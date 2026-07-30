@@ -9,6 +9,44 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 User = get_user_model()
 
+# "حضور" الطرفين في نفس المحادثة — يُستخدم لتفادي دفع (FCM) لا داعي له حين
+# يكون المستلم أصلاً بداخل نفس المحادثة ويرى الرسالة حيّاً عبر الـ WebSocket.
+# مبني على Redis (نفس الـ cache المُستخدم في المشروع أصلاً) بدل عدّاد ذاكرة
+# محلي حتى يعمل بشكل صحيح مهما كان عدد عمليات الخادم (workers). عَلَم بسيط
+# (وليس عدّاد اتصالات) لتفادي أي تعقيد إضافي — الحد الأقصى (TTL) هو شبكة أمان
+# فقط لانقطاع غير سليم (مثل إغلاق التطبيق فجأة)؛ الاتصال/الانقطاع الطبيعيين
+# يضبطانه فوراً.
+_CHAT_PRESENCE_TTL = 600
+
+
+def _chat_presence_key(chat_id, user_id):
+    return f'chat_presence:{chat_id}:{user_id}'
+
+
+def mark_chat_present(chat_id, user_id):
+    from django.core.cache import cache
+    cache.set(_chat_presence_key(chat_id, user_id), True, _CHAT_PRESENCE_TTL)
+
+
+def mark_chat_absent(chat_id, user_id):
+    from django.core.cache import cache
+    cache.delete(_chat_presence_key(chat_id, user_id))
+
+
+def is_user_present_in_chat(chat_id, user_id):
+    """True إن كانت لدى `user_id` هذه اللحظة اتصال WebSocket مفتوح بهذه
+    المحادثة تحديداً — تُستخدم لتخطّي إشعار دفع مكرر لرسالة يراها أصلاً حيّاً،
+    وكإشارة "متصل الآن" في واجهة المحادثة (ChatDetailSerializer.other_user_online)."""
+    from django.core.cache import cache
+    return bool(cache.get(_chat_presence_key(chat_id, user_id)))
+
+
+def _touch_last_seen(user_id):
+    """Cheap last-activity timestamp — updated whenever a user connects to
+    or disconnects from a chat (see ChatConsumer below), without needing a
+    dedicated global presence heartbeat."""
+    User.objects.filter(id=user_id).update(last_seen_at=timezone.now())
+
 
 class ChatConsumer(AsyncWebsocketConsumer):
     """
@@ -39,6 +77,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
         )
 
         await self.accept()
+        await database_sync_to_async(mark_chat_present)(self.chat_id, self.user.id)
+        await database_sync_to_async(_touch_last_seen)(self.user.id)
+        await self.channel_layer.group_send(
+            self.room_group_name,
+            {'type': 'presence_update', 'user_id': self.user.id, 'is_online': True}
+        )
 
         # Mark messages as read, and let the other participant's open
         # thread know live (so a sent message's tick can flip to "seen"
@@ -54,6 +98,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
             self.room_group_name,
             self.channel_name
         )
+        if getattr(self, 'user', None) and self.user.is_authenticated:
+            await database_sync_to_async(mark_chat_absent)(self.chat_id, self.user.id)
+            await database_sync_to_async(_touch_last_seen)(self.user.id)
+            await self.channel_layer.group_send(
+                self.room_group_name,
+                {'type': 'presence_update', 'user_id': self.user.id, 'is_online': False}
+            )
 
         logger.info(f"User {self.user.username} disconnected from chat {self.chat_id}")
 
@@ -100,8 +151,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
             }
         )
 
-        # Send notification to other participant
-        await self.send_message_notification(message)
+        # لا داعي لإشعار (دفع + بريد) إن كان الطرف الآخر بنفس المحادثة هذه
+        # اللحظة — سيراها فوراً عبر البثّ أعلاه، فالإشعار هنا سيكون تكراراً
+        # مزعجاً لا فائدة منه.
+        recipient_id = await self.get_recipient_id()
+        if recipient_id is None or not await database_sync_to_async(
+                is_user_present_in_chat)(self.chat_id, recipient_id):
+            await self.send_message_notification(message)
 
     async def handle_typing(self, data):
         """Handle typing indicator"""
@@ -143,6 +199,16 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 'is_typing': event['is_typing']
             }))
 
+    async def presence_update(self, event):
+        """Relay the other participant's online/offline flip live — don't
+        echo back to the sender's own connection."""
+        if event['user_id'] != self.user.id:
+            await self.send(text_data=json.dumps({
+                'type': 'presence',
+                'user_id': event['user_id'],
+                'is_online': event['is_online'],
+            }))
+
     async def messages_read(self, event):
         """Tell the group someone just read up to now, so the sender's open
         thread can flip their own sent bubbles' tick to "seen" live."""
@@ -168,6 +234,17 @@ class ChatConsumer(AsyncWebsocketConsumer):
             return chat.buyer == self.user or chat.seller == self.user
         except Chat.DoesNotExist:
             return False
+
+    @database_sync_to_async
+    def get_recipient_id(self):
+        """The *other* participant's user id — used to check whether they're
+        currently present in this same chat before bothering with a push."""
+        from .models import Chat
+        try:
+            chat = Chat.objects.get(id=self.chat_id)
+            return chat.get_other_user(self.user).id
+        except Chat.DoesNotExist:
+            return None
 
     @database_sync_to_async
     def save_message(self, content):
@@ -204,27 +281,18 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def send_message_notification(self, message_data):
-        """Send WebSocket + FCM push notification to other participant"""
+        """Notify the other participant — push (FCM) + email."""
         from .models import Chat
         from .notifications import notify_new_message
-        from .firebase import send_push_notification, FIREBASE_AVAILABLE
 
         try:
             chat = Chat.objects.get(id=self.chat_id)
             latest_message = chat.messages.latest('created_at')
-
-            # Email notification
+            # notify_new_message already sends both the FCM push (with the
+            # richer chat-list payload) and the email — a second, separate
+            # send_push_notification() call used to sit here too, silently
+            # double-notifying the recipient for every plain-text message.
             notify_new_message(latest_message)
-
-            # FCM push notification to the other participant
-            recipient = chat.seller if latest_message.sender == chat.buyer else chat.buyer
-            if FIREBASE_AVAILABLE and recipient.fcm_token:
-                send_push_notification(
-                    fcm_token=recipient.fcm_token,
-                    title=f"New message from {latest_message.sender.username}",
-                    body=latest_message.content[:100],
-                    data={'type': 'new_message', 'chat_id': str(chat.id)}
-                )
         except Exception as e:
             logger.error(f"Error sending notification: {str(e)}")
 
@@ -396,6 +464,10 @@ class LiveSessionConsumer(AsyncWebsocketConsumer):
         self.room_group_name = f'live_{self.session_id}'
         self.user = self.scope['user']
 
+        if await self.is_banned():
+            await self.close(code=4403)
+            return
+
         await self.channel_layer.group_add(
             self.room_group_name,
             self.channel_name
@@ -405,6 +477,7 @@ class LiveSessionConsumer(AsyncWebsocketConsumer):
 
         viewer_count = await self.increment_viewer_count()
         if viewer_count is not None:
+            await self.track_viewer_joined()
             await self.channel_layer.group_send(
                 self.room_group_name,
                 {'type': 'live_event', 'event': 'viewer_count', 'data': {'current_viewer_count': viewer_count}}
@@ -421,6 +494,7 @@ class LiveSessionConsumer(AsyncWebsocketConsumer):
 
         viewer_count = await self.decrement_viewer_count()
         if viewer_count is not None:
+            await self.track_viewer_left()
             await self.channel_layer.group_send(
                 self.room_group_name,
                 {'type': 'live_event', 'event': 'viewer_count', 'data': {'current_viewer_count': viewer_count}}
@@ -449,6 +523,17 @@ class LiveSessionConsumer(AsyncWebsocketConsumer):
             'data': event.get('data'),
             'timestamp': timezone.now().isoformat()
         }))
+
+    @database_sync_to_async
+    def is_banned(self):
+        """Checked before accept() so a banned viewer can't (re)join this
+        session's room at all. Only meaningful for signed-in users — see
+        LiveSessionBan's docstring; the ban is scoped to this session only."""
+        from .models import LiveSessionBan
+
+        if not self.user or not self.user.is_authenticated:
+            return False
+        return LiveSessionBan.objects.filter(session_id=self.session_id, user_id=self.user.id).exists()
 
     @database_sync_to_async
     def increment_viewer_count(self):
@@ -480,6 +565,43 @@ class LiveSessionConsumer(AsyncWebsocketConsumer):
         return LiveSession.objects.filter(id=self.session_id).values_list(
             'current_viewer_count', flat=True
         ).first()
+
+    @database_sync_to_async
+    def track_viewer_joined(self):
+        """Upsert this signed-in user's LiveSessionViewer row. Anonymous
+        viewers have no identity to persist, so they're skipped here — they
+        already counted toward current_viewer_count above."""
+        from .models import LiveSessionViewer
+
+        if not self.user or not self.user.is_authenticated:
+            return
+
+        viewer, created = LiveSessionViewer.objects.get_or_create(
+            session_id=self.session_id, user=self.user,
+            defaults={'active_connections': 1, 'is_watching': True, 'last_seen_at': timezone.now()}
+        )
+        if not created:
+            LiveSessionViewer.objects.filter(pk=viewer.pk).update(
+                active_connections=F('active_connections') + 1,
+                is_watching=True,
+                last_seen_at=timezone.now(),
+            )
+
+    @database_sync_to_async
+    def track_viewer_left(self):
+        """Mirror of track_viewer_joined — only flips is_watching off once
+        every open connection from this user (all tabs/devices) has closed."""
+        from .models import LiveSessionViewer
+
+        if not self.user or not self.user.is_authenticated:
+            return
+
+        LiveSessionViewer.objects.filter(
+            session_id=self.session_id, user=self.user, active_connections__gt=0
+        ).update(active_connections=F('active_connections') - 1, last_seen_at=timezone.now())
+        LiveSessionViewer.objects.filter(
+            session_id=self.session_id, user=self.user, active_connections=0
+        ).update(is_watching=False)
 
 # ============================================
 # Utility function to send notifications

@@ -12,7 +12,8 @@ from .models import (
     UserStore, Rating, Transaction, Chat, Message, Dispute,
     Location, ItemLocationHistory, StorageFeePayment, Notification,
     ProductReview, StoreReview, StoreFollow, StoreCoupon, CouponCollection,
-    LiveSession, LiveSessionItem, LiveSessionComment,
+    LiveSession, LiveSessionItem, LiveSessionComment, LiveSessionViewer,
+    LiveSessionModerator, LiveSessionBan,
 )
 from .services.support import SUPPORT_USERNAME
 
@@ -21,14 +22,25 @@ User = get_user_model()
 
 class UserSerializer(serializers.ModelSerializer):
     """User serializer"""
+    avatar_url = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ['id', 'username', 'email', 'phone', 'trust_score',
+        fields = ['id', 'username', 'first_name', 'last_name', 'email', 'phone', 'trust_score',
                   'total_sales', 'total_purchases', 'email_verified',
-                  'phone_verified', 'identity_verified', 'date_joined']
+                  'phone_verified', 'identity_verified', 'date_joined',
+                  'avatar', 'avatar_url', 'bio', 'date_of_birth']
         read_only_fields = ['trust_score', 'total_sales', 'total_purchases',
                             'email_verified', 'phone_verified', 'identity_verified']
+
+    def get_avatar_url(self, obj):
+        """Get full URL for avatar"""
+        if obj.avatar:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.avatar.url)
+            return obj.avatar.url
+        return None
 
     def update(self, instance, validated_data):
         # Changing the verified address means the old verification no longer
@@ -200,6 +212,7 @@ class ItemSerializer(serializers.ModelSerializer):
     original_price = serializers.SerializerMethodField()
     discount_percentage = serializers.SerializerMethodField()
     total_reviews = serializers.SerializerMethodField()
+    representative_info = serializers.SerializerMethodField()
 
     class Meta:
         model = Item
@@ -211,10 +224,29 @@ class ItemSerializer(serializers.ModelSerializer):
             'rating', 'sold_count', 'total_reviews',
             'is_daily_deal',
             'current_location', 'location_history', 'images',
-            'distance_km', 'created_at', 'updated_at'
+            'distance_km', 'created_at', 'updated_at', 'representative_info'
         ]
         read_only_fields = ['owner', 'current_holder', 'status', 'current_location',
                             'rating', 'sold_count']
+
+    def get_representative_info(self, obj):
+        """
+        Populated only when the view passes a `representative_by_item_id` map
+        in context (e.g. a store's public item listing) — lets the buyer's
+        app route the reservation through the representative so the
+        commission gets attributed. None everywhere else.
+        """
+        rep_map = self.context.get('representative_by_item_id')
+        if not rep_map:
+            return None
+        rep = rep_map.get(obj.id)
+        if not rep:
+            return None
+        return {
+            'representative_assignment_id': rep.id,
+            'representative_username': rep.representative.username,
+            'commission_percentage': str(rep.commission_percentage),
+        }
 
     def get_price(self, obj):
         fixed_listing = getattr(obj, 'fixed_listing', None)
@@ -376,6 +408,29 @@ class FixedPriceListingSerializer(serializers.ModelSerializer):
     def get_discount_percentage(self, obj):
         return obj.discount_percentage
 
+    def validate_price(self, value):
+        """Ensure price is positive"""
+        if value <= 0:
+            raise serializers.ValidationError("Price must be greater than 0")
+        return value
+
+    def validate_original_price(self, value):
+        """Ensure the reference price (if set) is positive"""
+        if value is not None and value <= 0:
+            raise serializers.ValidationError("Original price must be greater than 0")
+        return value
+
+    def validate(self, attrs):
+        """When a discount reference price is set, the actual price must be lower than it.
+        Falls back to the existing instance values for fields not present in a partial update."""
+        price = attrs.get('price', getattr(self.instance, 'price', None))
+        original_price = attrs.get('original_price', getattr(self.instance, 'original_price', None))
+        if original_price is not None and price is not None and price >= original_price:
+            raise serializers.ValidationError({
+                'price': 'Price must be lower than the original price when a discount is set.'
+            })
+        return attrs
+
 
 class FixedPriceListingCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating/updating fixed price listings"""
@@ -402,6 +457,16 @@ class FixedPriceListingCreateSerializer(serializers.ModelSerializer):
         if value is not None and value <= 0:
             raise serializers.ValidationError("Original price must be greater than 0")
         return value
+
+    def validate(self, attrs):
+        """When a discount reference price is set, the actual price must be lower than it"""
+        price = attrs.get('price')
+        original_price = attrs.get('original_price')
+        if original_price is not None and price is not None and price >= original_price:
+            raise serializers.ValidationError({
+                'price': 'Price must be lower than the original price when a discount is set.'
+            })
+        return attrs
 
 
 class BidSerializer(serializers.ModelSerializer):
@@ -840,19 +905,44 @@ class DeliveryOrderSerializer(serializers.ModelSerializer):
     """
     reservation = serializers.PrimaryKeyRelatedField(read_only=True)
     batch = serializers.PrimaryKeyRelatedField(read_only=True)
+    from_maps_url = serializers.SerializerMethodField()
+    to_maps_url = serializers.SerializerMethodField()
 
     class Meta:
         model = DeliveryOrder
         fields = [
             'id', 'reservation', 'batch', 'direction', 'status',
-            'from_name', 'from_phone', 'from_address', 'from_lat', 'from_lng',
-            'to_name', 'to_phone', 'to_address', 'to_lat', 'to_lng',
+            'from_name', 'from_phone', 'from_address', 'from_lat', 'from_lng', 'from_maps_url',
+            'to_name', 'to_phone', 'to_address', 'to_lat', 'to_lng', 'to_maps_url',
             'item_summary', 'quantity', 'special_notes', 'cash_to_collect',
             'cash_collected', 'cash_collected_at', 'delivery_fee',
             'failure_reason',
             'assigned_at', 'picked_up_at', 'delivered_at', 'confirmed_at', 'refused_at',
         ]
         read_only_fields = fields
+
+    @staticmethod
+    def _maps_url(lat, lng, address):
+        """
+        A link any maps app/site can open — coordinates when we have them
+        (precise pin), otherwise the free-text address as a search query.
+        The `q=` format works universally (Google Maps, and most map apps
+        register as a handler for it too) without needing a native SDK.
+        """
+        import urllib.parse
+        if lat is not None and lng is not None:
+            query = f'{lat},{lng}'
+        elif address:
+            query = address
+        else:
+            return None
+        return f'https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(query)}'
+
+    def get_from_maps_url(self, obj):
+        return self._maps_url(obj.from_lat, obj.from_lng, obj.from_address)
+
+    def get_to_maps_url(self, obj):
+        return self._maps_url(obj.to_lat, obj.to_lng, obj.to_address)
 
 
 class CreateDisputeSerializer(serializers.Serializer):
@@ -1372,7 +1462,7 @@ class ChatSerializer(serializers.ModelSerializer):
         if not request or not request.user:
             return None
         other = obj.get_other_user(request.user)
-        return UserSerializer(other).data
+        return UserSerializer(other, context=self.context).data
 
     def get_is_archived(self, obj):
         request = self.context.get('request')
@@ -1423,6 +1513,7 @@ class ChatDetailSerializer(serializers.ModelSerializer):
     has_more_messages = serializers.SerializerMethodField()
     unread_count = serializers.SerializerMethodField()
     other_user = serializers.SerializerMethodField()
+    other_user_online = serializers.SerializerMethodField()
     is_support = serializers.SerializerMethodField()
     is_own_store = serializers.SerializerMethodField()
 
@@ -1430,7 +1521,8 @@ class ChatDetailSerializer(serializers.ModelSerializer):
         model = Chat
         fields = [
             'id', 'item', 'store', 'buyer', 'seller', 'other_user',
-            'messages', 'has_more_messages', 'unread_count', 'is_active',
+            'other_user_online', 'messages', 'has_more_messages',
+            'unread_count', 'is_active',
             'is_support', 'is_own_store', 'created_at', 'updated_at'
         ]
 
@@ -1497,7 +1589,20 @@ class ChatDetailSerializer(serializers.ModelSerializer):
         if not request or not request.user:
             return None
         other = obj.get_other_user(request.user)
-        return UserSerializer(other).data
+        return UserSerializer(other, context=self.context).data
+
+    def get_other_user_online(self, obj):
+        """Whether the other participant currently has this exact chat open
+        over a WebSocket — reuses the presence cache ChatConsumer already
+        maintains to skip redundant push notifications."""
+        request = self.context.get('request')
+        if not request or not request.user:
+            return False
+        other = obj.get_other_user(request.user)
+        if not other:
+            return False
+        from .consumers import is_user_present_in_chat
+        return is_user_present_in_chat(obj.id, other.id)
 
 
 class ChatCreateSerializer(serializers.Serializer):
@@ -1583,12 +1688,17 @@ class RatingCreateSerializer(serializers.ModelSerializer):
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
     """User registration serializer"""
+    # first_name/last_name are blank=True on the model (Django's default),
+    # but the real name is required at signup so it's available immediately
+    # for display instead of staying empty until the user visits settings.
+    first_name = serializers.CharField(required=True, allow_blank=False, max_length=150)
+    last_name = serializers.CharField(required=True, allow_blank=False, max_length=150)
     password = serializers.CharField(write_only=True, min_length=8)
     password2 = serializers.CharField(write_only=True, min_length=8)
 
     class Meta:
         model = User
-        fields = ['username', 'email', 'phone', 'password', 'password2']
+        fields = ['username', 'first_name', 'last_name', 'email', 'phone', 'password', 'password2']
 
     def validate(self, data):
         if data['password'] != data['password2']:
@@ -1764,6 +1874,7 @@ class UserStoreSerializer(serializers.ModelSerializer):
     positive_review_percent = serializers.SerializerMethodField()
     communication_rating = serializers.SerializerMethodField()
     total_sold = serializers.SerializerMethodField()
+    live_session_id = serializers.SerializerMethodField()
 
     class Meta:
         model = UserStore
@@ -1774,7 +1885,7 @@ class UserStoreSerializer(serializers.ModelSerializer):
             'total_items', 'total_active_items', 'distance_km',
             'rating', 'total_reviews',
             'is_following', 'followers_count', 'positive_review_percent',
-            'communication_rating', 'total_sold',
+            'communication_rating', 'total_sold', 'live_session_id',
             'phone_number', 'whatsapp_number',
         ]
         read_only_fields = ['user', 'created_at', 'rating']
@@ -1839,6 +1950,12 @@ class UserStoreSerializer(serializers.ModelSerializer):
     def get_total_sold(self, obj):
         """Total number of items the store owner has sold"""
         return obj.user.total_sales
+
+    def get_live_session_id(self, obj):
+        """ID of this store's currently-live session, if any (drives the
+        pulsing "مباشر" indicator on the store's avatar in the app)."""
+        live_session = obj.live_sessions.filter(status='live').only('id').first()
+        return live_session.id if live_session else None
 
 
 class PublicUserStoreSerializer(serializers.ModelSerializer):
@@ -2042,6 +2159,62 @@ class LiveSessionCommentCreateSerializer(serializers.Serializer):
         if not value.strip():
             raise serializers.ValidationError("Comment cannot be empty")
         return value.strip()
+
+
+class LiveSessionViewerSerializer(serializers.ModelSerializer):
+    """A moderation-only listing row — store owner use, so username/id is
+    enough (unlike LiveSessionCommentSerializer this never reaches anonymous
+    viewers)."""
+    username = serializers.CharField(source='user.username', read_only=True)
+    user_id = serializers.IntegerField(source='user.id', read_only=True)
+    # Populated by the view's queryset annotation (Exists() subqueries) —
+    # not real model fields, so no source= needed as long as the attribute
+    # name matches the annotation.
+    is_moderator = serializers.BooleanField(read_only=True, default=False)
+    is_banned = serializers.BooleanField(read_only=True, default=False)
+
+    class Meta:
+        model = LiveSessionViewer
+        fields = ['user_id', 'username', 'is_watching', 'is_moderator', 'is_banned', 'joined_at', 'last_seen_at']
+
+
+class LiveSessionModeratorSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source='user.username', read_only=True)
+    user_id = serializers.IntegerField(source='user.id', read_only=True)
+    added_by_username = serializers.CharField(source='added_by.username', read_only=True)
+
+    class Meta:
+        model = LiveSessionModerator
+        fields = ['user_id', 'username', 'added_by_username', 'created_at']
+
+
+class AddLiveSessionModeratorSerializer(serializers.Serializer):
+    user_id = serializers.IntegerField()
+
+    def validate_user_id(self, value):
+        if not User.objects.filter(id=value).exists():
+            raise serializers.ValidationError("User not found")
+        return value
+
+
+class LiveSessionBanSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source='user.username', read_only=True)
+    user_id = serializers.IntegerField(source='user.id', read_only=True)
+    banned_by_username = serializers.CharField(source='banned_by.username', read_only=True)
+
+    class Meta:
+        model = LiveSessionBan
+        fields = ['user_id', 'username', 'banned_by_username', 'reason', 'created_at']
+
+
+class BanLiveSessionViewerSerializer(serializers.Serializer):
+    user_id = serializers.IntegerField()
+    reason = serializers.CharField(max_length=200, required=False, allow_blank=True, default='')
+
+    def validate_user_id(self, value):
+        if not User.objects.filter(id=value).exists():
+            raise serializers.ValidationError("User not found")
+        return value
 
 
 class ShowLiveItemSerializer(serializers.Serializer):

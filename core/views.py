@@ -19,7 +19,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny,IsAdminUser
 from rest_framework.pagination import PageNumberPagination
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db import transaction, IntegrityError
-from django.db.models import Q, Count, F
+from django.db.models import Q, Count, F, Exists, OuterRef
 from django.core.cache import cache
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -39,7 +39,8 @@ from .models import (ItemImage, Location,
     Reservation, Representative, ItemTransfer, Category,
     UserStore, Rating, Transaction, Chat, Message, Dispute, Notification,
     ProductReview, StoreReview, StoreFollow, StoreCoupon, CouponCollection,
-    LiveSession, LiveSessionItem, LiveSessionLike, LiveSessionComment,
+    LiveSession, LiveSessionItem, LiveSessionLike, LiveSessionComment, LiveSessionViewer,
+    LiveSessionModerator, LiveSessionBan,
     UserCategoryAffinity, record_interest,
 )
 
@@ -74,7 +75,9 @@ from .serializers import (ItemImageSerializer, FixedPriceListingCreateSerializer
                           LiveSessionCardSerializer, LiveSessionSerializer, LiveSessionCreateSerializer,
                           LiveSessionItemSerializer, LiveSessionItemCreateSerializer,
                           ReserveLiveItemSerializer, LiveSessionCommentSerializer,
-                          LiveSessionCommentCreateSerializer, ShowLiveItemSerializer,
+                          LiveSessionCommentCreateSerializer, LiveSessionViewerSerializer,
+                          LiveSessionModeratorSerializer, AddLiveSessionModeratorSerializer,
+                          LiveSessionBanSerializer, BanLiveSessionViewerSerializer, ShowLiveItemSerializer,
                           QuickShowItemSerializer, QuickLiveAuctionSerializer,
                           LiveAuctionSerializer,
                           )
@@ -1074,6 +1077,7 @@ from .notifications import (
     notify_dispute_created,
     notify_new_message,
     notify_push,
+    bidi_isolate,
 )
 from .models import DeliveryOrder
 from .serializers import DeliveryOrderSerializer
@@ -1760,14 +1764,19 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-def _create_quick_live_item(owner, title, description, category_id, condition, quantity):
+def _create_quick_live_item(owner, title, description, category_id, condition, quantity, force_live_category=False):
     """
     Creates a minimal backing Item for a live 'quick' feature (quick-show or
     quick-auction) — a product that was never added to the catalog before.
     Falls back to a shared 'Live' category when none is given. Shared by
     LiveSessionViewSet.quick_show and .quick_auction so both stay identical.
+
+    force_live_category always puts the item in the shared 'Live' category,
+    even if a category_id was passed — quick_auction sets this so every
+    auction started during a broadcast is browsable under 'Live', regardless
+    of what the streamer picked.
     """
-    if category_id:
+    if category_id and not force_live_category:
         category = Category.objects.get(id=category_id)
     else:
         category, _ = Category.objects.get_or_create(
@@ -1784,6 +1793,16 @@ def _create_quick_live_item(owner, title, description, category_id, condition, q
         quantity=quantity,
         status='active',
     )
+
+
+def _can_moderate_live_session(user, session):
+    """True for the session's own store owner, or any user that owner has
+    added as a moderator for this specific session (LiveSessionModerator is
+    session-scoped — it doesn't carry over to the store's other broadcasts)."""
+    store = getattr(user, 'store', None)
+    if store is not None and store.id == session.store_id:
+        return True
+    return session.moderators.filter(user_id=user.id).exists()
 
 
 class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
@@ -1813,9 +1832,11 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             return [AllowAny()]
         if self.action in ['create', 'go_live', 'end_session', 'cancel_session',
                             'queue_items', 'queue_item_detail', 'now_showing',
-                            'show_item', 'catalog', 'quick_show', 'quick_auction']:
+                            'show_item', 'catalog', 'quick_show', 'quick_auction',
+                            'moderators', 'moderator_detail']:
             return [IsStoreOwner()]
-        if self.action in ['reserve', 'like', 'unlike', 'my_sessions', 'comments', 'comment_detail']:
+        if self.action in ['reserve', 'like', 'unlike', 'my_sessions', 'comments', 'comment_detail',
+                            'viewers', 'bans', 'ban_detail']:
             return [IsAuthenticated()]
         return [AllowAny()]
 
@@ -2385,6 +2406,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 category_id=validated.get('category_id'),
                 condition=validated.get('condition'),
                 quantity=validated['quantity'],
+                force_live_category=True,
             )
 
             now = timezone.now()
@@ -2445,6 +2467,12 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 'message': 'You can only comment while the stream is live'
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        if session.bans.filter(user_id=request.user.id).exists():
+            return Response({
+                'success': False,
+                'message': 'You have been banned from this live session'
+            }, status=status.HTTP_403_FORBIDDEN)
+
         serializer = LiveSessionCommentCreateSerializer(data=request.data)
         if not serializer.is_valid():
             return Response({
@@ -2466,7 +2494,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
     @action(detail=True, methods=['delete'], url_path='comments/(?P<comment_id>[^/.]+)')
     def comment_detail(self, request, pk=None, comment_id=None):
-        """Delete a comment — either its own author or the session's store owner can moderate it"""
+        """Delete a comment — its own author, the store owner, or a session moderator can moderate it"""
         session = self.get_object()
         try:
             comment = session.comments.get(id=comment_id)
@@ -2474,9 +2502,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             return Response({'success': False, 'message': 'Comment not found'}, status=status.HTTP_404_NOT_FOUND)
 
         is_author = comment.user_id == request.user.id
-        store = getattr(request.user, 'store', None)
-        is_store_owner = store is not None and store.id == session.store_id
-        if not (is_author or is_store_owner):
+        if not (is_author or _can_moderate_live_session(request.user, session)):
             return Response({
                 'success': False,
                 'message': 'You cannot delete this comment'
@@ -2486,6 +2512,158 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         broadcast_live_event(session.id, 'comment_deleted', {'comment_id': int(comment_id)})
 
         return Response({'success': True, 'message': 'Comment deleted'}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='viewers')
+    def viewers(self, request, pk=None):
+        """Paginated, searchable list of signed-in users who have watched this
+        session (store owner or a session moderator) — anonymous viewers
+        aren't listed here, see LiveSessionViewer's docstring."""
+        session = self.get_object()
+        if not _can_moderate_live_session(request.user, session):
+            return Response({'success': False, 'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+
+        queryset = session.viewers.select_related('user').annotate(
+            is_moderator=Exists(
+                LiveSessionModerator.objects.filter(session_id=session.id, user_id=OuterRef('user_id'))
+            ),
+            is_banned=Exists(
+                LiveSessionBan.objects.filter(session_id=session.id, user_id=OuterRef('user_id'))
+            ),
+        )
+
+        search = request.query_params.get('search', '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(user__username__icontains=search) |
+                Q(user__first_name__icontains=search) |
+                Q(user__last_name__icontains=search)
+            )
+
+        active_only = request.query_params.get('active_only', '').lower()
+        if active_only in ('true', '1'):
+            queryset = queryset.filter(is_watching=True)
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = LiveSessionViewerSerializer(page, many=True, context={'request': request})
+            return self.get_paginated_response(serializer.data)
+        serializer = LiveSessionViewerSerializer(queryset, many=True, context={'request': request})
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get', 'post'], url_path='moderators')
+    def moderators(self, request, pk=None):
+        """List this session's moderators (GET) or grant moderator powers to
+        a user (POST) — store owner only. Moderators can delete comments and
+        ban/unban viewers for this specific session (see LiveSessionModerator's
+        docstring — the grant doesn't carry over to the store's other broadcasts)."""
+        session = self.get_object()
+
+        if request.method == 'GET':
+            mods = session.moderators.select_related('user', 'added_by').order_by('-created_at')
+            return Response({
+                'success': True,
+                'data': LiveSessionModeratorSerializer(mods, many=True).data
+            })
+
+        serializer = AddLiveSessionModeratorSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                'success': False,
+                'message': 'Validation failed',
+                'errors': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        target_user_id = serializer.validated_data['user_id']
+        if target_user_id == request.user.id:
+            return Response({
+                'success': False,
+                'message': 'You already own this session'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        moderator, created = LiveSessionModerator.objects.get_or_create(
+            session=session, user_id=target_user_id, defaults={'added_by': request.user}
+        )
+
+        return Response({
+            'success': True,
+            'message': 'Moderator added' if created else 'Already a moderator',
+            'data': LiveSessionModeratorSerializer(moderator).data
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+    @action(detail=True, methods=['delete'], url_path='moderators/(?P<user_id>[^/.]+)')
+    def moderator_detail(self, request, pk=None, user_id=None):
+        """Revoke a user's moderator powers for this session — store owner only"""
+        session = self.get_object()
+        deleted, _ = session.moderators.filter(user_id=user_id).delete()
+        if not deleted:
+            return Response({'success': False, 'message': 'Not a moderator'}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response({'success': True, 'message': 'Moderator removed'}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get', 'post'], url_path='bans')
+    def bans(self, request, pk=None):
+        """List banned viewers (GET) or ban one (POST) — store owner or a
+        session moderator. A ban is scoped to this session only: the target
+        can't post comments here and can't reconnect to its WebSocket room;
+        it does not affect the store's other broadcasts."""
+        session = self.get_object()
+        if not _can_moderate_live_session(request.user, session):
+            return Response({'success': False, 'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+
+        if request.method == 'GET':
+            banned = session.bans.select_related('user', 'banned_by').order_by('-created_at')
+            return Response({
+                'success': True,
+                'data': LiveSessionBanSerializer(banned, many=True).data
+            })
+
+        serializer = BanLiveSessionViewerSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                'success': False,
+                'message': 'Validation failed',
+                'errors': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        target_user_id = serializer.validated_data['user_id']
+        if target_user_id == session.store.user_id:
+            return Response({
+                'success': False,
+                'message': 'Cannot ban the store owner'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        if target_user_id == request.user.id:
+            return Response({
+                'success': False,
+                'message': 'Cannot ban yourself'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        ban, created = LiveSessionBan.objects.get_or_create(
+            session=session, user_id=target_user_id,
+            defaults={'banned_by': request.user, 'reason': serializer.validated_data['reason']}
+        )
+
+        if created:
+            broadcast_live_event(session.id, 'viewer_banned', {'user_id': target_user_id})
+
+        return Response({
+            'success': True,
+            'message': 'User banned' if created else 'User already banned',
+            'data': LiveSessionBanSerializer(ban).data
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+    @action(detail=True, methods=['delete'], url_path='bans/(?P<user_id>[^/.]+)')
+    def ban_detail(self, request, pk=None, user_id=None):
+        """Unban a viewer from this session — store owner or a session moderator"""
+        session = self.get_object()
+        if not _can_moderate_live_session(request.user, session):
+            return Response({'success': False, 'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+
+        deleted, _ = session.bans.filter(user_id=user_id).delete()
+        if not deleted:
+            return Response({'success': False, 'message': 'Not banned'}, status=status.HTTP_404_NOT_FOUND)
+
+        broadcast_live_event(session.id, 'viewer_unbanned', {'user_id': int(user_id)})
+        return Response({'success': True, 'message': 'Ban removed'}, status=status.HTTP_200_OK)
 
     @swagger_auto_schema(
         operation_description="Reserve the item currently 'now showing' in this session — deposit is charged immediately from the buyer's wallet",
@@ -4405,7 +4583,10 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                 'message': 'This representative is not authorized to complete sales'
             }, status=status.HTTP_403_FORBIDDEN)
 
-        serializer = CreateReservationSerializer(data=request.data)
+        serializer = CreateReservationSerializer(
+            data=request.data,
+            context={'request': request}
+        )
 
         if not serializer.is_valid():
             return Response({
@@ -4757,6 +4938,9 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
                 status='pending',
             )
 
+        from .tasks import send_resale_agreement_request_notification
+        send_resale_agreement_request_notification.delay(transfer.id)
+
         return Response({
             'success': True,
             'message': f'Agreement request sent to {item.owner.username}.',
@@ -4793,6 +4977,10 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
                 transfer.activate()
         except ValueError as e:
             return Response({'success': False, 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        from .tasks import send_resale_agreement_approved_notification
+        send_resale_agreement_approved_notification.delay(transfer.id)
+
         return Response({
             'success': True,
             'message': 'Agreement activated. The reseller now owns the transferred quantity.',
@@ -4814,6 +5002,10 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
             transfer.rejected_at = timezone.now()
             transfer.rejection_reason = serializer.validated_data.get('rejection_reason', '')
             transfer.save(update_fields=['status', 'rejected_at', 'rejection_reason'])
+
+        from .tasks import send_resale_agreement_rejected_notification
+        send_resale_agreement_rejected_notification.delay(transfer.id)
+
         return Response({'success': True, 'message': 'Agreement rejected', 'data': ItemTransferSerializer(transfer, context={'request': request}).data})
 
     @action(detail=True, methods=['post'])
@@ -4835,6 +5027,10 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
             transfer.status = 'cancelled'
             transfer.cancelled_at = timezone.now()
             transfer.save(update_fields=['status', 'cancelled_at'])
+
+        from .tasks import send_resale_agreement_cancelled_notification
+        send_resale_agreement_cancelled_notification.delay(transfer.id, request.user.id)
+
         return Response({'success': True, 'message': 'Agreement cancelled', 'data': ItemTransferSerializer(transfer, context={'request': request}).data})
 
     @action(detail=True, methods=['post'])
@@ -4920,11 +5116,11 @@ class ChatViewSet(viewsets.ModelViewSet):
         # unconditionally, opening one from the archive view would 404.
         if self.action == 'list':
             show_archived = self.request.query_params.get('archived', 'false').lower() == 'true'
-            if not show_archived:
-                queryset = queryset.exclude(
-                    Q(buyer=user, is_archived_by_buyer=True) |
-                    Q(seller=user, is_archived_by_seller=True)
-                )
+            archived_q = (
+                Q(buyer=user, is_archived_by_buyer=True) |
+                Q(seller=user, is_archived_by_seller=True)
+            )
+            queryset = queryset.filter(archived_q) if show_archived else queryset.exclude(archived_q)
 
         # صراحةً بدل الاتكال على Chat.Meta.ordering فقط — الأحدث نشاطاً أولاً
         # (Message.save() يحدّث chat.updated_at في كل رسالة)، حتى تبقى
@@ -5618,7 +5814,7 @@ class MessageViewSet(viewsets.ModelViewSet):
             offer_accepted_title = 'تم قبول عرضك'
             offer_accepted_body = (
                 f'وافق البائع على عرضك بقيمة {message.offer_amount} '
-                f'لمنتج "{message.chat.item.title if message.chat.item else ""}".'
+                f'لمنتج "{bidi_isolate(message.chat.item.title) if message.chat.item else ""}".'
             )
             try:
                 send_websocket_notification(
@@ -5716,7 +5912,7 @@ class MessageViewSet(viewsets.ModelViewSet):
                     message.chat.buyer,
                     'تم رفض عرضك',
                     f'رفض البائع عرضك بقيمة {message.offer_amount} '
-                    f'لمنتج "{message.chat.item.title if message.chat.item else ""}".',
+                    f'لمنتج "{bidi_isolate(message.chat.item.title) if message.chat.item else ""}".',
                     data={
                         'type': 'new_message',
                         'chat_id': str(message.chat_id),
@@ -6028,6 +6224,9 @@ class UserStoreViewSet(viewsets.ModelViewSet):
         Includes:
         - Items owned by the store owner
         - Items being resold by the store owner (if include_transferred=true)
+        - Items the store owner represents as an accepted/active representative
+          (can_list=True), so their sales agent items show up in their own
+          storefront alongside items they own
         """
         try:
             user = User.objects.get(username=username)
@@ -6035,23 +6234,30 @@ class UserStoreViewSet(viewsets.ModelViewSet):
 
             include_transferred = request.query_params.get('include_transferred', 'true').lower() == 'true'
 
+            represented_item_ids = Representative.objects.filter(
+                representative=user,
+                status__in=['accepted', 'active'],
+                can_list=True,
+            ).values_list('item_id', flat=True)
+
+            visibility_filter = Q(owner=user) | Q(id__in=represented_item_ids)
             if include_transferred:
-                # Get items where user is owner OR current holder
-                items = Item.objects.filter(
-                    status__in=['active', 'reserved']
-                ).filter(
-                    Q(owner=user) | Q(current_holder=user)
-                ).filter(
-                    Q(fixed_listing__isnull=False) | Q(auction_listing__isnull=False)
-                ).select_related('owner', 'current_holder', 'category', 'current_location').prefetch_related('images')
-            else:
-                # Only items owned by user
-                items = Item.objects.filter(
-                    owner=user,
-                    status__in=['active', 'reserved']
-                ).filter(
-                    Q(fixed_listing__isnull=False) | Q(auction_listing__isnull=False)
-                ).select_related('owner', 'current_holder', 'category', 'current_location').prefetch_related('images')
+                visibility_filter |= Q(current_holder=user)
+
+            items = Item.objects.filter(
+                status__in=['active', 'reserved']
+            ).filter(visibility_filter).filter(
+                Q(fixed_listing__isnull=False) | Q(auction_listing__isnull=False)
+            ).select_related('owner', 'current_holder', 'category', 'current_location').prefetch_related('images')
+
+            representative_by_item_id = {
+                rep.item_id: rep for rep in Representative.objects.filter(
+                    representative=user,
+                    status__in=['accepted', 'active'],
+                    can_list=True,
+                    item__in=items,
+                ).select_related('representative')
+            }
 
             return Response({
                 'success': True,
@@ -6061,7 +6267,10 @@ class UserStoreViewSet(viewsets.ModelViewSet):
                     'description': store.description,
                     'owner': user.username
                 },
-                'data': ItemSerializer(items, many=True, context={'request': request}).data
+                'data': ItemSerializer(
+                    items, many=True,
+                    context={'request': request, 'representative_by_item_id': representative_by_item_id}
+                ).data
             }, status=status.HTTP_200_OK)
 
         except User.DoesNotExist:

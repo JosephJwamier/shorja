@@ -28,6 +28,7 @@ from .views import (
     LiveSessionViewSet,
     DeliveryOrderViewSet,
 )
+from .legal_api import LegalDocumentViewSet
 
 
 # Router for API endpoints
@@ -54,6 +55,7 @@ router.register(r'product-reviews', ProductReviewViewSet, basename='product-revi
 router.register(r'store-reviews', StoreReviewViewSet, basename='store-review')
 router.register(r'live-sessions', LiveSessionViewSet, basename='live-session')
 router.register(r'delivery-orders', DeliveryOrderViewSet, basename='delivery-order')
+router.register(r'legal/documents', LegalDocumentViewSet, basename='legal-document')
 
 urlpatterns = [
 

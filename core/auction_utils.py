@@ -7,10 +7,11 @@ sale — choosing between paying the remaining balance now or paying nothing
 more (the bid deposit already covers the reservation's deposit_amount) and
 the rest in cash at delivery. See ReservationViewSet.complete, which treats
 an auction-linked reservation's deposit as already collected, and
-wallet_utils.release_reservation_payment, which only pays the seller (and
-transfers item ownership) once the sale is actually settled — buyer
-approval, the 7-day auto-release, or the unclaimed-reservation timeout in
-tasks.auto_complete_unclaimed_auction_reservations.
+wallet_utils.release_reservation_payment, which pays the seller once the
+sale is actually settled — buyer approval, the 7-day auto-release, or the
+unclaimed-reservation timeout in tasks.auto_complete_unclaimed_auction_reservations.
+Item.owner is untouched throughout: an auction winner is just the
+Reservation's buyer, same as any other sale.
 """
 from datetime import timedelta
 from decimal import Decimal

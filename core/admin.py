@@ -23,7 +23,7 @@ from .models import (
     Rating, ProductReview, StoreReview, Chat, Message,
     StoreFollow, StoreCoupon, CouponCollection,
     LiveSession, LiveSessionItem, LiveSessionLike, LiveSessionComment,
-    DeliveryCompany, DeliveryOrder, CashSettlement,
+    DeliveryCompany, DeliveryOrder, CashSettlement, DeliveryBatch,
     Wallet, Notification, DepositRequest, WithdrawalRequest,
 )
 from .services.disputes import resolve_dispute, DisputeResolutionError
@@ -836,6 +836,25 @@ class DeliveryCompanyAdmin(ModelAdmin):
         )
 
 
+@admin.register(DeliveryBatch)
+class DeliveryBatchAdmin(ModelAdmin):
+    """Created only via ReservationViewSet.send_to_delivery_batch (see
+    delivery_utils.combine_deliveries) — a manual add here wouldn't have
+    any real delivery orders to tag as one trip."""
+    list_display = ('id', 'buyer', 'delivery_location', 'company', 'combined_fee', 'order_count', 'created_at')
+    list_filter = ('company',)
+    search_fields = ('buyer__username', 'company__name')
+    raw_id_fields = ('buyer', 'delivery_location', 'company')
+    list_select_related = ('buyer', 'delivery_location', 'company')
+
+    @admin.display(description='عدد الطلبات')
+    def order_count(self, obj):
+        return obj.delivery_orders.count()
+
+    def has_add_permission(self, request):
+        return False
+
+
 @admin.register(DeliveryOrder)
 class DeliveryOrderAdmin(ModelAdmin):
     """
@@ -1124,3 +1143,61 @@ admin.site.unregister(LogEntry)
 @admin.register(LogEntry)
 class LogEntryAdmin(BaseLogEntryAdmin, ModelAdmin):
     list_filter = BaseLogEntryAdmin.list_filter + ['actor']
+
+
+# =============================================================================
+# النظام القانوني — الوثائق والموافقات
+# =============================================================================
+from django import forms
+from .models import LegalDocument, LegalAcceptance
+
+
+@admin.register(LegalDocument)
+class LegalDocumentAdmin(ModelAdmin):
+    list_display = ('title', 'doc_type', 'language', 'version',
+                    'is_published', 'requires_reacceptance', 'effective_at')
+    list_display_links = ('title',)
+    list_filter = ('doc_type', 'language', 'is_published', 'requires_reacceptance')
+    list_editable = ('is_published',)
+    search_fields = ('title', 'summary', 'content')
+    ordering = ('doc_type', 'language', '-version')
+    readonly_fields = ('created_at', 'updated_at')
+    fieldsets = (
+        (None, {
+            'fields': ('doc_type', 'language', 'version', 'title', 'summary'),
+        }),
+        ('المحتوى', {
+            'fields': ('content',),
+            'description': 'محتوى HTML — يُعرض كما هو في التطبيق والصفحة العلنية.',
+        }),
+        ('النشر', {
+            'fields': ('is_published', 'requires_reacceptance', 'effective_at',
+                       'created_at', 'updated_at'),
+        }),
+    )
+    formfield_overrides = {
+        # محرّر أعرض للمحتوى (HTML) بدل الصندوق الصغير الافتراضي.
+        LegalDocument._meta.get_field('content').__class__: {
+            'widget': forms.Textarea(attrs={'rows': 26, 'style': 'font-family:monospace;width:100%;'}),
+        },
+    }
+
+
+@admin.register(LegalAcceptance)
+class LegalAcceptanceAdmin(ModelAdmin):
+    """سجلّ موافقات المستخدمين — للقراءة فقط (دليل إثبات لا يُعدّل يدوياً)."""
+    list_display = ('user', 'document', 'accepted_at', 'ip_address', 'app_version')
+    list_filter = ('document__doc_type', 'document__language', 'document__version')
+    search_fields = ('user__username', 'user__email', 'ip_address', 'app_version')
+    date_hierarchy = 'accepted_at'
+    readonly_fields = ('user', 'document', 'accepted_at', 'ip_address',
+                       'app_version', 'user_agent')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

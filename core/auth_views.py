@@ -10,6 +10,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from django.contrib.auth import authenticate, get_user_model
 from django.db import transaction  # NEW
+from django.utils import timezone
 import logging
 
 from .serializers import (
@@ -116,6 +117,10 @@ class LoginView(generics.GenericAPIView):
         # Generate tokens
         refresh = RefreshToken.for_user(user)
 
+        # Baseline "last seen" for a user who never opens a chat — the live
+        # updates during a session come from ChatConsumer instead.
+        User.objects.filter(pk=user.pk).update(last_seen_at=timezone.now())
+
         # NEW: Check if user has locations
         has_locations = Location.objects.filter(user=user).exists()
         primary_location = Location.objects.filter(user=user, is_primary=True).first()
@@ -168,18 +173,17 @@ def send_email_verification_code(user):
     Returns whether the email actually went out."""
     code = user.generate_verification_code('email')
     message = f"""
-    Hi {user.username},
+    مرحباً {user.username}،
 
-    Your ReSell Trust email verification code is: {code}
+    رمز تفعيل بريدك الإلكتروني في سوقي هو: {code}
 
-    This code expires in 15 minutes.
+    ينتهي صلاحية هذا الرمز خلال 15 دقيقة.
 
-    Best regards,
-    ReSell Trust Team
+    فريق سوقي
     """
     return NotificationService.send_email(
         to_email=user.email,
-        subject="Verify Your Email - ReSell Trust",
+        subject="تفعيل بريدك الإلكتروني - سوقي",
         message=message
     )
 
@@ -239,7 +243,7 @@ class VerifyPhoneView(APIView):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         code = user.generate_verification_code('phone')
-        message = f"Your ReSell Trust verification code is: {code}"
+        message = f"رمز التفعيل الخاص بك في سوقي هو: {code}"
         sent = NotificationService.send_sms(user.phone, message)
 
         if not sent:
@@ -306,19 +310,18 @@ class ResetPasswordView(APIView):
             code = user.generate_verification_code('password_reset')
 
             message = f"""
-            Hi {user.username},
+            مرحباً {user.username}،
 
-            You requested a password reset. Your code is: {code}
+            لقد طلبت إعادة تعيين كلمة المرور. رمزك هو: {code}
 
-            This code expires in 15 minutes. If you didn't request this, please ignore this email.
+            ينتهي صلاحية هذا الرمز خلال 15 دقيقة. إذا لم تطلب ذلك، يرجى تجاهل هذه الرسالة.
 
-            Best regards,
-            ReSell Trust Team
+            فريق سوقي
             """
 
             NotificationService.send_email(
                 to_email=user.email,
-                subject="Reset Your Password - ReSell Trust",
+                subject="إعادة تعيين كلمة المرور - سوقي",
                 message=message
             )
 

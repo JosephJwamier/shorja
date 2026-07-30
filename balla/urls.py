@@ -17,6 +17,7 @@ from drf_yasg.views import get_schema_view
 from drf_yasg import openapi
 from rest_framework import permissions
 from two_factor.urls import urlpatterns as tf_urls
+from core.legal_views import legal_document_page
 
 schema_view = get_schema_view(
     openapi.Info(
@@ -63,6 +64,10 @@ urlpatterns = [
     path('api/auth/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('api/auth/token/verify/', TokenVerifyView.as_view(), name='token_verify'),
+
+    # Public legal pages — علنية (رابط لمتاجر التطبيقات والإعلانات المدفوعة)
+    path('legal/privacy/', legal_document_page, {'doc_type': 'privacy'}, name='legal-privacy'),
+    path('legal/terms/', legal_document_page, {'doc_type': 'terms'}, name='legal-terms'),
 
     # API Routes
     path('api/', include('core.urls')),

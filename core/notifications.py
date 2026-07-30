@@ -23,6 +23,47 @@ except ImportError:
 # Firebase FCM push notifications
 from .firebase import send_push_notification, FIREBASE_AVAILABLE
 
+# Unicode bidi isolates (Bidi_Control chars, unaffected by GSM-7/UCS-2 concerns
+# since Arabic already forces Unicode SMS encoding). FSI picks the embedded
+# run's own direction (Arabic or Latin) without letting it drag the
+# surrounding Arabic sentence out of order; PDI closes the isolation.
+_FSI = '⁨'
+_PDI = '⁩'
+
+
+def bidi_isolate(value):
+    """
+    Wrap a dynamic value (product title, username, store name, ...) that may
+    contain Latin/English text before splicing it into an Arabic sentence.
+    Without this, the bidi algorithm can reorder punctuation/words around an
+    embedded LTR run (e.g. an English product name) and scramble the Arabic
+    text around it. Safe to use even when the value turns out to be Arabic.
+    """
+    return f'{_FSI}{value}{_PDI}'
+
+
+# Arabic labels for Transaction.transaction_type, kept local to this module so
+# notification copy can be Arabic without changing Transaction's stored
+# choices (which are relied on elsewhere and would need a migration).
+_TRANSACTION_TYPE_LABELS_AR = {
+    'deposit': 'عربون',
+    'payment': 'دفعة',
+    'refund': 'استرداد',
+    'commission': 'عمولة',
+    'penalty': 'غرامة',
+    'withdrawal': 'سحب',
+    'storage_fee': 'رسوم تخزين',
+    'purchase': 'شراء',
+    'payout': 'صرف',
+    'delivery_fee': 'رسوم توصيل',
+}
+
+
+def _transaction_type_label(transaction):
+    return _TRANSACTION_TYPE_LABELS_AR.get(
+        transaction.transaction_type, transaction.get_transaction_type_display()
+    )
+
 
 class NotificationService:
     """Central notification service"""
@@ -129,49 +170,49 @@ def notify_reservation_created(reservation):
     """Notify seller about new reservation and confirm to buyer"""
     seller = reservation.item.owner
     buyer = reservation.buyer
+    item_title = bidi_isolate(reservation.item.title)
 
-    subject = f"New Reservation: {reservation.item.title}"
+    subject = f"حجز جديد: {item_title}"
     message = f"""
-    Hi {seller.username},
+    مرحباً {seller.username}،
 
-    {buyer.username} has reserved your item "{reservation.item.title}".
+    قام {buyer.username} بحجز منتجك "{item_title}".
 
-    Reservation Details:
-    - Item: {reservation.item.title}
-    - Deposit: ${reservation.deposit_amount}
-    - Total Price: ${reservation.total_price}
-    - Expires: {reservation.expires_at.strftime('%Y-%m-%d %H:%M')}
+    تفاصيل الحجز:
+    - المنتج: {item_title}
+    - العربون: ${reservation.deposit_amount}
+    - السعر الإجمالي: ${reservation.total_price}
+    - ينتهي في: {reservation.expires_at.strftime('%Y-%m-%d %H:%M')}
 
-    Please ensure the item is ready for the buyer.
+    يرجى تجهيز المنتج للمشتري.
 
-    Best regards,
-    ReSell Trust Team
+    فريق سوقي
     """
 
     NotificationService.send_email(seller.email, subject, message)
-    notify_push(seller, subject, f"{buyer.username} reserved your item \"{reservation.item.title}\"",
-                data={'type': 'reservation_created', 'reservation_id': str(reservation.id)})
+    notify_push(
+        seller, subject, f'{bidi_isolate(buyer.username)} حجز منتجك "{item_title}".',
+        data={'type': 'reservation_created', 'reservation_id': str(reservation.id)})
 
     # Notify buyer
-    buyer_subject = f"Reservation Confirmed: {reservation.item.title}"
+    buyer_subject = f"تم تأكيد حجزك: {item_title}"
     buyer_message = f"""
-    Hi {buyer.username},
+    مرحباً {buyer.username}،
 
-    Your reservation for "{reservation.item.title}" has been confirmed!
+    تم تأكيد حجزك لمنتج "{item_title}"!
 
-    Reservation Details:
-    - Deposit Paid: ${reservation.deposit_amount}
-    - Remaining: ${reservation.total_price - reservation.deposit_amount}
-    - Expires: {reservation.expires_at.strftime('%Y-%m-%d %H:%M')}
+    تفاصيل الحجز:
+    - العربون المدفوع: ${reservation.deposit_amount}
+    - المتبقي: ${reservation.total_price - reservation.deposit_amount}
+    - ينتهي في: {reservation.expires_at.strftime('%Y-%m-%d %H:%M')}
 
-    Please complete your payment before the expiration time.
+    يرجى إتمام الدفع قبل انتهاء المهلة.
 
-    Best regards,
-    ReSell Trust Team
+    فريق سوقي
     """
 
     NotificationService.send_email(buyer.email, buyer_subject, buyer_message)
-    notify_push(buyer, buyer_subject, f"Your reservation for \"{reservation.item.title}\" is confirmed!",
+    notify_push(buyer, buyer_subject, f'تم تأكيد حجزك لمنتج "{item_title}"!',
                 data={'type': 'reservation_confirmed', 'reservation_id': str(reservation.id)})
 
 
@@ -179,15 +220,16 @@ def notify_reservation_cancelled_by_seller(reservation):
     """Notify buyer that the seller cancelled their reservation"""
     seller = reservation.item.owner
     buyer = reservation.buyer
+    item_title = bidi_isolate(reservation.item.title)
 
-    subject = f"تم إلغاء حجزك: {reservation.item.title}"
+    subject = f"تم إلغاء حجزك: {item_title}"
     message = f"""
     مرحباً {buyer.username}،
 
-    قام البائع {seller.username} بإلغاء حجزك لمنتج "{reservation.item.title}".
+    قام البائع {seller.username} بإلغاء حجزك لمنتج "{item_title}".
 
     تفاصيل الحجز:
-    - المنتج: {reservation.item.title}
+    - المنتج: {item_title}
     - السعر: ${reservation.total_price}
 
     سيتم استرداد المبلغ المدفوع إن وجد.
@@ -200,12 +242,12 @@ def notify_reservation_cancelled_by_seller(reservation):
     notify_push(
         buyer,
         subject,
-        f'قام البائع بإلغاء حجزك لمنتج "{reservation.item.title}".',
+        f'قام البائع بإلغاء حجزك لمنتج "{item_title}".',
         data={'type': 'reservation_cancelled_by_seller', 'reservation_id': str(reservation.id)}
     )
 
     if buyer.phone_verified and buyer.phone:
-        sms_message = f"تم إلغاء حجزك لمنتج '{reservation.item.title}' من قبل البائع."
+        sms_message = f"تم إلغاء حجزك لمنتج '{item_title}' من قبل البائع."
         NotificationService.send_sms(buyer.phone, sms_message)
 
 
@@ -213,15 +255,16 @@ def notify_reservation_cancelled_by_buyer(reservation):
     """Notify seller that the buyer cancelled their reservation"""
     seller = reservation.item.owner
     buyer = reservation.buyer
+    item_title = bidi_isolate(reservation.item.title)
 
-    subject = f"إلغاء حجز لمنتجك: {reservation.item.title}"
+    subject = f"إلغاء حجز لمنتجك: {item_title}"
     message = f"""
     مرحباً {seller.username}،
 
-    قام المشتري {buyer.username} بإلغاء حجزه لمنتجك "{reservation.item.title}".
+    قام المشتري {buyer.username} بإلغاء حجزه لمنتجك "{item_title}".
 
     تفاصيل الحجز:
-    - المنتج: {reservation.item.title}
+    - المنتج: {item_title}
     - السعر: ${reservation.total_price}
 
     أصبح منتجك متاحاً للمشترين الآخرين.
@@ -233,7 +276,7 @@ def notify_reservation_cancelled_by_buyer(reservation):
     notify_push(
         seller,
         subject,
-        f'ألغى {buyer.username} حجزه لمنتجك "{reservation.item.title}".',
+        f'ألغى {bidi_isolate(buyer.username)} حجزه لمنتجك "{item_title}".',
         data={'type': 'reservation_cancelled_by_buyer', 'reservation_id': str(reservation.id)}
     )
 
@@ -241,30 +284,30 @@ def notify_reservation_cancelled_by_buyer(reservation):
 def notify_reservation_expiring(reservation, hours_remaining):
     """Notify buyer that reservation is expiring soon"""
     buyer = reservation.buyer
+    item_title = bidi_isolate(reservation.item.title)
 
-    subject = f"Reservation Expiring Soon: {reservation.item.title}"
+    subject = f"حجزك على وشك الانتهاء: {item_title}"
     message = f"""
-    Hi {buyer.username},
+    مرحباً {buyer.username}،
 
-    Your reservation for "{reservation.item.title}" will expire in {hours_remaining} hours!
+    حجزك لمنتج "{item_title}" سينتهي خلال {hours_remaining} ساعة!
 
-    Please complete your purchase to avoid losing your deposit of ${reservation.deposit_amount}.
+    يرجى إتمام عملية الشراء لتجنب خسارة العربون البالغ ${reservation.deposit_amount}.
 
-    Remaining Amount: ${reservation.total_price - reservation.deposit_amount}
-    Expires: {reservation.expires_at.strftime('%Y-%m-%d %H:%M')}
+    المبلغ المتبقي: ${reservation.total_price - reservation.deposit_amount}
+    ينتهي في: {reservation.expires_at.strftime('%Y-%m-%d %H:%M')}
 
-    Login to complete your purchase: {settings.FRONTEND_URL}/reservations/{reservation.id}
+    أكمل الشراء من هنا: {settings.FRONTEND_URL}/reservations/{reservation.id}
 
-    Best regards,
-    ReSell Trust Team
+    فريق سوقي
     """
 
     NotificationService.send_email(buyer.email, subject, message)
-    notify_push(buyer, subject, f"Your reservation expires in {hours_remaining} hours. Complete your purchase now!",
+    notify_push(buyer, subject, f"حجزك ينتهي خلال {hours_remaining} ساعة. أكمل عملية الشراء الآن!",
                 data={'type': 'reservation_expiring', 'reservation_id': str(reservation.id)})
 
     if buyer.phone_verified and buyer.phone:
-        sms_message = f"Reminder: Your reservation for '{reservation.item.title}' expires in {hours_remaining} hours. Complete your purchase now!"
+        sms_message = f"تذكير: حجزك لمنتج '{item_title}' ينتهي خلال {hours_remaining} ساعة. أكمل عملية الشراء الآن!"
         NotificationService.send_sms(buyer.phone, sms_message)
 
 
@@ -272,13 +315,14 @@ def notify_reservation_completed(reservation):
     """Notify seller and buyer when buyer completes a reservation"""
     seller = reservation.item.owner
     buyer = reservation.buyer
+    item_title = bidi_isolate(reservation.item.title)
 
     # --- Notify seller ---
-    seller_subject = f"تم شراء منتجك: {reservation.item.title}"
+    seller_subject = f"تم شراء منتجك: {item_title}"
     seller_message = f"""
     مرحباً {seller.username}،
 
-    تم اكمال الحجز وشراء منتجك "{reservation.item.title}" بواسطة {buyer.username}.
+    تم اكمال الحجز وشراء منتجك "{item_title}" بواسطة {buyer.username}.
 
     تفاصيل البيع:
     - السعر النهائي: ${reservation.total_price}
@@ -293,16 +337,16 @@ def notify_reservation_completed(reservation):
     notify_push(
         seller,
         seller_subject,
-        f'أكمل {buyer.username} شراء منتجك "{reservation.item.title}" بمبلغ ${reservation.total_price}.',
+        f'أكمل {bidi_isolate(buyer.username)} شراء منتجك "{item_title}" بمبلغ ${reservation.total_price}.',
         data={'type': 'reservation_completed', 'reservation_id': str(reservation.id)},
     )
 
     # --- Notify buyer ---
-    buyer_subject = f"تم تأكيد شرائك: {reservation.item.title}"
+    buyer_subject = f"تم تأكيد شرائك: {item_title}"
     buyer_message = f"""
     مرحباً {buyer.username}،
 
-    تم تأكيد عملية الشراء بنجاح لمنتج "{reservation.item.title}".
+    تم تأكيد عملية الشراء بنجاح لمنتج "{item_title}".
 
     تفاصيل الشراء:
     - المبلغ المدفوع: ${reservation.total_price}
@@ -317,7 +361,7 @@ def notify_reservation_completed(reservation):
     notify_push(
         buyer,
         buyer_subject,
-        f'تم تأكيد شرائك لـ "{reservation.item.title}" بمبلغ ${reservation.total_price}.',
+        f'تم تأكيد شرائك لـ "{item_title}" بمبلغ ${reservation.total_price}.',
         data={'type': 'reservation_completed', 'reservation_id': str(reservation.id)},
     )
 
@@ -325,26 +369,26 @@ def notify_reservation_completed(reservation):
 def notify_new_bid(auction, bid):
     """Notify about new bid on auction"""
     seller = auction.item.owner
+    item_title = bidi_isolate(auction.item.title)
 
-    subject = f"New Bid: {auction.item.title}"
+    subject = f"مزايدة جديدة: {item_title}"
     message = f"""
-    Hi {seller.username},
+    مرحباً {seller.username}،
 
-    A new bid has been placed on your auction "{auction.item.title}".
+    تم تقديم مزايدة جديدة على مزادك "{item_title}".
 
-    Bid Details:
-    - Bidder: {bid.bidder.username}
-    - Amount: ${bid.amount}
-    - Previous Price: ${auction.current_price}
+    تفاصيل المزايدة:
+    - المزايد: {bid.bidder.username}
+    - المبلغ: ${bid.amount}
+    - السعر السابق: ${auction.current_price}
 
-    View auction: {settings.FRONTEND_URL}/auctions/{auction.id}
+    شاهد المزاد: {settings.FRONTEND_URL}/auctions/{auction.id}
 
-    Best regards,
-    ReSell Trust Team
+    فريق سوقي
     """
 
     NotificationService.send_email(seller.email, subject, message)
-    notify_push(seller, subject, f"{bid.bidder.username} bid ${bid.amount} on \"{auction.item.title}\"",
+    notify_push(seller, subject, f'{bidi_isolate(bid.bidder.username)} زايد بمبلغ ${bid.amount} على "{item_title}"',
                 data={'type': 'new_bid', 'auction_id': str(auction.id), 'bid_amount': str(bid.amount)})
 
     # Notify previous highest bidder they've been outbid
@@ -353,22 +397,21 @@ def notify_new_bid(auction, bid):
     ).exclude(id=bid.id)
 
     for prev_bid in previous_winning_bids:
-        outbid_subject = f"Outbid Alert: {auction.item.title}"
+        outbid_subject = f"تم تجاوز مزايدتك: {item_title}"
         outbid_message = f"""
-        Hi {prev_bid.bidder.username},
+        مرحباً {prev_bid.bidder.username}،
 
-        You've been outbid on "{auction.item.title}".
+        تم تجاوز مزايدتك على "{item_title}".
 
-        Your bid: ${prev_bid.amount}
-        New highest bid: ${bid.amount}
+        مزايدتك: ${prev_bid.amount}
+        أعلى مزايدة حالياً: ${bid.amount}
 
-        Place a higher bid: {settings.FRONTEND_URL}/auctions/{auction.id}
+        قدّم مزايدة أعلى: {settings.FRONTEND_URL}/auctions/{auction.id}
 
-        Best regards,
-        ReSell Trust Team
+        فريق سوقي
         """
         NotificationService.send_email(prev_bid.bidder.email, outbid_subject, outbid_message)
-        notify_push(prev_bid.bidder, outbid_subject, f"You've been outbid on \"{auction.item.title}\". New high: ${bid.amount}",
+        notify_push(prev_bid.bidder, outbid_subject, f'تم تجاوز مزايدتك على "{item_title}". الأعلى الآن: ${bid.amount}',
                     data={'type': 'outbid', 'auction_id': str(auction.id)})
 
 
@@ -378,24 +421,24 @@ def notify_auction_ending_soon(auction, minutes_remaining):
 
     from django.contrib.auth import get_user_model
     User = get_user_model()
+    item_title = bidi_isolate(auction.item.title)
 
     for user_id in bidders:
         try:
             user = User.objects.get(id=user_id)
 
-            subject = f"Auction Ending Soon: {auction.item.title}"
+            subject = f"المزاد ينتهي قريباً: {item_title}"
             message = f"""
-            Hi {user.username},
+            مرحباً {user.username}،
 
-            The auction for "{auction.item.title}" ends in {minutes_remaining} minutes!
+            سينتهي المزاد على "{item_title}" خلال {minutes_remaining} دقيقة!
 
-            Current Price: ${auction.current_price}
-            Minimum Increment: ${auction.minimum_increment}
+            السعر الحالي: ${auction.current_price}
+            أقل زيادة مسموحة: ${auction.minimum_increment}
 
-            Place your final bid: {settings.FRONTEND_URL}/auctions/{auction.id}
+            قدّم مزايدتك الأخيرة: {settings.FRONTEND_URL}/auctions/{auction.id}
 
-            Best regards,
-            ReSell Trust Team
+            فريق سوقي
             """
 
             NotificationService.send_email(user.email, subject, message)
@@ -413,29 +456,29 @@ def notify_auction_won(auction, reservation):
     """
     winner = reservation.buyer
     remaining = reservation.total_price - reservation.deposit_amount
+    item_title = bidi_isolate(auction.item.title)
 
-    subject = f"Congratulations! You Won: {auction.item.title}"
+    subject = f"مبروك! فزت بمزاد: {item_title}"
     message = f"""
-    Hi {winner.username},
+    مرحباً {winner.username}،
 
-    Congratulations! You won the auction for "{auction.item.title}" at ${reservation.total_price}.
+    مبروك! فزت بمزاد "{item_title}" بمبلغ ${reservation.total_price}.
 
-    You already paid a bid deposit of ${reservation.deposit_amount}. Choose how to pay the rest:
-    1. Pay the remaining ${remaining} now, then arrange delivery
-    2. Keep your deposit as-is and pay the remaining ${remaining} in cash at delivery
+    لقد دفعت عربون مزايدة قدره ${reservation.deposit_amount}. اختر طريقة دفع الباقي:
+    1. ادفع المتبقي ${remaining} الآن، ثم رتّب التوصيل
+    2. أبقِ عربونك كما هو وادفع المتبقي ${remaining} نقداً عند التوصيل
 
-    Please choose within 48 hours — otherwise we'll default to option 2 automatically.
+    يرجى الاختيار خلال 48 ساعة — وإلا سنعتمد الخيار الثاني تلقائياً.
 
-    Complete your reservation: {settings.FRONTEND_URL}/reservations/{reservation.id}
+    أكمل حجزك: {settings.FRONTEND_URL}/reservations/{reservation.id}
 
-    Best regards,
-    ReSell Trust Team
+    فريق سوقي
     """
 
     NotificationService.send_email(winner.email, subject, message)
     notify_push(
         winner, subject,
-        f"فزت بمزاد \"{auction.item.title}\" بمبلغ ${reservation.total_price}! أكمل حجزك لاختيار طريقة الدفع.",
+        f'فزت بمزاد "{item_title}" بمبلغ ${reservation.total_price}! أكمل حجزك لاختيار طريقة الدفع.',
         data={
             'type': 'auction_won',
             'auction_id': str(auction.id),
@@ -444,25 +487,24 @@ def notify_auction_won(auction, reservation):
     )
 
     if winner.phone_verified and winner.phone:
-        sms_message = f"Congratulations! You won the auction for '{auction.item.title}' at ${reservation.total_price}. Complete your reservation now!"
+        sms_message = f"مبروك! فزت بمزاد '{item_title}' بمبلغ ${reservation.total_price}. أكمل حجزك الآن!"
         NotificationService.send_sms(winner.phone, sms_message)
 
     # Notify seller
     seller = auction.item.owner
-    seller_subject = f"Auction Won: {auction.item.title}"
+    seller_subject = f"انتهى مزادك: {item_title}"
     seller_message = f"""
-    Hi {seller.username},
+    مرحباً {seller.username}،
 
-    Your auction for "{auction.item.title}" has ended!
+    انتهى مزادك على "{item_title}"!
 
-    Winner: {winner.username}
-    Final Price: ${reservation.total_price}
+    الفائز: {winner.username}
+    السعر النهائي: ${reservation.total_price}
 
-    The buyer will complete their reservation soon (paying in full now, or the rest in cash at
-    delivery). Please prepare the item for delivery.
+    سيكمل المشتري حجزه قريباً (إما بدفع كامل المبلغ الآن، أو الباقي نقداً عند
+    التوصيل). يرجى تجهيز المنتج للتوصيل.
 
-    Best regards,
-    ReSell Trust Team
+    فريق سوقي
     """
 
     NotificationService.send_email(seller.email, seller_subject, seller_message)
@@ -471,22 +513,22 @@ def notify_auction_won(auction, reservation):
 def notify_auction_no_winner(auction):
     """Notify seller that auction ended with no winner"""
     seller = auction.item.owner
+    item_title = bidi_isolate(auction.item.title)
 
-    subject = f"Auction Ended: {auction.item.title}"
+    subject = f"انتهى مزادك: {item_title}"
     message = f"""
-    Hi {seller.username},
+    مرحباً {seller.username}،
 
-    Your auction for "{auction.item.title}" has ended without any winning bids.
+    انتهى مزادك على "{item_title}" دون أي مزايدات فائزة.
 
-    You can:
-    1. Create a new auction with a lower starting price
-    2. List it as a fixed price item
-    3. Keep it in your store
+    يمكنك:
+    1. إنشاء مزاد جديد بسعر بدء أقل
+    2. عرضه كمنتج بسعر ثابت
+    3. الاحتفاظ به في متجرك
 
-    Manage your item: {settings.FRONTEND_URL}/items/{auction.item.id}
+    إدارة منتجك: {settings.FRONTEND_URL}/items/{auction.item.id}
 
-    Best regards,
-    ReSell Trust Team
+    فريق سوقي
     """
 
     NotificationService.send_email(seller.email, subject, message)
@@ -494,23 +536,24 @@ def notify_auction_no_winner(auction):
 
 def notify_representative_assigned(representative):
     """Notify representative about assignment"""
-    subject = f"Representative Request: {representative.item.title}"
+    item_title = bidi_isolate(representative.item.title)
+
+    subject = f"طلب تمثيل: {item_title}"
     message = f"""
-    Hi {representative.representative.username},
+    مرحباً {representative.representative.username}،
 
-    {representative.owner.username} wants you to be a representative for "{representative.item.title}".
+    يريدك {representative.owner.username} أن تكون ممثلاً لبيع "{item_title}".
 
-    Commission: {representative.commission_percentage}%
+    العمولة: {representative.commission_percentage}%
 
-    Permissions:
-    - Can List: {'Yes' if representative.can_list else 'No'}
-    - Can Negotiate: {'Yes' if representative.can_negotiate else 'No'}
-    - Can Complete Sale: {'Yes' if representative.can_complete_sale else 'No'}
+    الصلاحيات:
+    - يمكنه الإدراج: {'نعم' if representative.can_list else 'لا'}
+    - يمكنه التفاوض: {'نعم' if representative.can_negotiate else 'لا'}
+    - يمكنه إتمام البيع: {'نعم' if representative.can_complete_sale else 'لا'}
 
-    Accept or decline: {settings.FRONTEND_URL}/representatives/{representative.id}
+    اقبل أو ارفض الطلب: {settings.FRONTEND_URL}/representatives/{representative.id}
 
-    Best regards,
-    ReSell Trust Team
+    فريق سوقي
     """
 
     NotificationService.send_email(representative.representative.email, subject, message)
@@ -522,20 +565,21 @@ def notify_new_message(message):
 
     # A chat may be about an item, or a direct conversation with a store.
     chat = message.chat
-    about = chat.item.title if chat.item else (chat.store.name if chat.store else 'your store')
+    about_raw = chat.item.title if chat.item else (chat.store.name if chat.store else 'متجرك')
+    about = bidi_isolate(about_raw)
+    sender_name = bidi_isolate(message.sender.username)
 
-    subject = f"New Message: {about}"
+    subject = f"رسالة جديدة: {about}"
     email_message = f"""
-    Hi {recipient.username},
+    مرحباً {recipient.username}،
 
-    You have a new message from {message.sender.username} about "{about}".
+    لديك رسالة جديدة من {message.sender.username} بخصوص "{about}".
 
-    Message: {message.content[:100]}{'...' if len(message.content) > 100 else ''}
+    الرسالة: {message.content[:100]}{'...' if len(message.content) > 100 else ''}
 
-    View chat: {settings.FRONTEND_URL}/chats/{message.chat.id}
+    عرض المحادثة: {settings.FRONTEND_URL}/chats/{message.chat.id}
 
-    Best regards,
-    ReSell Trust Team
+    فريق سوقي
     """
 
     # الدفع (FCM) أولاً: هذه الدالة تُستدعى من داخل ChatConsumer.receive أثناء
@@ -547,7 +591,7 @@ def notify_new_message(message):
     # (ChatsProvider.handleIncomingMessagePush) تحديث صف المحادثة في القائمة
     # محلياً فوراً من حمولة FCM نفسها، بدل طلب REST كامل لإعادة تحميل القائمة
     # بعد وصول كل إشعار — يحذف جولة شبكة كاملة من زمن الوصول المُدرَك.
-    notify_push(recipient, subject, f"New message from {message.sender.username}: {message.content[:80]}",
+    notify_push(recipient, subject, f"رسالة جديدة من {sender_name}: {message.content[:80]}",
                 data={
                     'type': 'new_message',
                     'chat_id': str(message.chat.id),
@@ -560,34 +604,36 @@ def notify_new_message(message):
 
 def notify_dispute_created(dispute):
     """Notify admin and defendant about new dispute"""
+    dispute_title = bidi_isolate(dispute.title)
+    item_title = bidi_isolate(dispute.item.title)
+
     # Notify defendant
-    subject = f"Dispute Filed: {dispute.title}"
+    subject = f"تم فتح نزاع: {dispute_title}"
     message = f"""
-    Hi {dispute.defendant.username},
+    مرحباً {dispute.defendant.username}،
 
-    A dispute has been filed against you by {dispute.complainant.username}.
+    قام {dispute.complainant.username} بفتح نزاع ضدك.
 
-    Item: {dispute.item.title}
-    Issue: {dispute.description}
+    المنتج: {item_title}
+    المشكلة: {dispute.description}
 
-    Please respond: {settings.FRONTEND_URL}/disputes/{dispute.id}
+    يرجى الرد على النزاع: {settings.FRONTEND_URL}/disputes/{dispute.id}
 
-    Best regards,
-    ReSell Trust Team
+    فريق سوقي
     """
 
     NotificationService.send_email(dispute.defendant.email, subject, message)
 
     # Notify admin (you can have a list of admin emails)
-    admin_subject = f"New Dispute: {dispute.title}"
+    admin_subject = f"نزاع جديد: {dispute_title}"
     admin_message = f"""
-    New dispute filed:
+    تم فتح نزاع جديد:
 
-    Complainant: {dispute.complainant.username}
-    Defendant: {dispute.defendant.username}
-    Item: {dispute.item.title}
+    المُشتكي: {dispute.complainant.username}
+    المُشتكى عليه: {dispute.defendant.username}
+    المنتج: {item_title}
 
-    Review dispute: {settings.FRONTEND_URL}/disputes/{dispute.id}
+    مراجعة النزاع: {settings.FRONTEND_URL}/disputes/{dispute.id}
     """
 
     # Send to all admin emails, if any are configured
@@ -604,9 +650,9 @@ def notify_delivery_assigned(delivery_order):
     account = company.account
     subject = f"طلب توصيل جديد #{delivery_order.id}"
     body = (
-        f'استلام من: {delivery_order.from_name} ({delivery_order.from_phone})\n'
-        f'تسليم إلى: {delivery_order.to_name} ({delivery_order.to_phone})\n'
-        f'المنتج: {delivery_order.item_summary}'
+        f'استلام من: {bidi_isolate(delivery_order.from_name)} ({delivery_order.from_phone})\n'
+        f'تسليم إلى: {bidi_isolate(delivery_order.to_name)} ({delivery_order.to_phone})\n'
+        f'المنتج: {bidi_isolate(delivery_order.item_summary)}'
     )
     notify_push(
         account,
@@ -625,7 +671,7 @@ def notify_delivery_arrived(delivery_order):
     """Tell the buyer their order has arrived — they must confirm or refuse receipt"""
     buyer = delivery_order.reservation.buyer
     subject = "وصل طلبك — اضغط تم الاستلام"
-    body = f'وصل "{delivery_order.item_summary}". اضغط "تم الاستلام" إذا استلمته بحالة جيدة، أو "رفض الاستلام" إذا كانت هناك مشكلة.'
+    body = f'وصل "{bidi_isolate(delivery_order.item_summary)}". اضغط "تم الاستلام" إذا استلمته بحالة جيدة، أو "رفض الاستلام" إذا كانت هناك مشكلة.'
 
     notify_push(
         buyer,
@@ -650,7 +696,7 @@ def notify_delivery_refused(delivery_order):
     notify_push(
         seller,
         "رفض المشتري استلام الطلب",
-        f'رفض {reservation.buyer.username} استلام "{delivery_order.item_summary}". سيُعاد المنتج إليك عبر شركة التوصيل.',
+        f'رفض {bidi_isolate(reservation.buyer.username)} استلام "{bidi_isolate(delivery_order.item_summary)}". سيُعاد المنتج إليك عبر شركة التوصيل.',
         data={
             'type': 'delivery_refused',
             'delivery_order_id': str(delivery_order.id),
@@ -666,7 +712,7 @@ def notify_return_pickup_assigned(delivery_order):
     notify_push(
         buyer,
         "جدولة استلام إرجاع المنتج",
-        f'ستتواصل شركة التوصيل معك لاستلام "{delivery_order.item_summary}" منك. سيُعاد مبلغك بعد استلامهم للمنتج.',
+        f'ستتواصل شركة التوصيل معك لاستلام "{bidi_isolate(delivery_order.item_summary)}" منك. سيُعاد مبلغك بعد استلامهم للمنتج.',
         data={
             'type': 'delivery_return_scheduled',
             'delivery_order_id': str(delivery_order.id),
@@ -680,7 +726,7 @@ def notify_return_refund_released(reservation, amount):
     """Notify buyer their refund was released after the company confirmed the item's return"""
     buyer = reservation.buyer
     subject = "تم استرداد مبلغك"
-    body = f'استلمت شركة التوصيل "{reservation.item.title}" منك، وتم إعادة {amount} إلى محفظتك.'
+    body = f'استلمت شركة التوصيل "{bidi_isolate(reservation.item.title)}" منك، وتم إعادة {amount} إلى محفظتك.'
 
     notify_push(
         buyer,
@@ -698,8 +744,8 @@ def notify_cash_collected(delivery_order):
     seller = reservation.item.owner
     subject = "تم تحصيل الباقي نقداً"
     body = (
-        f'حصّلت شركة التوصيل {delivery_order.cash_to_collect} من {reservation.buyer.username} '
-        f'مقابل "{reservation.item.title}" — أصبح المبلغ كاملاً قابلاً للتحرير لك.'
+        f'حصّلت شركة التوصيل {delivery_order.cash_to_collect} من {bidi_isolate(reservation.buyer.username)} '
+        f'مقابل "{bidi_isolate(reservation.item.title)}" — أصبح المبلغ كاملاً قابلاً للتحرير لك.'
     )
     notify_push(
         seller,
@@ -715,19 +761,19 @@ def notify_cash_collected(delivery_order):
 
 def notify_payment_successful(transaction):
     """Notify user about successful payment"""
-    subject = "Payment Successful"
+    subject = "تمت عملية الدفع بنجاح"
+    item_title = bidi_isolate(transaction.item.title) if transaction.item else 'لا يوجد'
     message = f"""
-    Hi {transaction.user.username},
+    مرحباً {transaction.user.username}،
 
-    Your payment of ${transaction.amount} has been processed successfully.
+    تمت معالجة دفعتك بمبلغ ${transaction.amount} بنجاح.
 
-    Transaction Type: {transaction.get_transaction_type_display()}
-    Item: {transaction.item.title if transaction.item else 'N/A'}
+    نوع العملية: {_transaction_type_label(transaction)}
+    المنتج: {item_title}
 
-    View transaction: {settings.FRONTEND_URL}/transactions/{transaction.id}
+    عرض العملية: {settings.FRONTEND_URL}/transactions/{transaction.id}
 
-    Best regards,
-    ReSell Trust Team
+    فريق سوقي
     """
 
     NotificationService.send_email(transaction.user.email, subject, message)
@@ -735,18 +781,17 @@ def notify_payment_successful(transaction):
 
 def notify_payment_failed(transaction):
     """Notify user about failed payment"""
-    subject = "Payment Failed"
+    subject = "فشلت عملية الدفع"
     message = f"""
-    Hi {transaction.user.username},
+    مرحباً {transaction.user.username}،
 
-    Your payment of ${transaction.amount} has failed.
+    فشلت عملية دفعك بمبلغ ${transaction.amount}.
 
-    Please update your payment method and try again.
+    يرجى تحديث طريقة الدفع والمحاولة مرة أخرى.
 
-    Try again: {settings.FRONTEND_URL}/transactions/{transaction.id}/retry
+    أعد المحاولة: {settings.FRONTEND_URL}/transactions/{transaction.id}/retry
 
-    Best regards,
-    ReSell Trust Team
+    فريق سوقي
     """
 
     NotificationService.send_email(transaction.user.email, subject, message)
@@ -754,19 +799,19 @@ def notify_payment_failed(transaction):
 
 def notify_refund_processed(transaction):
     """Notify user about refund"""
-    subject = "Refund Processed"
+    subject = "تم استرداد مبلغك"
+    item_title = bidi_isolate(transaction.item.title) if transaction.item else 'لا يوجد'
     message = f"""
-    Hi {transaction.user.username},
+    مرحباً {transaction.user.username}،
 
-    A refund of ${transaction.amount} has been processed to your account.
+    تم استرداد مبلغ ${transaction.amount} إلى حسابك.
 
-    Transaction Type: {transaction.get_transaction_type_display()}
-    Item: {transaction.item.title if transaction.item else 'N/A'}
+    نوع العملية: {_transaction_type_label(transaction)}
+    المنتج: {item_title}
 
-    The refund should appear in your account within 5-10 business days.
+    سيظهر المبلغ المسترد في حسابك خلال 5-10 أيام عمل.
 
-    Best regards,
-    ReSell Trust Team
+    فريق سوقي
     """
 
     NotificationService.send_email(transaction.user.email, subject, message)
@@ -776,12 +821,15 @@ def notify_live_stream_started(session):
     """Notify a store's followers that it has just gone live (push only — real-time, no email)"""
     from .models import StoreFollow
 
+    store_name = bidi_isolate(session.store.name)
+    session_title = bidi_isolate(session.title)
+
     follows = StoreFollow.objects.filter(store=session.store).select_related('follower')
     for follow in follows:
         notify_push(
             follow.follower,
-            f'{session.store.name} يبث الآن مباشرة!',
-            f'"{session.title}" بدأ الآن — انضم قبل فوات الأوان.',
+            f'{store_name} يبث الآن مباشرة!',
+            f'"{session_title}" بدأ الآن — انضم قبل فوات الأوان.',
             data={
                 'type': 'live_stream_started',
                 'live_session_id': str(session.id),
@@ -796,7 +844,7 @@ def notify_live_item_reserved(reservation):
     notify_push(
         owner,
         'تم حجز منتجك أثناء البث المباشر',
-        f'{reservation.buyer.username} حجز "{reservation.item.title}" بعربون {reservation.deposit_amount}.',
+        f'{bidi_isolate(reservation.buyer.username)} حجز "{bidi_isolate(reservation.item.title)}" بعربون {reservation.deposit_amount}.',
         data={
             'type': 'live_item_reserved',
             'reservation_id': str(reservation.id),
@@ -812,7 +860,7 @@ def notify_live_item_sold_out(queue_item):
     notify_push(
         owner,
         'نفدت الكمية',
-        f'نفدت كمية "{queue_item.item.title}" أثناء البث المباشر.',
+        f'نفدت كمية "{bidi_isolate(queue_item.item.title)}" أثناء البث المباشر.',
         data={
             'type': 'live_item_sold_out',
             'live_session_id': str(queue_item.session_id),
