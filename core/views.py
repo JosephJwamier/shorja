@@ -1832,11 +1832,11 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             return [AllowAny()]
         if self.action in ['create', 'go_live', 'end_session', 'cancel_session',
                             'queue_items', 'queue_item_detail', 'now_showing',
-                            'show_item', 'catalog', 'quick_show', 'quick_auction',
                             'moderators', 'moderator_detail']:
             return [IsStoreOwner()]
         if self.action in ['reserve', 'like', 'unlike', 'my_sessions', 'comments', 'comment_detail',
-                            'viewers', 'bans', 'ban_detail']:
+                            'viewers', 'bans', 'ban_detail',
+                            'show_item', 'catalog', 'quick_show', 'quick_auction']:
             return [IsAuthenticated()]
         return [AllowAny()]
 
@@ -2163,15 +2163,21 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
     @action(detail=True, methods=['get'])
     def catalog(self, request, pk=None):
         """
-        The store owner's own showable items, each pre-annotated with a
-        suggested price/deposit (pulled from its FixedPriceListing, if any)
-        and its current state in this session — lets the owner's live
-        control screen just be a tap-to-show grid, no manual typing needed
-        for an item that's already listed for sale.
+        The store's own showable items (store owner or a session moderator),
+        each pre-annotated with a suggested price/deposit (pulled from its
+        FixedPriceListing, if any) and its current state in this session —
+        lets the live control screen just be a tap-to-show grid, no manual
+        typing needed for an item that's already listed for sale.
+
+        Filtered by the session's store, not request.user — a moderator
+        browsing this needs the store owner's catalog, not their own.
         """
         session = self.get_object()
+        if not _can_moderate_live_session(request.user, session):
+            return Response({'success': False, 'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+
         items = Item.objects.filter(
-            owner=request.user, status__in=['active', 'reserved'], quantity__gt=0
+            owner=session.store.user_id, status__in=['active', 'reserved'], quantity__gt=0
         ).select_related('fixed_listing').prefetch_related('images').order_by('-created_at')
 
         entries_by_item = {
@@ -2204,12 +2210,15 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
     @action(detail=True, methods=['post'], url_path='show-item')
     def show_item(self, request, pk=None):
         """
-        One-tap alternative to queue-items + now-showing: the owner picks a
-        product from their own catalog (see `catalog` above) and it's live
-        and reservable immediately, price/deposit pulled from the item's
-        existing FixedPriceListing so nothing needs to be typed.
+        One-tap alternative to queue-items + now-showing (store owner or a
+        session moderator): pick a product from the store's catalog (see
+        `catalog` above) and it's live and reservable immediately, price/
+        deposit pulled from the item's existing FixedPriceListing so nothing
+        needs to be typed.
         """
         session = self.get_object()
+        if not _can_moderate_live_session(request.user, session):
+            return Response({'success': False, 'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
 
         if session.status != 'live':
             return Response({
@@ -2238,10 +2247,10 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         except Item.DoesNotExist:
             return Response({'success': False, 'message': 'Item not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        if item.owner != request.user:
+        if item.owner_id != session.store.user_id:
             return Response({
                 'success': False,
-                'message': 'You can only show items you own'
+                'message': 'This item does not belong to this store'
             }, status=status.HTTP_403_FORBIDDEN)
 
         if item.status not in ('active', 'reserved') or item.quantity <= 0:
@@ -2295,14 +2304,19 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
     def quick_show(self, request, pk=None):
         """
         For a product that doesn't exist in the catalog at all (the common
-        spontaneous live-selling case): the owner types just a title, price,
-        and deposit right here — a minimal Item is created behind the scenes
-        (needed so Reservation/Dispute/wallet flows work exactly the same as
-        for a catalog item) and immediately marked 'now showing'. This is
-        the one-tap path for "show whatever I'm holding, right now" — no
-        catalog browsing or pre-listing required.
+        spontaneous live-selling case), store owner or a session moderator
+        types just a title, price, and deposit right here — a minimal Item
+        is created behind the scenes (needed so Reservation/Dispute/wallet
+        flows work exactly the same as for a catalog item) and immediately
+        marked 'now showing'. This is the one-tap path for "show whatever
+        I'm holding, right now" — no catalog browsing or pre-listing
+        required. The item is always created under the store owner's
+        account (not the moderator posting it) so proceeds/payouts land
+        on the right person.
         """
         session = self.get_object()
+        if not _can_moderate_live_session(request.user, session):
+            return Response({'success': False, 'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
 
         if session.status != 'live':
             return Response({
@@ -2328,7 +2342,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
         with transaction.atomic():
             item = _create_quick_live_item(
-                owner=request.user,
+                owner=session.store.user,
                 title=validated['title'],
                 description=validated.get('description', ''),
                 category_id=validated.get('category_id'),
@@ -2372,9 +2386,13 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         tasks.finalize_live_auction) scoped to this live session, running
         for exactly 2 minutes. Only one auction (or one now-showing fixed
         item) is ever in the spotlight at a time — starting an auction
-        demotes any fixed item currently showing.
+        demotes any fixed item currently showing. Store owner or a session
+        moderator; the backing item is always created under the store
+        owner's account (see quick_show's docstring for why).
         """
         session = self.get_object()
+        if not _can_moderate_live_session(request.user, session):
+            return Response({'success': False, 'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
 
         if session.status != 'live':
             return Response({
@@ -2400,7 +2418,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
         with transaction.atomic():
             item = _create_quick_live_item(
-                owner=request.user,
+                owner=session.store.user,
                 title=validated['title'],
                 description=validated.get('description', ''),
                 category_id=validated.get('category_id'),

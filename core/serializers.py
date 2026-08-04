@@ -2098,15 +2098,26 @@ class LiveSessionSerializer(LiveSessionCardSerializer):
     queue_items = LiveSessionItemSerializer(source='items', many=True, read_only=True)
     current_now_showing = serializers.SerializerMethodField()
     current_live_auction = serializers.SerializerMethodField()
+    # Whether the requesting user is a session moderator — never true for
+    # the store owner, who has full control regardless of this flag; the
+    # app uses it to decide whether to show a viewer moderation controls.
+    is_moderator = serializers.SerializerMethodField()
 
     class Meta(LiveSessionCardSerializer.Meta):
         fields = LiveSessionCardSerializer.Meta.fields + [
             'description', 'ended_at', 'queue_items', 'current_now_showing', 'current_live_auction',
+            'is_moderator',
         ]
 
     def get_current_now_showing(self, obj):
         now_showing = obj.items.filter(status='now_showing').first()
         return LiveSessionItemSerializer(now_showing, context=self.context).data if now_showing else None
+
+    def get_is_moderator(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        return obj.moderators.filter(user_id=request.user.id).exists()
 
     def get_current_live_auction(self, obj):
         auction = obj.auctions.filter(status='active').first()
