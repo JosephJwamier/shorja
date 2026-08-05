@@ -8,7 +8,7 @@ from .wallet_utils import credit_earnings, debit_balance, release_reservation_pa
 from .services.disputes import resolve_dispute, DisputeResolutionError
 from .services.withdrawals import approve_withdrawal, reject_withdrawal, WithdrawalReviewError
 from .services.support import start_support_chat
-from .services.moderation import archive_item
+from .services.moderation import archive_item, resolve_report, ReportResolutionError
 
 logger = logging.getLogger(__name__)
 from .models import get_or_create_wallet
@@ -37,7 +37,7 @@ class ItemStandardPagination(PageNumberPagination):
 from .models import (ItemImage, Location,
     Item, FixedPriceListing, AuctionListing, Bid,
     Reservation, Representative, ItemTransfer, Category,
-    UserStore, Rating, Transaction, Chat, Message, Dispute, Notification,
+    UserStore, Rating, Transaction, Chat, Message, Dispute, Report, Notification,
     ProductReview, StoreReview, StoreFollow, StoreCoupon, CouponCollection,
     LiveSession, LiveSessionItem, LiveSessionLike, LiveSessionComment, LiveSessionViewer,
     LiveSessionModerator, LiveSessionBan,
@@ -59,6 +59,7 @@ from .serializers import (ItemImageSerializer, FixedPriceListingCreateSerializer
                           ChatSerializer, MessageSerializer,
                           RatingSerializer, RatingCreateSerializer,
                           DisputeSerializer,
+                          ReportSerializer, CreateReportSerializer, ResolveReportSerializer,
                           TransactionSerializer, CategorySerializer,
                           UserStoreSerializer, UserSerializer, RepresentativeAcceptSerializer,
                           RepresentativeRejectSerializer, RepresentativeUpdatePermissionsSerializer,
@@ -86,7 +87,7 @@ from .firestore import sync_chat_to_firestore, sync_message_to_firestore, sync_u
 from .filters import (
     ItemFilter, FixedPriceListingFilter, AuctionListingFilter,
     ReservationFilter, ItemTransferFilter, RatingFilter,
-    DisputeFilter, TransactionFilter, UserStoreFilter, LocationFilter,
+    DisputeFilter, ReportFilter, TransactionFilter, UserStoreFilter, LocationFilter,
     ProductReviewFilter, StoreReviewFilter, LiveSessionFilter,
 )
 from .iraq_governorates import IRAQ_GOVERNORATES
@@ -1075,6 +1076,8 @@ from .notifications import (
     notify_cash_collected,
     notify_auction_won,
     notify_dispute_created,
+    notify_report_submitted,
+    notify_report_reviewed,
     notify_new_message,
     notify_push,
     bidi_isolate,
@@ -2776,6 +2779,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                     status='completed',
                     is_deposit_only=True,
                     completed_at=timezone.now(),
+                    warranty_days=item.warranty_days,
                     expires_at=timezone.now() + timedelta(
                         hours=getattr(settings, 'RESERVATION_EXPIRY_HOURS', 24)
                     ),
@@ -3920,9 +3924,9 @@ class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
         and the company's cash debt to the platform.
 
         This deliberately does NOT release payment itself: the held amount
-        is only released after 7 days with no open dispute
-        (tasks.release_payments_after_week) or when the buyer separately
-        chooses to release it early via
+        is only released after the item's warranty period passes with no
+        open dispute (tasks.release_payments_after_week) or when the buyer
+        separately chooses to release it early via
         ReservationViewSet.approve_and_release_payment (only allowed once
         this delivery order is 'confirmed' — see get_can_approve).
         """
@@ -3957,9 +3961,11 @@ class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
             except Exception as e:
                 logger.error(f"Failed to send cash-collected notification: {e}", exc_info=True)
 
+        from .notifications import format_days_ar
+        warranty_period = format_days_ar(delivery_order.reservation.warranty_days)
         return Response({
             'success': True,
-            'message': 'تم تأكيد الاستلام. سيُحرَّر المبلغ للبائع تلقائياً خلال 7 أيام، أو يمكنك تحريره الآن إن لم يكن لديك أي مشكلة',
+            'message': f'تم تأكيد الاستلام. سيُحرَّر المبلغ للبائع تلقائياً خلال {warranty_period}، أو يمكنك تحريره الآن إن لم يكن لديك أي مشكلة',
             'data': DeliveryOrderSerializer(delivery_order).data
         }, status=status.HTTP_200_OK)
 
@@ -4234,6 +4240,135 @@ class DisputeViewSet(viewsets.ModelViewSet):
                 'message': 'Failed to resolve dispute',
                 'errors': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ReportViewSet(viewsets.ModelViewSet):
+    """Report items, stores, or users for violating platform policy"""
+    queryset = Report.objects.all()
+    serializer_class = ReportSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_class = ReportFilter
+    ordering_fields = ['created_at']
+
+    def get_queryset(self):
+        if getattr(self, 'swagger_fake_view', False):
+            return Report.objects.none()
+
+        qs = Report.objects.select_related(
+            'reporter', 'reported_item', 'reported_store', 'reported_user', 'reviewed_by'
+        )
+        if self.request.user.is_staff:
+            return qs
+
+        # A regular user only ever sees reports they filed themselves —
+        # never reports filed against them, which would tip off a bad actor
+        # about who reported them and what was said.
+        return qs.filter(reporter=self.request.user)
+
+    def destroy(self, request, *args, **kwargs):
+        # A report is the raw input to a moderation decision — the reporter
+        # withdrawing or hiding it after the fact shouldn't erase that
+        # record. resolve() (admin-only) is the only way one is closed out.
+        return Response({
+            'success': False,
+            'message': 'لا يمكن حذف البلاغ. يتم إغلاقه فقط عبر قرار الإدارة (resolve).'
+        }, status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    @swagger_auto_schema(
+        operation_description="Report an item, a store, or a user for a policy violation",
+        request_body=CreateReportSerializer,
+        responses={
+            201: ReportSerializer,
+            400: "Validation failed",
+        }
+    )
+    @action(detail=False, methods=['post'])
+    def create_report(self, request):
+        """File a new report"""
+        serializer = CreateReportSerializer(data=request.data, context={'request': request})
+
+        if not serializer.is_valid():
+            return Response({
+                'success': False,
+                'message': 'Validation failed',
+                'errors': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        target_type = serializer.validated_data['target_type']
+        target = serializer.validated_data['target']
+        target_field = {'item': 'reported_item', 'store': 'reported_store', 'user': 'reported_user'}[target_type]
+
+        # Don't let the same reporter pile up duplicate reports on the same
+        # target while an earlier one is still open.
+        already_reported = Report.objects.filter(
+            reporter=request.user, status__in=['pending', 'reviewing'], **{target_field: target}
+        ).exists()
+        if already_reported:
+            return Response({
+                'success': False,
+                'message': 'لديك بلاغ قيد المراجعة بالفعل عن هذا العنصر'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        report = Report.objects.create(
+            reporter=request.user,
+            reason=serializer.validated_data['reason'],
+            description=serializer.validated_data.get('description', ''),
+            **{target_field: target}
+        )
+
+        notify_report_submitted(report)
+
+        return Response({
+            'success': True,
+            'message': 'تم إرسال البلاغ بنجاح، سيقوم فريقنا بمراجعته',
+            'data': ReportSerializer(report, context={'request': request}).data
+        }, status=status.HTTP_201_CREATED)
+
+    @swagger_auto_schema(
+        operation_description="Resolve a report (admin only)",
+        request_body=ResolveReportSerializer,
+        responses={
+            200: ReportSerializer,
+            400: "Invalid resolution",
+            403: "Permission denied",
+            404: "Report not found"
+        }
+    )
+    @action(detail=True, methods=['post'], permission_classes=[IsAdminUser])
+    def resolve(self, request, pk=None):
+        """Admin closes out a report, optionally applying a moderation action"""
+        report = self.get_object()
+        serializer = ResolveReportSerializer(data=request.data)
+
+        if not serializer.is_valid():
+            return Response({
+                'success': False,
+                'message': 'Validation failed',
+                'errors': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            resolve_report(
+                report,
+                new_status=serializer.validated_data['status'],
+                action_taken=serializer.validated_data.get('action_taken', 'none'),
+                admin_notes=serializer.validated_data.get('admin_notes', ''),
+                actor=request.user,
+            )
+        except ReportResolutionError as e:
+            return Response({
+                'success': False,
+                'message': str(e)
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        notify_report_reviewed(report)
+
+        return Response({
+            'success': True,
+            'message': 'تم تحديث حالة البلاغ',
+            'data': ReportSerializer(report, context={'request': request}).data
+        }, status=status.HTTP_200_OK)
 
 
 class RepresentativeViewSet(viewsets.ModelViewSet):

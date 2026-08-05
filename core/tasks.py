@@ -177,8 +177,11 @@ def auto_end_stale_live_sessions():
 @shared_task
 def release_payments_after_week():
     """
-    Release payments to sellers after 1 week without disputes or buyer approval
-    - Check completed reservations older than 7 days
+    Release payments to sellers once each reservation's item-specific
+    warranty period has passed without disputes or buyer approval
+    - Check completed reservations old enough for at least the shortest
+      possible warranty period (1 day) — can_release_payment() below then
+      re-checks the exact per-item warranty
     - Verify no open disputes
     - Release payment to seller (minus commission if applicable)
     - Release commission to representative if applicable
@@ -186,11 +189,15 @@ def release_payments_after_week():
     from .models import Reservation, Dispute
     from .wallet_utils import release_reservation_payment
 
-    week_ago = timezone.now() - timedelta(days=7)
+    # Coarse pre-filter using the shortest possible warranty (1 day) so the
+    # query doesn't scan reservations that can't possibly be eligible under
+    # any warranty length; can_release_payment() supplies the precise,
+    # per-reservation answer below.
+    min_possible_warranty_ago = timezone.now() - timedelta(days=1)
 
     reservations = Reservation.objects.filter(
         status__in=['completed', 'confirmed'],
-        completed_at__lte=week_ago,
+        completed_at__lte=min_possible_warranty_ago,
         payment_released_to_seller=False,
         buyer_approved=False
     ).select_related('item__owner', 'representative')
@@ -209,7 +216,7 @@ def release_payments_after_week():
 
                 with transaction.atomic():
                     release_reservation_payment(reservation)
-                    # 7 days passed with no dispute — the sale is settled.
+                    # Warranty period passed with no dispute — the sale is settled.
                     reservation.status = 'confirmed'
                     reservation.save(update_fields=['status'])
 
@@ -505,7 +512,7 @@ def send_payment_release_notification(reservation_id, release_type='auto_release
         release_type: 'auto_release', 'buyer_approved', or 'admin_approved'
     """
     from .models import Reservation
-    from .notifications import NotificationService, bidi_isolate
+    from .notifications import NotificationService, bidi_isolate, format_days_ar
 
     try:
         reservation = Reservation.objects.get(id=reservation_id)
@@ -513,10 +520,10 @@ def send_payment_release_notification(reservation_id, release_type='auto_release
         item_title = bidi_isolate(reservation.item.title)
 
         if release_type == 'auto_release':
-            subject = "تم تحرير الدفعة - مرور 7 أيام"
+            subject = f"تم تحرير الدفعة - مرور {format_days_ar(reservation.warranty_days)}"
             message = (
                 f"تم تحرير دفعة بمبلغ ${reservation.total_price} لمنتج '{item_title}' "
-                f"إليك تلقائياً بعد مرور 7 أيام دون أي نزاع."
+                f"إليك تلقائياً بعد مرور {format_days_ar(reservation.warranty_days)} دون أي نزاع."
             )
         elif release_type == 'buyer_approved':
             subject = "تم تحرير الدفعة - موافقة المشتري"
@@ -580,19 +587,19 @@ def send_purchase_approval_reminder(reservation_id):
     Send at 1 day and 5 days after completion
     """
     from .models import Reservation
-    from .notifications import NotificationService, bidi_isolate
+    from .notifications import NotificationService, bidi_isolate, format_days_ar
 
     try:
         reservation = Reservation.objects.get(id=reservation_id)
 
         if reservation.status == 'completed' and not reservation.buyer_approved:
             days_since_completion = (timezone.now() - reservation.completed_at).days
-            days_remaining = 7 - days_since_completion
+            days_remaining = reservation.warranty_days - days_since_completion
 
             message = (
                 f"اكتملت عملية شرائك لمنتج '{bidi_isolate(reservation.item.title)}' منذ {days_since_completion} يوم(أيام). "
                 f"إذا كنت راضياً عن عملية الشراء، يرجى الموافقة عليها لتحرير المبلغ للبائع. "
-                f"سيتم تحرير المبلغ تلقائياً خلال {days_remaining} يوم إذا لم يُفتح أي نزاع."
+                f"سيتم تحرير المبلغ تلقائياً خلال {format_days_ar(max(0, days_remaining))} إذا لم يُفتح أي نزاع."
             )
 
             NotificationService.send_email(
@@ -1129,7 +1136,7 @@ def send_representative_sale_notification(reservation_id, representative_assignm
     Notify representative that they made a sale and will earn commission
     """
     from .models import Reservation, Representative
-    from .notifications import NotificationService, notify_push, bidi_isolate
+    from .notifications import NotificationService, notify_push, bidi_isolate, format_days_ar
 
     try:
         reservation = Reservation.objects.select_related(
@@ -1143,11 +1150,14 @@ def send_representative_sale_notification(reservation_id, representative_assignm
         representative = representative_assignment.representative
         item_title = bidi_isolate(reservation.item.title)
 
+        # This fires right after the (still 'pending') reservation is
+        # created — reservation.warranty_days is only snapshotted at
+        # completion, so read the item's current configured value instead.
         message = (
             f"أخبار رائعة! اشترى {bidi_isolate(reservation.buyer.username)} منتج '{item_title}' عبر رابط تمثيلك. "
             f"مبلغ البيع: ${reservation.total_price}, "
             f"عمولتك: ${reservation.commission_amount} ({representative_assignment.commission_percentage}%). "
-            f"ستُدفع العمولة عند موافقة المشتري على الشراء أو بعد 7 أيام."
+            f"ستُدفع العمولة عند موافقة المشتري على الشراء أو بعد {format_days_ar(reservation.item.warranty_days)}."
         )
 
         NotificationService.send_email(

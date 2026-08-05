@@ -19,7 +19,7 @@ from .models import (
     User, Location, UserStore, Representative,
     Category, Item, ItemImage, ItemLocationHistory,
     FixedPriceListing, AuctionListing, Bid, ItemTransfer, StorageFeePayment,
-    Reservation, Transaction, Dispute,
+    Reservation, Transaction, Dispute, Report,
     Rating, ProductReview, StoreReview, Chat, Message,
     StoreFollow, StoreCoupon, CouponCollection,
     LiveSession, LiveSessionItem, LiveSessionLike, LiveSessionComment,
@@ -28,8 +28,12 @@ from .models import (
 )
 from .services.disputes import resolve_dispute, DisputeResolutionError
 from .services.withdrawals import approve_withdrawal, reject_withdrawal, WithdrawalReviewError
-from .services.moderation import archive_item, reactivate_user, stop_live_session, suspend_user
+from .services.moderation import (
+    archive_item, reactivate_user, stop_live_session, suspend_user,
+    resolve_report, ReportResolutionError,
+)
 from .services.support import SUPPORT_USERNAME
+from .notifications import notify_report_reviewed
 
 
 # =============================================================================
@@ -55,7 +59,7 @@ class ReservationExportResource(resources.ModelResource):
     class Meta:
         model = Reservation
         fields = ('id', 'item', 'buyer', 'quantity', 'total_price', 'status',
-                   'reserved_at', 'completed_at')
+                   'reserved_at', 'completed_at', 'warranty_days')
         export_order = fields
 
     def dehydrate_item(self, obj):
@@ -299,7 +303,7 @@ class ItemImageInline(TabularInline):
 
 @admin.register(Item)
 class ItemAdmin(ModelAdmin):
-    list_display = ('title', 'owner', 'category', 'status', 'condition', 'quantity', 'sold_count', 'rating', 'created_at')
+    list_display = ('title', 'owner', 'category', 'status', 'condition', 'quantity', 'warranty_days', 'sold_count', 'rating', 'created_at')
     list_filter = ('status', 'condition', 'category', 'is_daily_deal')
     search_fields = ('title', 'name_ar', 'owner__username')
     raw_id_fields = ('owner', 'current_holder', 'current_location', 'category')
@@ -422,7 +426,7 @@ class StorageFeePaymentAdmin(ModelAdmin):
 
 @admin.register(Reservation)
 class ReservationAdmin(ExportActionMixin, ModelAdmin):
-    list_display = ('id', 'item', 'buyer', 'quantity', 'total_price', 'status', 'is_deposit_only', 'reserved_at', 'expires_at')
+    list_display = ('id', 'item', 'buyer', 'quantity', 'total_price', 'status', 'is_deposit_only', 'warranty_days', 'reserved_at', 'expires_at')
     list_filter = ('status', 'is_deposit_only')
     search_fields = ('item__title', 'buyer__username')
     raw_id_fields = (
@@ -583,6 +587,99 @@ class DisputeAdmin(ExportActionMixin, ModelAdmin):
             opts=self.model._meta,
         )
         return TemplateResponse(request, 'admin/core/dispute/resolve.html', context)
+
+
+_REPORT_BADGE_COLORS = {
+    'pending': ('#9C6216', '#9C621620'),
+    'reviewing': ('#1D4E89', '#1D4E8920'),
+    'resolved': ('#2E7D57', '#2E7D5720'),
+    'dismissed': ('#6B7280', '#6B728020'),
+}
+
+
+@admin.register(Report)
+class ReportAdmin(ModelAdmin):
+    """
+    Whoever/whatever a report targets is only ever suspended/archived
+    through the target's own admin action (Item's "أرشفة المنتجات
+    المحددة", User's "تعليق الحسابات المحددة", UserStore's "تعطيل المتاجر
+    المحددة") or the DRF resolve action — never a raw field edit here — so
+    a report can't silently drift from what those guarded paths do. The
+    workflow: open a report, set action_taken + admin_notes to record the
+    decision, then use "حسم البلاغات المحددة" below to close it out — that
+    action is what actually calls resolve_report() and applies the
+    recorded action_taken to the target.
+    """
+    list_display = ('id', 'target_display', 'reason', 'reporter', 'status_badge', 'action_taken', 'created_at')
+    list_filter = ('status', 'reason', 'action_taken', 'created_at')
+    search_fields = (
+        'reporter__username', 'description',
+        'reported_item__title', 'reported_store__name', 'reported_user__username',
+    )
+    raw_id_fields = ('reporter', 'reported_item', 'reported_store', 'reported_user', 'reviewed_by')
+    list_select_related = ('reporter', 'reported_item', 'reported_store', 'reported_user', 'reviewed_by')
+    readonly_fields = (
+        'reporter', 'reported_item', 'reported_store', 'reported_user',
+        'reason', 'description', 'status', 'reviewed_by', 'created_at', 'resolved_at',
+    )
+    actions = ['resolve_reports_action', 'dismiss_reports_action', 'mark_reviewing_action']
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        # Mirrors ItemAdmin/ReservationAdmin below — a report is the raw
+        # record behind a moderation decision; staff shouldn't be able to
+        # erase it here when ReportViewSet.destroy blocks the same thing
+        # via the API.
+        return False
+
+    @admin.display(description='الهدف')
+    def target_display(self, obj):
+        return str(obj.target)
+
+    @admin.display(description='الحالة')
+    def status_badge(self, obj):
+        color, bg = _REPORT_BADGE_COLORS.get(obj.status, ('#6B7280', '#6B728020'))
+        return format_html(
+            '<span style="background:{};color:{};padding:2px 10px;border-radius:999px;'
+            'font-size:12px;font-weight:600;white-space:nowrap;">{}</span>',
+            bg, color, obj.get_status_display(),
+        )
+
+    @admin.action(description='حسم البلاغات المحددة (تنفيذ الإجراء المسجّل)', permissions=['change'])
+    def resolve_reports_action(self, request, queryset):
+        count, failed = 0, 0
+        for report in queryset.filter(status__in=['pending', 'reviewing']):
+            try:
+                resolve_report(
+                    report, new_status='resolved', action_taken=report.action_taken,
+                    admin_notes=report.admin_notes, actor=request.user,
+                )
+                notify_report_reviewed(report)
+                count += 1
+            except ReportResolutionError as e:
+                failed += 1
+                self.message_user(request, f'بلاغ #{report.id}: {e}', level=messages.ERROR)
+        if count:
+            self.message_user(request, f'تم حسم {count} بلاغ.', level=messages.SUCCESS)
+
+    @admin.action(description='رفض البلاغات المحددة (لا إجراء)', permissions=['change'])
+    def dismiss_reports_action(self, request, queryset):
+        count = 0
+        for report in queryset.filter(status__in=['pending', 'reviewing']):
+            resolve_report(
+                report, new_status='dismissed', action_taken='none',
+                admin_notes=report.admin_notes, actor=request.user,
+            )
+            notify_report_reviewed(report)
+            count += 1
+        self.message_user(request, f'تم رفض {count} بلاغ.', level=messages.SUCCESS)
+
+    @admin.action(description='وضع علامة "قيد المراجعة" على البلاغات المحددة', permissions=['change'])
+    def mark_reviewing_action(self, request, queryset):
+        count = queryset.filter(status='pending').update(status='reviewing')
+        self.message_user(request, f'تم تحديث {count} بلاغ إلى "قيد المراجعة".', level=messages.SUCCESS)
 
 
 # =============================================================================

@@ -18,6 +18,7 @@ from .views import (
     MessageViewSet,
     RatingViewSet,
     DisputeViewSet,
+    ReportViewSet,
     TransactionViewSet,
     CategoryViewSet,
     UserStoreViewSet, AdminWithdrawalViewSet, WalletViewSet,
@@ -44,6 +45,7 @@ router.register(r'chats', ChatViewSet, basename='chat')
 router.register(r'messages', MessageViewSet, basename='message')
 router.register(r'ratings', RatingViewSet, basename='rating')
 router.register(r'disputes', DisputeViewSet, basename='dispute')
+router.register(r'reports', ReportViewSet, basename='report')
 router.register(r'transactions', TransactionViewSet, basename='transaction')
 router.register(r'categories', CategoryViewSet, basename='category')
 router.register(r'stores', UserStoreViewSet, basename='store')

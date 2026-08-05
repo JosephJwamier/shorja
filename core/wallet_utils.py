@@ -96,17 +96,20 @@ def complete_reservation(reservation, payment_type):
             reservation=reservation
         )
     reservation.delivery_fee = delivery_fee
+    # Snapshot the item's current warranty period so a later edit by the
+    # seller doesn't retroactively change the terms of this order.
+    reservation.warranty_days = reservation.item.warranty_days
 
     # 'completed' means the buyer finished their in-app payment step —
     # deposit-only (remainder collected in cash at delivery) or full —
     # regardless of which. 'confirmed' is a later, separate milestone: the
     # whole sale is settled (full amount collected + delivery confirmed by
-    # the buyer, or by the 7-day auto-release). See approve_and_release_payment
-    # and tasks.release_payments_after_week.
+    # the buyer, or by the warranty-period auto-release). See
+    # approve_and_release_payment and tasks.release_payments_after_week.
     reservation.status = 'completed'
     reservation.is_deposit_only = (payment_type == 'deposit')
     reservation.completed_at = timezone.now()
-    reservation.save(update_fields=['status', 'is_deposit_only', 'completed_at', 'delivery_fee'])
+    reservation.save(update_fields=['status', 'is_deposit_only', 'completed_at', 'delivery_fee', 'warranty_days'])
 
     # Stock is only taken now — not at reservation creation — so lock and
     # re-read it fresh (another reservation on the same item may have

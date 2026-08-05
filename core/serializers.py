@@ -9,7 +9,7 @@ from django.contrib.auth import get_user_model
 from .models import (
     Item, ItemImage, FixedPriceListing, AuctionListing,
     Bid, Reservation, Representative, ItemTransfer, Category,
-    UserStore, Rating, Transaction, Chat, Message, Dispute,
+    UserStore, Rating, Transaction, Chat, Message, Dispute, Report,
     Location, ItemLocationHistory, StorageFeePayment, Notification,
     ProductReview, StoreReview, StoreFollow, StoreCoupon, CouponCollection,
     LiveSession, LiveSessionItem, LiveSessionComment, LiveSessionViewer,
@@ -219,7 +219,7 @@ class ItemSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'owner', 'current_holder', 'title', 'name_ar', 'description',
             'category', 'category_id', 'condition', 'quantity', 'status',
-            'package_size',
+            'package_size', 'warranty_days',
             'price', 'original_price', 'discount_percentage',
             'rating', 'sold_count', 'total_reviews',
             'is_daily_deal',
@@ -279,7 +279,7 @@ class ItemCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Item
         fields = ['title', 'description', 'category', 'condition', 'quantity',
-                  'package_size', 'current_location_id']
+                  'package_size', 'warranty_days', 'current_location_id']
 
     def validate_current_location_id(self, value):
         if value:
@@ -652,7 +652,7 @@ class ReservationSerializer(serializers.ModelSerializer):
             'representative', 'representative_assignment', 'commission_amount',
             'commission_paid', 'commission_paid_at',
             'is_transfer_resale', 'related_transfer', 'original_owner_commission',
-            'delivery_location', 'delivery_fee',
+            'delivery_location', 'delivery_fee', 'warranty_days',
             'coupon_discount', 'coupon_code', 'is_negotiated_price',
             'live_session', 'live_session_item', 'auction', 'proof_screenshot',
             'time_remaining', 'has_dispute', 'dispute_status',
@@ -670,7 +670,7 @@ class ReservationSerializer(serializers.ModelSerializer):
             'representative_assignment', 'commission_amount',
             'commission_paid', 'commission_paid_at',
             'is_transfer_resale', 'original_owner_commission',
-            'coupon_discount', 'delivery_fee',
+            'coupon_discount', 'delivery_fee', 'warranty_days',
         ]
 
     def get_coupon_code(self, obj):
@@ -821,7 +821,7 @@ class ReservationSerializer(serializers.ModelSerializer):
                 'message': 'Payment approved, pending release'
             }
         elif obj.status == 'completed' and obj.completed_at:
-            days_remaining = 7 - (timezone.now() - obj.completed_at).days
+            days_remaining = obj.warranty_days - (timezone.now() - obj.completed_at).days
             return {
                 'status': 'held',
                 'days_remaining': max(0, days_remaining),
@@ -1956,6 +1956,57 @@ class UserStoreSerializer(serializers.ModelSerializer):
         pulsing "مباشر" indicator on the store's avatar in the app)."""
         live_session = obj.live_sessions.filter(status='live').only('id').first()
         return live_session.id if live_session else None
+
+
+class ReportSerializer(serializers.ModelSerializer):
+    """Report serializer"""
+    reporter = UserSerializer(read_only=True)
+    reported_item = ItemSerializer(read_only=True)
+    reported_store = UserStoreSerializer(read_only=True)
+    reported_user = UserSerializer(read_only=True)
+    reviewed_by = UserSerializer(read_only=True)
+    target_type = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = Report
+        fields = [
+            'id', 'reporter', 'reported_item', 'reported_store', 'reported_user',
+            'target_type', 'reason', 'description', 'status', 'action_taken',
+            'admin_notes', 'reviewed_by', 'created_at', 'resolved_at',
+        ]
+        read_only_fields = fields
+
+
+class CreateReportSerializer(serializers.Serializer):
+    """Serializer for filing a report against an item, a store, or a user"""
+    target_type = serializers.ChoiceField(choices=['item', 'store', 'user'])
+    target_id = serializers.IntegerField()
+    reason = serializers.ChoiceField(choices=Report.REASON_CHOICES)
+    description = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, data):
+        request = self.context['request']
+        target_type = data['target_type']
+        model = {'item': Item, 'store': UserStore, 'user': User}[target_type]
+
+        try:
+            target = model.objects.get(id=data['target_id'])
+        except model.DoesNotExist:
+            raise serializers.ValidationError({'target_id': f'{target_type} not found'})
+
+        target_owner = target if target_type == 'user' else target.owner if target_type == 'item' else target.user
+        if target_owner == request.user:
+            raise serializers.ValidationError('لا يمكنك الإبلاغ عن نفسك أو عن منتجك/متجرك الخاص')
+
+        data['target'] = target
+        return data
+
+
+class ResolveReportSerializer(serializers.Serializer):
+    """Serializer for an admin resolving a report"""
+    status = serializers.ChoiceField(choices=[('resolved', 'Resolved'), ('dismissed', 'Dismissed')])
+    action_taken = serializers.ChoiceField(choices=Report.ACTION_CHOICES, required=False, default='none')
+    admin_notes = serializers.CharField(required=False, allow_blank=True)
 
 
 class PublicUserStoreSerializer(serializers.ModelSerializer):

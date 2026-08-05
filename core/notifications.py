@@ -42,6 +42,11 @@ def bidi_isolate(value):
     return f'{_FSI}{value}{_PDI}'
 
 
+def format_days_ar(n):
+    """Arabic day-count with correct singular/plural: 1 -> 'يوم واحد', else 'N أيام'."""
+    return 'يوم واحد' if n == 1 else f'{n} أيام'
+
+
 # Arabic labels for Transaction.transaction_type, kept local to this module so
 # notification copy can be Arabic without changing Transaction's stored
 # choices (which are relied on elsewhere and would need a migration).
@@ -639,6 +644,46 @@ def notify_dispute_created(dispute):
     # Send to all admin emails, if any are configured
     for admin_email in getattr(settings, 'ADMIN_EMAILS', []):
         NotificationService.send_email(admin_email, admin_subject, admin_message)
+
+
+_REPORT_TARGET_LABELS_AR = {'item': 'منتج', 'store': 'متجر', 'user': 'مستخدم'}
+
+
+def notify_report_submitted(report):
+    """Notify admins that a new policy-violation report needs review"""
+    target_label = _REPORT_TARGET_LABELS_AR[report.target_type]
+    target_name = bidi_isolate(str(report.target))
+
+    admin_subject = f"بلاغ جديد عن {target_label}: {target_name}"
+    admin_message = f"""
+    تم استلام بلاغ جديد:
+
+    المُبلِغ: {report.reporter.username}
+    نوع الهدف: {target_label}
+    الهدف: {target_name}
+    السبب: {report.get_reason_display()}
+    التفاصيل: {report.description or '—'}
+
+    مراجعة البلاغ: {settings.FRONTEND_URL}/admin/reports/{report.id}
+    """
+
+    for admin_email in getattr(settings, 'ADMIN_EMAILS', []):
+        NotificationService.send_email(admin_email, admin_subject, admin_message)
+
+
+def notify_report_reviewed(report):
+    """Notify the reporter that their report was reviewed"""
+    if report.status == 'resolved':
+        title = "تم اتخاذ إجراء بخصوص بلاغك"
+        body = "راجع فريقنا بلاغك واتخذ الإجراء المناسب. شكراً لمساعدتك في الحفاظ على أمان المنصة."
+    else:
+        title = "تمت مراجعة بلاغك"
+        body = "راجع فريقنا بلاغك ولم يجد ما يستدعي اتخاذ إجراء."
+
+    notify_push(
+        report.reporter, title, body,
+        data={'type': 'report_reviewed', 'report_id': str(report.id), 'status': report.status}
+    )
 
 
 def notify_delivery_assigned(delivery_order):

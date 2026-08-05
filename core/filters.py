@@ -7,7 +7,7 @@ from django.db.models import Q
 
 from .models import (
     Item, FixedPriceListing, AuctionListing, Reservation,
-    ItemTransfer, Chat, Rating, Dispute, Transaction, Category, UserStore, Location,
+    ItemTransfer, Chat, Rating, Dispute, Report, Transaction, Category, UserStore, Location,
     ProductReview, StoreReview, LiveSession,
 )
 
@@ -187,6 +187,22 @@ class DisputeFilter(filters.FilterSet):
     class Meta:
         model = Dispute
         fields = ['status', 'complainant', 'defendant']
+
+
+class ReportFilter(filters.FilterSet):
+    """Filter for Report model"""
+    status = filters.CharFilter(lookup_expr='exact')
+    reason = filters.CharFilter(lookup_expr='exact')
+    target_type = filters.CharFilter(method='filter_target_type')
+    created_after = filters.DateTimeFilter(field_name='created_at', lookup_expr='gte')
+
+    class Meta:
+        model = Report
+        fields = ['status', 'reason']
+
+    def filter_target_type(self, queryset, name, value):
+        field = {'item': 'reported_item', 'store': 'reported_store', 'user': 'reported_user'}.get(value)
+        return queryset.filter(**{f'{field}__isnull': False}) if field else queryset.none()
 
 
 class TransactionFilter(filters.FilterSet):

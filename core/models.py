@@ -319,6 +319,11 @@ class Item(models.Model):
         max_length=10, choices=PACKAGE_SIZE_CHOICES, default='medium',
         help_text='الحجم التقريبي للطرد — يُستخدم لتحديد عدد المنتجات القابلة لدمجها بشحنة توصيل واحدة'
     )
+    warranty_days = models.PositiveIntegerField(
+        default=7,
+        validators=[MinValueValidator(1)],
+        help_text='مدة الضمان بالأيام قبل تحرير الدفعة المحجوزة تلقائياً للبائع (ما لم يوافق المشتري أو يُفتح نزاع). الحد الأدنى يوم واحد — انظر Reservation.can_release_payment.'
+    )
 
     # Home screen metrics
     sold_count = models.IntegerField(default=0)
@@ -749,8 +754,9 @@ class Reservation(models.Model):
       confirmed -> the sale is fully settled: the full price has been
                    collected (in-app, or in cash at delivery for
                    deposit-only orders) AND the buyer confirmed receipt
-                   (approve_and_release_payment) or 7 days passed with no
-                   open dispute (tasks.release_payments_after_week). Terminal
+                   (approve_and_release_payment) or the item's warranty
+                   period passed with no open dispute
+                   (tasks.release_payments_after_week). Terminal
                    success state.
       expired   -> 'pending' reservation whose hold ran out unpaid.
       cancelled -> buyer or seller cancelled (seller may cancel even a paid
@@ -780,6 +786,11 @@ class Reservation(models.Model):
     # computed from the active delivery company's intra/inter-governorate
     # rate (0 if no active company at that time). See ReservationViewSet.complete.
     delivery_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    # Snapshot of item.warranty_days taken when the reservation completes
+    # (see wallet_utils.complete_reservation) — a later edit to the item's
+    # warranty by the seller must not retroactively change the terms of an
+    # already in-flight order. See can_release_payment below.
+    warranty_days = models.PositiveIntegerField(default=7)
 
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
 
@@ -963,17 +974,18 @@ class Reservation(models.Model):
         if self.payment_released_to_seller or self.status not in ('completed', 'confirmed'):
             return False
 
-        # Payment released if buyer approved OR 1 week passed without dispute
+        # Payment released if buyer approved OR the item's warranty period
+        # passed without dispute
         if self.buyer_approved:
             return True
 
         if self.completed_at:
-            week_passed = timezone.now() - self.completed_at >= timedelta(days=7)
+            warranty_passed = timezone.now() - self.completed_at >= timedelta(days=self.warranty_days)
             has_open_dispute = Dispute.objects.filter(
                 reservation=self,
                 status__in=['open', 'investigating']
             ).exists()
-            return week_passed and not has_open_dispute
+            return warranty_passed and not has_open_dispute
 
         return False
 
@@ -1024,6 +1036,99 @@ class Dispute(models.Model):
 
     def __str__(self):
         return f"Dispute #{self.id} - {self.title}"
+
+
+class Report(models.Model):
+    """A user's report that a listing, store, or another user violates the
+    app's policies (counterfeit goods, scams, harassment, ...). Distinct
+    from Dispute, which is a claim tied to one specific paid reservation —
+    a Report has no reservation/financial angle and any authenticated user
+    can file one against any item/store/user, not just a trading partner.
+
+    Exactly one of reported_item/reported_store/reported_user is set (the
+    report's target); enforced both by the CheckConstraint below and by
+    CreateReportSerializer at the API layer.
+    """
+    REASON_CHOICES = [
+        ('counterfeit', 'منتج مقلد أو مخالف'),
+        ('prohibited', 'منتج ممنوع أو غير قانوني'),
+        ('misleading', 'وصف مضلل للمنتج'),
+        ('scam', 'احتيال أو نصب'),
+        ('harassment', 'مضايقة أو إساءة'),
+        ('spam', 'محتوى مزعج أو متكرر'),
+        ('inappropriate', 'محتوى غير لائق'),
+        ('fake_account', 'حساب أو متجر وهمي'),
+        ('other', 'أخرى'),
+    ]
+
+    STATUS_CHOICES = [
+        ('pending', 'قيد الانتظار'),
+        ('reviewing', 'قيد المراجعة'),
+        ('resolved', 'تم اتخاذ إجراء'),
+        ('dismissed', 'مرفوض'),
+    ]
+
+    # What (if anything) the admin did about it — recorded on the report
+    # itself so its history reads standalone, in addition to the note
+    # resolve_report() appends to the target's own admin_notes.
+    ACTION_CHOICES = [
+        ('none', 'لا إجراء'),
+        ('warning', 'تحذير للمُبلَغ عنه'),
+        ('item_archived', 'أرشفة المنتج'),
+        ('store_suspended', 'إيقاف المتجر'),
+        ('user_suspended', 'تعليق الحساب'),
+    ]
+
+    reporter = models.ForeignKey(User, on_delete=models.CASCADE, related_name='filed_reports')
+
+    reported_item = models.ForeignKey(Item, on_delete=models.CASCADE, null=True, blank=True, related_name='reports')
+    reported_store = models.ForeignKey(UserStore, on_delete=models.CASCADE, null=True, blank=True, related_name='reports')
+    reported_user = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True, related_name='reports_against')
+
+    reason = models.CharField(max_length=20, choices=REASON_CHOICES)
+    description = models.TextField(blank=True, help_text='تفاصيل إضافية اختيارية من المُبلِغ')
+
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    action_taken = models.CharField(max_length=20, choices=ACTION_CHOICES, default='none')
+    # Staff-only, same convention as Item.admin_notes/User.admin_notes.
+    admin_notes = models.TextField(blank=True)
+    reviewed_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name='reviewed_reports'
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'بلاغ'
+        verbose_name_plural = 'البلاغات'
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    models.Q(reported_item__isnull=False, reported_store__isnull=True, reported_user__isnull=True) |
+                    models.Q(reported_item__isnull=True, reported_store__isnull=False, reported_user__isnull=True) |
+                    models.Q(reported_item__isnull=True, reported_store__isnull=True, reported_user__isnull=False)
+                ),
+                name='report_exactly_one_target',
+            )
+        ]
+
+    def __str__(self):
+        target = self.reported_item or self.reported_store or self.reported_user
+        return f"Report #{self.id} - {target} ({self.get_reason_display()})"
+
+    @property
+    def target_type(self):
+        if self.reported_item_id:
+            return 'item'
+        if self.reported_store_id:
+            return 'store'
+        return 'user'
+
+    @property
+    def target(self):
+        return self.reported_item or self.reported_store or self.reported_user
 
 
 class DeliveryCompany(models.Model):
@@ -1901,6 +2006,8 @@ class Notification(models.Model):
         ('live_stream_started', 'Live Stream Started'),
         ('live_item_reserved', 'Live Item Reserved'),
         ('live_item_sold_out', 'Live Item Sold Out'),
+        ('report_submitted', 'Report Submitted'),
+        ('report_reviewed', 'Report Reviewed'),
         ('general', 'General'),
     ]
 
