@@ -25,11 +25,12 @@ from .models import (
     LiveSession, LiveSessionItem, LiveSessionLike, LiveSessionComment,
     DeliveryCompany, DeliveryOrder, CashSettlement, DeliveryBatch,
     Wallet, Notification, DepositRequest, WithdrawalRequest,
+    Reel, ReelLike, ReelComment, ReelView,
 )
 from .services.disputes import resolve_dispute, DisputeResolutionError
 from .services.withdrawals import approve_withdrawal, reject_withdrawal, WithdrawalReviewError
 from .services.moderation import (
-    archive_item, reactivate_user, stop_live_session, suspend_user,
+    archive_item, archive_reel, reactivate_user, stop_live_session, suspend_user,
     resolve_report, ReportResolutionError,
 )
 from .services.support import SUPPORT_USERNAME
@@ -616,10 +617,10 @@ class ReportAdmin(ModelAdmin):
         'reporter__username', 'description',
         'reported_item__title', 'reported_store__name', 'reported_user__username',
     )
-    raw_id_fields = ('reporter', 'reported_item', 'reported_store', 'reported_user', 'reviewed_by')
-    list_select_related = ('reporter', 'reported_item', 'reported_store', 'reported_user', 'reviewed_by')
+    raw_id_fields = ('reporter', 'reported_item', 'reported_store', 'reported_user', 'reported_reel', 'reviewed_by')
+    list_select_related = ('reporter', 'reported_item', 'reported_store', 'reported_user', 'reported_reel', 'reviewed_by')
     readonly_fields = (
-        'reporter', 'reported_item', 'reported_store', 'reported_user',
+        'reporter', 'reported_item', 'reported_store', 'reported_user', 'reported_reel',
         'reason', 'description', 'status', 'reviewed_by', 'created_at', 'resolved_at',
     )
     actions = ['resolve_reports_action', 'dismiss_reports_action', 'mark_reviewing_action']
@@ -904,6 +905,56 @@ class LiveSessionCommentAdmin(ModelAdmin):
     search_fields = ('user__username', 'session__title', 'content')
     raw_id_fields = ('user', 'session')
     list_select_related = ('user', 'session', 'session__store')
+
+
+# =============================================================================
+# الريلز
+# =============================================================================
+
+@admin.register(Reel)
+class ReelAdmin(ModelAdmin):
+    list_display = ('id', 'store', 'item', 'status', 'view_count', 'likes_count', 'comments_count', 'created_at')
+    list_filter = ('status',)
+    search_fields = ('store__name', 'caption')
+    raw_id_fields = ('store', 'item')
+    list_select_related = ('store', 'store__user', 'item')
+    readonly_fields = ('video_key', 'thumbnail_key', 'file_size_bytes', 'created_at', 'updated_at', 'published_at')
+    actions = ['archive_selected_reels']
+
+    @admin.action(description='أرشفة الريلز المحددة', permissions=['change'])
+    def archive_selected_reels(self, request, queryset):
+        count = 0
+        for reel in queryset.exclude(status='archived'):
+            archive_reel(reel, reason='أرشفة من لوحة التحكم', actor=request.user)
+            count += 1
+        if count:
+            self.message_user(request, f'تم أرشفة {count} ريل.', level=messages.SUCCESS)
+        else:
+            self.message_user(request, 'لا توجد ريلز غير مؤرشفة ضمن التحديد.', level=messages.WARNING)
+
+
+@admin.register(ReelLike)
+class ReelLikeAdmin(ModelAdmin):
+    list_display = ('user', 'reel', 'created_at')
+    search_fields = ('user__username',)
+    raw_id_fields = ('user', 'reel')
+    list_select_related = ('user', 'reel', 'reel__store')
+
+
+@admin.register(ReelComment)
+class ReelCommentAdmin(ModelAdmin):
+    list_display = ('user', 'reel', 'content', 'created_at')
+    search_fields = ('user__username', 'content')
+    raw_id_fields = ('user', 'reel')
+    list_select_related = ('user', 'reel', 'reel__store')
+
+
+@admin.register(ReelView)
+class ReelViewAdmin(ModelAdmin):
+    list_display = ('reel', 'user', 'view_count', 'first_viewed_at', 'last_viewed_at')
+    search_fields = ('user__username', 'reel__caption')
+    raw_id_fields = ('user', 'reel')
+    list_select_related = ('user', 'reel', 'reel__store')
 
 
 # =============================================================================

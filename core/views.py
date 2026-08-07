@@ -42,6 +42,7 @@ from .models import (ItemImage, Location,
     LiveSession, LiveSessionItem, LiveSessionLike, LiveSessionComment, LiveSessionViewer,
     LiveSessionModerator, LiveSessionBan,
     UserCategoryAffinity, record_interest,
+    Reel, ReelLike, ReelComment, ReelView,
 )
 
 from .serializers import (ItemImageSerializer, FixedPriceListingCreateSerializer,
@@ -81,14 +82,18 @@ from .serializers import (ItemImageSerializer, FixedPriceListingCreateSerializer
                           LiveSessionBanSerializer, BanLiveSessionViewerSerializer, ShowLiveItemSerializer,
                           QuickShowItemSerializer, QuickLiveAuctionSerializer,
                           LiveAuctionSerializer,
+                          ReelCardSerializer, ReelDetailSerializer,
+                          RequestReelUploadSerializer, FinalizeReelSerializer,
+                          ReelCommentSerializer, ReelCommentCreateSerializer,
                           )
 from .permissions import IsOwnerOrReadOnly, IsParticipantOrReadOnly, IsStoreOwner
 from .firestore import sync_chat_to_firestore, sync_message_to_firestore, sync_user_fcm_token
+from . import aws_utils
 from .filters import (
     ItemFilter, FixedPriceListingFilter, AuctionListingFilter,
     ReservationFilter, ItemTransferFilter, RatingFilter,
     DisputeFilter, ReportFilter, TransactionFilter, UserStoreFilter, LocationFilter,
-    ProductReviewFilter, StoreReviewFilter, LiveSessionFilter,
+    ProductReviewFilter, StoreReviewFilter, LiveSessionFilter, ReelFilter,
 )
 from .iraq_governorates import IRAQ_GOVERNORATES
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
@@ -2893,6 +2898,378 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         }, status=status.HTTP_200_OK)
 
 
+class ReelViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin,
+                   mixins.UpdateModelMixin, viewsets.GenericViewSet):
+    """
+    Reels (الريلز) — short vertical video posted by a store, optionally
+    tagging one product. Deliberately no CreateModelMixin: posting a reel is
+    a two-step presigned-upload flow (request_upload_url -> client PUTs
+    bytes straight to S3 -> finalize), not a single POST with a file field.
+    Video/thumbnail bytes never pass through Django — see core/aws_utils.py.
+    """
+    queryset = Reel.objects.all().select_related('store', 'store__user', 'item')
+    filter_backends = [DjangoFilterBackend]
+    filterset_class = ReelFilter
+    pagination_class = ItemStandardPagination
+
+    def get_permissions(self):
+        if self.action in ('request_upload_url', 'finalize', 'my_reels',
+                            'update', 'partial_update', 'destroy'):
+            return [IsStoreOwner()]
+        if self.action == 'comments' and self.request.method == 'GET':
+            return [AllowAny()]
+        if self.action in ('like', 'unlike', 'comments', 'comment_detail'):
+            return [IsAuthenticated()]
+        return [AllowAny()]
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return ReelCardSerializer
+        if self.action == 'request_upload_url':
+            return RequestReelUploadSerializer
+        if self.action == 'finalize':
+            return FinalizeReelSerializer
+        return ReelDetailSerializer
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        # Discovery (list) only ever shows published reels — pending/failed/
+        # archived rows are only reachable through my_reels (owner) or a
+        # direct retrieve/finalize by the owning store.
+        if self.action == 'list':
+            queryset = queryset.filter(status='published')
+        return queryset
+
+    @swagger_auto_schema(
+        operation_description="Request presigned S3 PUT URLs for a new reel's video (and optional thumbnail) — creates a pending_upload Reel immediately",
+        request_body=RequestReelUploadSerializer,
+        responses={201: "Presigned upload URLs issued", 403: "Store owners only"}
+    )
+    @action(detail=False, methods=['post'])
+    def request_upload_url(self, request):
+        """Store owner requests presigned S3 PUT URLs for a new reel's video
+        (and optionally thumbnail). Creates the Reel row (status=
+        pending_upload) immediately so cleanup_orphaned_reel_uploads has a
+        row to find even if the client abandons the flow right after this."""
+        from django.conf import settings
+
+        serializer = RequestReelUploadSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                'success': False,
+                'message': 'Validation failed',
+                'errors': serializer.errors,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        store = request.user.store
+        content_type = serializer.validated_data['content_type']
+        has_thumbnail = serializer.validated_data['has_thumbnail']
+
+        reel_uuid = uuid.uuid4()
+        video_key = f"incoming/{store.id}/{reel_uuid}/video.mp4"
+        thumbnail_key = f"incoming/{store.id}/{reel_uuid}/thumb.jpg" if has_thumbnail else ''
+
+        reel = Reel.objects.create(
+            store=store,
+            video_key=video_key,
+            thumbnail_key=thumbnail_key,
+            status='pending_upload',
+            duration_seconds=0,
+        )
+
+        video_upload_url = aws_utils.build_presigned_put_url(video_key, content_type)
+        thumbnail_upload_url = (
+            aws_utils.build_presigned_put_url(thumbnail_key, 'image/jpeg') if has_thumbnail else None
+        )
+
+        return Response({
+            'success': True,
+            'data': {
+                'reel_id': reel.id,
+                'video_upload_url': video_upload_url,
+                'video_key': video_key,
+                'thumbnail_upload_url': thumbnail_upload_url,
+                'thumbnail_key': thumbnail_key or None,
+                'expires_in': getattr(settings, 'REEL_PRESIGNED_URL_TTL_SECONDS', 900),
+            }
+        }, status=status.HTTP_201_CREATED)
+
+    @swagger_auto_schema(
+        operation_description="Verify the upload landed in S3, promote it from incoming/ to reels/, and publish the reel",
+        request_body=FinalizeReelSerializer,
+        responses={200: "Reel published", 400: "Upload missing/invalid", 403: "Not this reel's store"}
+    )
+    @action(detail=True, methods=['post'])
+    def finalize(self, request, pk=None):
+        """head_object-verify the incoming upload, copy_object it from
+        incoming/ to reels/, delete the incoming copy, and flip the reel to
+        published — the only path that takes a Reel out of pending_upload."""
+        reel = self.get_object()
+
+        if reel.status != 'pending_upload':
+            return Response({
+                'success': False,
+                'message': f'Cannot finalize. Current status: {reel.status}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        video_head = aws_utils.head_object(reel.video_key)
+        if not video_head or not video_head['size']:
+            return Response({
+                'success': False,
+                'message': 'Video upload not found — PUT the video to video_upload_url before finalizing'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if reel.thumbnail_key:
+            thumbnail_head = aws_utils.head_object(reel.thumbnail_key)
+            if not thumbnail_head or not thumbnail_head['size']:
+                return Response({
+                    'success': False,
+                    'message': 'Thumbnail upload not found — PUT the thumbnail to thumbnail_upload_url before finalizing'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = FinalizeReelSerializer(data=request.data, context={'request': request})
+        if not serializer.is_valid():
+            return Response({
+                'success': False,
+                'message': 'Validation failed',
+                'errors': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        item_id = serializer.validated_data.get('item_id')
+        item = Item.objects.get(id=item_id) if item_id else None
+
+        # Reuse the uuid from the incoming/ key so both prefixes share it.
+        reel_uuid = reel.video_key.split('/')[-2]
+        new_video_key = f"reels/{reel.store_id}/{reel_uuid}/video.mp4"
+        new_thumbnail_key = f"reels/{reel.store_id}/{reel_uuid}/thumb.jpg" if reel.thumbnail_key else ''
+        old_video_key, old_thumbnail_key = reel.video_key, reel.thumbnail_key
+
+        with transaction.atomic():
+            aws_utils.copy_object(old_video_key, new_video_key)
+            if old_thumbnail_key:
+                aws_utils.copy_object(old_thumbnail_key, new_thumbnail_key)
+
+            reel.caption = serializer.validated_data.get('caption', '')
+            reel.item = item
+            reel.duration_seconds = serializer.validated_data['duration_seconds']
+            reel.file_size_bytes = video_head['size']
+            reel.video_key = new_video_key
+            reel.thumbnail_key = new_thumbnail_key
+            reel.status = 'published'
+            reel.published_at = timezone.now()
+            reel.save(update_fields=[
+                'caption', 'item', 'duration_seconds', 'file_size_bytes',
+                'video_key', 'thumbnail_key', 'status', 'published_at',
+            ])
+
+            aws_utils.delete_object(old_video_key)
+            if old_thumbnail_key:
+                aws_utils.delete_object(old_thumbnail_key)
+
+        from .tasks import notify_store_followers_reel
+        notify_store_followers_reel.delay(reel.id)
+
+        return Response({
+            'success': True,
+            'message': 'Reel published',
+            'data': ReelDetailSerializer(reel, context={'request': request}).data
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'])
+    def my_reels(self, request):
+        """Current store owner's own reels across all statuses (owner
+        dashboard). Serialized with ReelDetailSerializer, not the lighter
+        feed card, because this is the screen the owner edits from and the
+        edit form needs the current caption.
+
+        'deleted' is excluded: those rows only exist to keep a reported
+        reel's moderation trail alive (see destroy) — to the owner the reel
+        is gone, and showing it back would read as a failed delete.
+        """
+        store = getattr(request.user, 'store', None)
+        queryset = (
+            Reel.objects.filter(store=store).exclude(status='deleted')
+            .select_related('store', 'item')
+            if store else Reel.objects.none()
+        )
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = ReelDetailSerializer(page, many=True, context={'request': request})
+            return self.get_paginated_response(serializer.data)
+        serializer = ReelDetailSerializer(queryset, many=True, context={'request': request})
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def like(self, request, pk=None):
+        """Like this reel"""
+        reel = self.get_object()
+        _, created = ReelLike.objects.get_or_create(reel=reel, user=request.user)
+        if created:
+            Reel.objects.filter(pk=reel.pk).update(likes_count=F('likes_count') + 1)
+            reel.refresh_from_db(fields=['likes_count'])
+
+        return Response({
+            'success': True,
+            'is_liked': True,
+            'likes_count': reel.likes_count,
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def unlike(self, request, pk=None):
+        """Unlike this reel"""
+        reel = self.get_object()
+        deleted, _ = ReelLike.objects.filter(reel=reel, user=request.user).delete()
+        if deleted:
+            Reel.objects.filter(pk=reel.pk, likes_count__gt=0).update(likes_count=F('likes_count') - 1)
+            reel.refresh_from_db(fields=['likes_count'])
+
+        return Response({
+            'success': True,
+            'is_liked': False,
+            'likes_count': reel.likes_count,
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get', 'post'], url_path='comments')
+    def comments(self, request, pk=None):
+        """List recent comments (GET, public) or post a new one (POST, authenticated)"""
+        reel = self.get_object()
+
+        if request.method == 'GET':
+            limit = min(int(request.query_params.get('limit', 50)), 200)
+            recent = list(reel.comments.select_related('user').order_by('-created_at')[:limit])
+            recent.reverse()  # oldest first, chat-feed order
+            return Response({
+                'success': True,
+                'data': ReelCommentSerializer(recent, many=True).data
+            })
+
+        serializer = ReelCommentCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                'success': False,
+                'message': 'Validation failed',
+                'errors': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        comment = ReelComment.objects.create(
+            reel=reel, user=request.user, content=serializer.validated_data['content']
+        )
+        Reel.objects.filter(pk=reel.pk).update(comments_count=F('comments_count') + 1)
+
+        return Response({
+            'success': True,
+            'data': ReelCommentSerializer(comment).data
+        }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['delete'], url_path='comments/(?P<comment_id>[^/.]+)')
+    def comment_detail(self, request, pk=None, comment_id=None):
+        """Delete a comment — its own author or the reel's store owner can moderate it"""
+        reel = self.get_object()
+        try:
+            comment = reel.comments.get(id=comment_id)
+        except ReelComment.DoesNotExist:
+            return Response({'success': False, 'message': 'Comment not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        is_author = comment.user_id == request.user.id
+        is_store_owner = reel.store.user_id == request.user.id
+        if not (is_author or is_store_owner):
+            return Response({
+                'success': False,
+                'message': 'You cannot delete this comment'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        comment.delete()
+        Reel.objects.filter(pk=reel.pk, comments_count__gt=0).update(comments_count=F('comments_count') - 1)
+
+        return Response({'success': True, 'message': 'Comment deleted'}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def view(self, request, pk=None):
+        """Record a view — bumps the counter for anonymous and signed-in
+        viewers alike; signed-in users additionally get a ReelView upserted so
+        repeat watches can be told apart from first watches.
+
+        The reel's own store owner is the one exception: they aren't audience.
+        Without this, an owner scrolling past their own reel in the feed — or
+        replaying it from my_reels — inflates the very number they use to
+        judge how it performed, and can inflate it at will. `counted` says
+        which happened, so a client can tell a skipped view from a failed one.
+        """
+        reel = self.get_object()
+
+        is_owner = request.user.is_authenticated and reel.store.user_id == request.user.id
+        if is_owner:
+            return Response({
+                'success': True,
+                'view_count': reel.view_count,
+                'counted': False,
+            }, status=status.HTTP_200_OK)
+
+        Reel.objects.filter(pk=reel.pk).update(view_count=F('view_count') + 1)
+        reel.refresh_from_db(fields=['view_count'])
+
+        if request.user.is_authenticated:
+            view_record, created = ReelView.objects.get_or_create(reel=reel, user=request.user)
+            if not created:
+                view_record.view_count = F('view_count') + 1
+                view_record.save(update_fields=['view_count', 'last_viewed_at'])
+
+        return Response({
+            'success': True,
+            'view_count': reel.view_count,
+            'counted': True,
+        }, status=status.HTTP_200_OK)
+
+    def destroy(self, request, *args, **kwargs):
+        """Permanent delete at the owner's request — the row AND the S3
+        objects. Deliberately not the archive_reel() soft-delete the rest of
+        this codebase defaults to: an owner deleting their own reel means the
+        video should stop existing on Amazon, not just drop out of the feed.
+        (archive_reel stays the path for *moderation* — see resolve_report.)
+
+        The one exception is a reel someone has reported. Report.reported_reel
+        is CASCADE, so dropping the row would take the moderation trail with
+        it and hand any store an easy way to erase evidence against itself.
+        Those keep a tombstone row instead — status='deleted', S3 keys blanked
+        and the objects purged all the same — so nothing is playable anywhere
+        while the report stays auditable. The owner sees no difference: it's
+        gone from my_reels either way.
+
+        S3 is deleted after the DB write, not before, because S3 isn't
+        transactional. Of the two ways they can disagree, an orphaned S3
+        object is recoverable garbage while a live row pointing at deleted
+        media is a permanently broken reel.
+        """
+        reel = self.get_object()
+        reel_id = reel.id
+        video_key, thumbnail_key = reel.video_key, reel.thumbnail_key
+
+        if reel.reports.exists():
+            reel.status = 'deleted'
+            reel.video_key = ''
+            reel.thumbnail_key = ''
+            reel.save(update_fields=['status', 'video_key', 'thumbnail_key'])
+        else:
+            reel.delete()
+
+        for key in (video_key, thumbnail_key):
+            if not key:
+                continue
+            try:
+                aws_utils.delete_object(key)
+            except Exception:
+                # The row is already gone; a failed S3 delete leaves an
+                # unreachable object, not a broken reel. Log it for the
+                # bucket audit rather than failing the owner's request.
+                logger.exception('Failed to delete S3 object %s for reel %s', key, reel_id)
+
+        return Response({
+            'success': True,
+            'message': 'تم حذف الريل نهائياً',
+            'data': None,
+        })
+
+
 def _mark_reservation_received(reservation):
     """
     Shared by ReservationViewSet.approve_and_release_payment and
@@ -4297,7 +4674,10 @@ class ReportViewSet(viewsets.ModelViewSet):
 
         target_type = serializer.validated_data['target_type']
         target = serializer.validated_data['target']
-        target_field = {'item': 'reported_item', 'store': 'reported_store', 'user': 'reported_user'}[target_type]
+        target_field = {
+            'item': 'reported_item', 'store': 'reported_store',
+            'user': 'reported_user', 'reel': 'reported_reel',
+        }[target_type]
 
         # Don't let the same reporter pile up duplicate reports on the same
         # target while an earlier one is still open.

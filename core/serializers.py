@@ -14,6 +14,7 @@ from .models import (
     ProductReview, StoreReview, StoreFollow, StoreCoupon, CouponCollection,
     LiveSession, LiveSessionItem, LiveSessionComment, LiveSessionViewer,
     LiveSessionModerator, LiveSessionBan,
+    Reel, ReelLike, ReelComment, ReelView,
 )
 from .services.support import SUPPORT_USERNAME
 
@@ -732,18 +733,38 @@ class ReservationSerializer(serializers.ModelSerializer):
 
     def get_can_approve(self, obj):
         """Only the buyer may confirm receipt and release payment, and only
-        while there's still something to release."""
+        while there's still something to release.
+
+        Requires the buyer to have actually confirmed physical receipt of
+        the item first — the outbound DeliveryOrder must have reached
+        'confirmed' via DeliveryOrderViewSet.confirm_receipt — unless there's
+        no active delivery company at all (the old direct hand-off flow,
+        where paying is the only fulfilment step; same distinction as
+        get_can_request_payment_release below). Without this, a reservation
+        the seller hasn't even shipped yet (no outbound DeliveryOrder
+        exists) would fall through to the plain 'completed' check and offer
+        approval the moment payment clears, before the buyer has anything
+        in hand.
+        """
+        from .delivery_utils import get_active_delivery_company
+
         request = self.context.get('request')
         user = getattr(request, 'user', None) if request else None
         if user is None or obj.buyer_id != user.id:
             return False
         outbound = obj.delivery_orders.filter(direction='outbound').order_by('-assigned_at').first()
-        if outbound and outbound.status != 'confirmed':
-            # Once a delivery company is handling this sale, the buyer must
-            # first confirm physical receipt via the delivery order itself
-            # (DeliveryOrderViewSet.confirm_receipt) before payment release
-            # becomes an available choice — releasing money before the buyer
-            # has even confirmed they hold the item defeats the escrow.
+        if outbound:
+            if outbound.status != 'confirmed':
+                # Once a delivery company is handling this sale, the buyer must
+                # first confirm physical receipt via the delivery order itself
+                # (DeliveryOrderViewSet.confirm_receipt) before payment release
+                # becomes an available choice — releasing money before the buyer
+                # has even confirmed they hold the item defeats the escrow.
+                return False
+        elif get_active_delivery_company() is not None:
+            # A delivery company is available and will eventually carry this
+            # sale — the seller just hasn't sent it off yet (send_to_delivery
+            # not called), so the buyer has nothing in hand to confirm.
             return False
         return (
             obj.status == 'completed'
@@ -820,12 +841,18 @@ class ReservationSerializer(serializers.ModelSerializer):
                 'approved_at': obj.buyer_approved_at,
                 'message': 'Payment approved, pending release'
             }
-        elif obj.status == 'completed' and obj.completed_at:
-            days_remaining = obj.warranty_days - (timezone.now() - obj.completed_at).days
+        elif obj.status == 'completed' and obj.received_at:
+            days_remaining = obj.warranty_days - (timezone.now() - obj.received_at).days
             return {
                 'status': 'held',
                 'days_remaining': max(0, days_remaining),
                 'message': f'Payment held. Auto-release in {max(0, days_remaining)} days or approve to release immediately'
+            }
+        elif obj.status == 'completed' and obj.completed_at:
+            return {
+                'status': 'held',
+                'days_remaining': None,
+                'message': 'Payment held. Auto-release countdown starts once the item is delivered, or approve to release immediately'
             }
         elif obj.status == 'refunded':
             return {
@@ -1964,22 +1991,31 @@ class ReportSerializer(serializers.ModelSerializer):
     reported_item = ItemSerializer(read_only=True)
     reported_store = UserStoreSerializer(read_only=True)
     reported_user = UserSerializer(read_only=True)
+    # SerializerMethodField (not a nested ReelCardSerializer field) so this
+    # class doesn't have to be defined after ReelCardSerializer in the file —
+    # the name is only resolved when the method runs, not at class-body time.
+    reported_reel = serializers.SerializerMethodField()
     reviewed_by = UserSerializer(read_only=True)
     target_type = serializers.CharField(read_only=True)
 
     class Meta:
         model = Report
         fields = [
-            'id', 'reporter', 'reported_item', 'reported_store', 'reported_user',
+            'id', 'reporter', 'reported_item', 'reported_store', 'reported_user', 'reported_reel',
             'target_type', 'reason', 'description', 'status', 'action_taken',
             'admin_notes', 'reviewed_by', 'created_at', 'resolved_at',
         ]
         read_only_fields = fields
 
+    def get_reported_reel(self, obj):
+        if not obj.reported_reel_id:
+            return None
+        return ReelCardSerializer(obj.reported_reel, context=self.context).data
+
 
 class CreateReportSerializer(serializers.Serializer):
-    """Serializer for filing a report against an item, a store, or a user"""
-    target_type = serializers.ChoiceField(choices=['item', 'store', 'user'])
+    """Serializer for filing a report against an item, a store, a user, or a reel"""
+    target_type = serializers.ChoiceField(choices=['item', 'store', 'user', 'reel'])
     target_id = serializers.IntegerField()
     reason = serializers.ChoiceField(choices=Report.REASON_CHOICES)
     description = serializers.CharField(required=False, allow_blank=True)
@@ -1987,14 +2023,21 @@ class CreateReportSerializer(serializers.Serializer):
     def validate(self, data):
         request = self.context['request']
         target_type = data['target_type']
-        model = {'item': Item, 'store': UserStore, 'user': User}[target_type]
+        model = {'item': Item, 'store': UserStore, 'user': User, 'reel': Reel}[target_type]
 
         try:
             target = model.objects.get(id=data['target_id'])
         except model.DoesNotExist:
             raise serializers.ValidationError({'target_id': f'{target_type} not found'})
 
-        target_owner = target if target_type == 'user' else target.owner if target_type == 'item' else target.user
+        if target_type == 'user':
+            target_owner = target
+        elif target_type == 'item':
+            target_owner = target.owner
+        elif target_type == 'reel':
+            target_owner = target.store.user
+        else:
+            target_owner = target.user
         if target_owner == request.user:
             raise serializers.ValidationError('لا يمكنك الإبلاغ عن نفسك أو عن منتجك/متجرك الخاص')
 
@@ -2084,6 +2127,130 @@ class CouponCollectionSerializer(serializers.ModelSerializer):
 
     def get_is_expired(self, obj):
         return not obj.coupon.is_valid
+
+
+class ReelCardSerializer(serializers.ModelSerializer):
+    """Lightweight card for the reels feed — mirrors LiveSessionCardSerializer's shape."""
+    store = PublicUserStoreSerializer(read_only=True)
+    item = ItemListSerializer(read_only=True)
+    video_url = serializers.SerializerMethodField()
+    thumbnail_url = serializers.SerializerMethodField()
+    is_liked_by_me = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Reel
+        fields = [
+            'id', 'store', 'item', 'video_url', 'thumbnail_url',
+            'duration_seconds', 'view_count', 'likes_count', 'comments_count',
+            'is_liked_by_me', 'status', 'created_at', 'published_at',
+        ]
+        # Everything here is set by request_upload_url/finalize or by the
+        # like/comment/view actions — never directly writable through
+        # ReelViewSet.update()/partial_update(). ReelDetailSerializer below
+        # adds the one field (caption) a store owner can actually PATCH.
+        read_only_fields = [
+            'duration_seconds', 'view_count', 'likes_count', 'comments_count',
+            'status', 'created_at', 'published_at',
+        ]
+
+    def get_video_url(self, obj):
+        return obj.video_url
+
+    def get_thumbnail_url(self, obj):
+        return obj.thumbnail_url
+
+    def get_is_liked_by_me(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        return obj.likes.filter(user=request.user).exists()
+
+
+class ReelDetailSerializer(ReelCardSerializer):
+    """Full reel detail — adds the caption, omitted from the lightweight feed
+    card, plus the write-only `item_id` a store owner PATCHes to change or
+    clear the tagged product.
+
+    Read and write use two different fields on purpose, the same split
+    FinalizeReelSerializer uses: `item` stays the nested read-only product
+    card the app renders, while `item_id` is what's accepted on write.
+    Everything else about a published reel is immutable — the video's S3
+    object is written once at finalize, so "editing the video" means deleting
+    the reel and posting a new one.
+    """
+    item_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
+
+    class Meta(ReelCardSerializer.Meta):
+        fields = ReelCardSerializer.Meta.fields + ['caption', 'item_id']
+
+    def validate_item_id(self, value):
+        # Same ownership rule as FinalizeReelSerializer.validate_item_id: a
+        # reel may only tag a product its own owner listed.
+        if value is None:
+            return value
+        request = self.context.get('request')
+        try:
+            item = Item.objects.get(id=value)
+        except Item.DoesNotExist:
+            raise serializers.ValidationError('Item not found')
+        if not request or item.owner_id != request.user.id:
+            raise serializers.ValidationError('You can only tag your own items')
+        return value
+
+
+class RequestReelUploadSerializer(serializers.Serializer):
+    """Validates the request for presigned S3 upload URLs. No file field
+    here — the actual bytes go straight from the app to S3 and never pass
+    through Django (see ReelViewSet.request_upload_url)."""
+    content_type = serializers.CharField()
+    has_thumbnail = serializers.BooleanField(default=False)
+
+    def validate_content_type(self, value):
+        if not value.startswith('video/'):
+            raise serializers.ValidationError('content_type must be a video/* MIME type')
+        return value
+
+
+class FinalizeReelSerializer(serializers.Serializer):
+    """Validates the payload that turns a pending_upload Reel into a
+    published one, once the bytes have actually landed in S3 (verified by
+    ReelViewSet.finalize via aws_utils.head_object, not by this serializer)."""
+    caption = serializers.CharField(required=False, allow_blank=True, default='')
+    item_id = serializers.IntegerField(required=False, allow_null=True)
+    duration_seconds = serializers.IntegerField(min_value=1, max_value=180)
+
+    def validate_item_id(self, value):
+        if value is None:
+            return value
+        request = self.context.get('request')
+        try:
+            item = Item.objects.get(id=value)
+        except Item.DoesNotExist:
+            raise serializers.ValidationError('Item not found')
+        if not request or item.owner_id != request.user.id:
+            raise serializers.ValidationError('You can only tag your own items')
+        return value
+
+
+class ReelCommentSerializer(serializers.ModelSerializer):
+    """Public reel comment. Deliberately exposes only id/username — never
+    the full UserSerializer (email/phone), same convention as
+    LiveSessionCommentSerializer since comments are visible to any viewer."""
+    username = serializers.CharField(source='user.username', read_only=True)
+    user_id = serializers.IntegerField(source='user.id', read_only=True)
+
+    class Meta:
+        model = ReelComment
+        fields = ['id', 'user_id', 'username', 'content', 'created_at']
+
+
+class ReelCommentCreateSerializer(serializers.Serializer):
+    content = serializers.CharField(max_length=300, trim_whitespace=True)
+
+    def validate_content(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Comment cannot be empty")
+        return value.strip()
 
 
 class LiveSessionItemSerializer(serializers.ModelSerializer):

@@ -8,7 +8,7 @@ from django.db.models import Q
 from .models import (
     Item, FixedPriceListing, AuctionListing, Reservation,
     ItemTransfer, Chat, Rating, Dispute, Report, Transaction, Category, UserStore, Location,
-    ProductReview, StoreReview, LiveSession,
+    ProductReview, StoreReview, LiveSession, Reel,
 )
 
 
@@ -150,6 +150,16 @@ class LiveSessionFilter(filters.FilterSet):
     class Meta:
         model = LiveSession
         fields = ['status', 'store']
+
+
+class ReelFilter(filters.FilterSet):
+    """Filter for Reel discovery feed"""
+    store = filters.NumberFilter(field_name='store__id')
+    item = filters.NumberFilter(field_name='item__id')
+
+    class Meta:
+        model = Reel
+        fields = ['store', 'item']
 
 
 class ItemTransferFilter(filters.FilterSet):

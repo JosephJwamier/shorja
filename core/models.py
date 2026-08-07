@@ -756,8 +756,12 @@ class Reservation(models.Model):
                    deposit-only orders) AND the buyer confirmed receipt
                    (approve_and_release_payment) or the item's warranty
                    period passed with no open dispute
-                   (tasks.release_payments_after_week). Terminal
-                   success state.
+                   (tasks.release_payments_after_week). The warranty clock
+                   is anchored to when the buyer actually received the item
+                   (DeliveryOrder.delivered_at — see `received_at` below),
+                   never to `completed_at`/payment time, so a reservation
+                   the seller hasn't shipped yet can never age into
+                   'confirmed' on its own. Terminal success state.
       expired   -> 'pending' reservation whose hold ran out unpaid.
       cancelled -> buyer or seller cancelled (seller may cancel even a paid
                    'completed'/'confirmed' reservation; the buyer is refunded).
@@ -969,18 +973,44 @@ class Reservation(models.Model):
         within_two_hours = time_since_reservation.total_seconds() <= 7200  # 2 hours
         return within_two_hours or self.seller_cancellation_approved
 
+    @property
+    def received_at(self):
+        """
+        When the buyer actually got the item in hand, if that has happened
+        yet — the anchor for the warranty clock in can_release_payment().
+        Deliberately NOT completed_at/payment time: a reservation can sit
+        'completed' for a long time before the seller ships it (send_to_delivery
+        is a separate, later action), and payment landing in the seller's
+        account has to wait for delivery either way.
+
+        Sourced from the outbound DeliveryOrder reaching the buyer's door
+        (status 'delivered' or the buyer-confirmed 'confirmed'), not from
+        'assigned'/'picked_up' — those mean the company has the item, not
+        the buyer. None if no outbound leg has been delivered yet (including
+        when the seller hasn't sent it to a delivery company at all), in
+        which case can_release_payment() can only succeed via buyer_approved.
+        """
+        outbound = self.delivery_orders.filter(
+            direction='outbound',
+            status__in=['delivered', 'confirmed'],
+            delivered_at__isnull=False,
+        ).order_by('-delivered_at').first()
+        return outbound.delivered_at if outbound else None
+
     def can_release_payment(self):
         """Check if payment can be released to seller"""
         if self.payment_released_to_seller or self.status not in ('completed', 'confirmed'):
             return False
 
         # Payment released if buyer approved OR the item's warranty period
-        # passed without dispute
+        # passed without dispute, counted from when the buyer received the
+        # item (see `received_at`) — not from payment time.
         if self.buyer_approved:
             return True
 
-        if self.completed_at:
-            warranty_passed = timezone.now() - self.completed_at >= timedelta(days=self.warranty_days)
+        received_at = self.received_at
+        if received_at:
+            warranty_passed = timezone.now() - received_at >= timedelta(days=self.warranty_days)
             has_open_dispute = Dispute.objects.filter(
                 reservation=self,
                 status__in=['open', 'investigating']
@@ -1077,6 +1107,7 @@ class Report(models.Model):
         ('item_archived', 'أرشفة المنتج'),
         ('store_suspended', 'إيقاف المتجر'),
         ('user_suspended', 'تعليق الحساب'),
+        ('reel_archived', 'أرشفة الريل'),
     ]
 
     reporter = models.ForeignKey(User, on_delete=models.CASCADE, related_name='filed_reports')
@@ -1084,6 +1115,10 @@ class Report(models.Model):
     reported_item = models.ForeignKey(Item, on_delete=models.CASCADE, null=True, blank=True, related_name='reports')
     reported_store = models.ForeignKey(UserStore, on_delete=models.CASCADE, null=True, blank=True, related_name='reports')
     reported_user = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True, related_name='reports_against')
+    # Forward reference — Reel is defined later in this file (after
+    # LiveSessionBan), same as how Report itself precedes several other
+    # models it doesn't need to reference by string.
+    reported_reel = models.ForeignKey('Reel', on_delete=models.CASCADE, null=True, blank=True, related_name='reports')
 
     reason = models.CharField(max_length=20, choices=REASON_CHOICES)
     description = models.TextField(blank=True, help_text='تفاصيل إضافية اختيارية من المُبلِغ')
@@ -1106,16 +1141,17 @@ class Report(models.Model):
         constraints = [
             models.CheckConstraint(
                 check=(
-                    models.Q(reported_item__isnull=False, reported_store__isnull=True, reported_user__isnull=True) |
-                    models.Q(reported_item__isnull=True, reported_store__isnull=False, reported_user__isnull=True) |
-                    models.Q(reported_item__isnull=True, reported_store__isnull=True, reported_user__isnull=False)
+                    models.Q(reported_item__isnull=False, reported_store__isnull=True, reported_user__isnull=True, reported_reel__isnull=True) |
+                    models.Q(reported_item__isnull=True, reported_store__isnull=False, reported_user__isnull=True, reported_reel__isnull=True) |
+                    models.Q(reported_item__isnull=True, reported_store__isnull=True, reported_user__isnull=False, reported_reel__isnull=True) |
+                    models.Q(reported_item__isnull=True, reported_store__isnull=True, reported_user__isnull=True, reported_reel__isnull=False)
                 ),
                 name='report_exactly_one_target',
             )
         ]
 
     def __str__(self):
-        target = self.reported_item or self.reported_store or self.reported_user
+        target = self.reported_item or self.reported_store or self.reported_reel or self.reported_user
         return f"Report #{self.id} - {target} ({self.get_reason_display()})"
 
     @property
@@ -1124,11 +1160,13 @@ class Report(models.Model):
             return 'item'
         if self.reported_store_id:
             return 'store'
+        if self.reported_reel_id:
+            return 'reel'
         return 'user'
 
     @property
     def target(self):
-        return self.reported_item or self.reported_store or self.reported_user
+        return self.reported_item or self.reported_store or self.reported_reel or self.reported_user
 
 
 class DeliveryCompany(models.Model):
@@ -1895,6 +1933,144 @@ class LiveSessionBan(models.Model):
 
     def __str__(self):
         return f"{self.user.username} banned from {self.session.title}"
+
+
+class Reel(models.Model):
+    """Short vertical video posted by a store (ريلز) — TikTok/Instagram-Reels
+    style shoppable video. Video/thumbnail bytes never touch Django: they're
+    uploaded directly to S3 via presigned URLs (core/aws_utils.py,
+    ReelViewSet.request_upload_url/finalize) and served for playback through
+    a BunnyCDN Pull Zone fronting that bucket. video_key/thumbnail_key store
+    only the S3 object key (never a full URL) so switching the CDN domain
+    later needs no migration — see video_url/thumbnail_url below."""
+    STATUS_CHOICES = [
+        ('pending_upload', 'Pending Upload'),
+        ('published', 'Published'),
+        ('failed', 'Failed'),
+        ('archived', 'Archived'),
+        # Owner asked for a permanent delete but the reel had been reported,
+        # so the row survives as a tombstone (media purged from S3, keys
+        # blanked) to keep Report.reported_reel — a CASCADE FK — intact.
+        # See ReelViewSet.destroy(). Hidden from both the feed and my_reels.
+        ('deleted', 'Deleted'),
+    ]
+
+    store = models.ForeignKey(UserStore, on_delete=models.CASCADE, related_name='reels')
+    # SET_NULL, not CASCADE: purge_archived_items (core/tasks.py) hard-deletes
+    # Items that have sat archived for a year — a Reel tagging one of those
+    # items must survive that purge instead of being silently wiped out with
+    # it, so it just loses its product tag (item becomes None) and stays up.
+    item = models.ForeignKey(
+        Item, on_delete=models.SET_NULL, null=True, blank=True, related_name='reels'
+    )
+    caption = models.TextField(blank=True)
+
+    # S3 object keys only — never a full URL. See video_url/thumbnail_url.
+    video_key = models.CharField(max_length=500)
+    thumbnail_key = models.CharField(max_length=500, blank=True)
+
+    duration_seconds = models.PositiveIntegerField()
+    # Trusted value from S3's HEAD response at finalize time, not whatever
+    # the client claims.
+    file_size_bytes = models.PositiveBigIntegerField(null=True, blank=True)
+
+    # pending_upload -> published/failed, or published -> archived (soft
+    # delete — same convention as Item since commit df880d2).
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending_upload')
+
+    view_count = models.PositiveIntegerField(default=0)
+    likes_count = models.PositiveIntegerField(default=0)
+    comments_count = models.PositiveIntegerField(default=0)
+
+    # Staff-only, same convention as Item.admin_notes/User.admin_notes.
+    admin_notes = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    published_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'ريل'
+        verbose_name_plural = 'الريلز'
+        indexes = [
+            models.Index(fields=['status', '-created_at']),
+            models.Index(fields=['store', 'status']),
+        ]
+
+    def __str__(self):
+        return f"Reel #{self.id} - {self.store.name} [{self.status}]"
+
+    @property
+    def video_url(self):
+        # Imported locally (not at module scope) to keep this module free of
+        # any import-time dependency on core.aws_utils.
+        from . import aws_utils
+        return aws_utils.object_url(self.video_key)
+
+    @property
+    def thumbnail_url(self):
+        from . import aws_utils
+        return aws_utils.object_url(self.thumbnail_key)
+
+
+class ReelLike(models.Model):
+    """A viewer liking a reel — mirrors LiveSessionLike's pattern."""
+    reel = models.ForeignKey(Reel, on_delete=models.CASCADE, related_name='likes')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='reel_likes')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ['reel', 'user']
+        ordering = ['-created_at']
+        verbose_name = 'إعجاب ريل'
+        verbose_name_plural = 'إعجابات الريلز'
+
+    def __str__(self):
+        return f"{self.user.username} likes reel #{self.reel_id}"
+
+
+class ReelComment(models.Model):
+    """A viewer's comment on a reel — mirrors LiveSessionComment's pattern."""
+    reel = models.ForeignKey(Reel, on_delete=models.CASCADE, related_name='comments')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='reel_comments')
+    content = models.CharField(max_length=300)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'تعليق ريل'
+        verbose_name_plural = 'تعليقات الريلز'
+
+    def __str__(self):
+        return f"{self.user.username}: {self.content[:40]}"
+
+
+class ReelView(models.Model):
+    """Tracks which signed-in users have watched a reel (upserted by
+    ReelViewSet.view). Anonymous views still bump Reel.view_count but have
+    no identity to record here — user is nullable, and unique_together with
+    a nullable FK is safe since both Django and MySQL treat each NULL as
+    distinct, so it never collapses multiple anonymous rows together (in
+    practice no row is ever created for an anonymous view at all — see
+    ReelViewSet.view)."""
+    reel = models.ForeignKey(Reel, on_delete=models.CASCADE, related_name='view_records')
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, null=True, blank=True, related_name='reel_views'
+    )
+    view_count = models.PositiveIntegerField(default=1)
+    first_viewed_at = models.DateTimeField(auto_now_add=True)
+    last_viewed_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ['reel', 'user']
+        ordering = ['-last_viewed_at']
+        verbose_name = 'مشاهدة ريل'
+        verbose_name_plural = 'مشاهدات الريلز'
+
+    def __str__(self):
+        who = self.user.username if self.user else 'anonymous'
+        return f"{who} watched reel #{self.reel_id}"
 
 
 from django.db import models, transaction as db_transaction

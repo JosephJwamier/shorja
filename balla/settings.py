@@ -272,6 +272,12 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'core.tasks.auto_end_stale_live_sessions',
         'schedule': crontab(minute='*/15'),  # Every 15 minutes
     },
+
+    # Reels
+    'cleanup-orphaned-reel-uploads': {
+        'task': 'core.tasks.cleanup_orphaned_reel_uploads',
+        'schedule': crontab(minute='*/30'),  # Every 30 minutes
+    },
 }
 
 # Channels (WebSocket)
@@ -473,6 +479,14 @@ UNFOLD = {
                 ],
             },
             {
+                'title': 'الريلز',
+                'items': [
+                    {'title': 'الريلز', 'icon': 'movie', 'link': reverse_lazy('admin:core_reel_changelist')},
+                    {'title': 'الإعجابات', 'icon': 'thumb_up', 'link': reverse_lazy('admin:core_reellike_changelist')},
+                    {'title': 'التعليقات', 'icon': 'chat_bubble', 'link': reverse_lazy('admin:core_reelcomment_changelist')},
+                ],
+            },
+            {
                 'title': 'التوصيل',
                 'items': [
                     {'title': 'شركات التوصيل', 'icon': 'local_shipping', 'link': reverse_lazy('admin:core_deliverycompany_changelist')},
@@ -533,6 +547,20 @@ AGORA_TOKEN_TTL_SECONDS = int(os.environ.get('AGORA_TOKEN_TTL_SECONDS', '3600'))
 
 # Live Shopping
 LIVE_SESSION_MAX_DURATION_HOURS = int(os.environ.get('LIVE_SESSION_MAX_DURATION_HOURS', '6'))
+
+# AWS S3 + BunnyCDN (Reels — short vertical video)
+# Video/thumbnail bytes never pass through Django: the app PUTs directly to
+# S3 via presigned URLs (core/aws_utils.py), and playback is served through
+# a BunnyCDN Pull Zone whose origin is the S3 bucket. Django only makes
+# control-plane boto3 calls (presign/head_object/copy_object/delete_object).
+AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', '')
+AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY', '')
+AWS_S3_REGION_NAME = os.environ.get('AWS_S3_REGION_NAME', '')
+AWS_STORAGE_BUCKET_NAME = os.environ.get('AWS_STORAGE_BUCKET_NAME', '')
+BUNNYCDN_PULL_ZONE_BASE_URL = os.environ.get('BUNNYCDN_PULL_ZONE_BASE_URL', '')
+REEL_PRESIGNED_URL_TTL_SECONDS = int(os.environ.get('REEL_PRESIGNED_URL_TTL_SECONDS', '900'))
+REEL_MAX_VIDEO_SIZE_BYTES = int(os.environ.get('REEL_MAX_VIDEO_SIZE_BYTES', str(200 * 1024 * 1024)))  # 200 MB
+REEL_PENDING_UPLOAD_CLEANUP_HOURS = int(os.environ.get('REEL_PENDING_UPLOAD_CLEANUP_HOURS', '2'))
 
 # Firebase Configuration
 # Download your service account key from:

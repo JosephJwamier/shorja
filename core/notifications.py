@@ -646,7 +646,7 @@ def notify_dispute_created(dispute):
         NotificationService.send_email(admin_email, admin_subject, admin_message)
 
 
-_REPORT_TARGET_LABELS_AR = {'item': 'منتج', 'store': 'متجر', 'user': 'مستخدم'}
+_REPORT_TARGET_LABELS_AR = {'item': 'منتج', 'store': 'متجر', 'user': 'مستخدم', 'reel': 'ريل'}
 
 
 def notify_report_submitted(report):
@@ -879,6 +879,27 @@ def notify_live_stream_started(session):
                 'type': 'live_stream_started',
                 'live_session_id': str(session.id),
                 'store_id': str(session.store_id),
+            }
+        )
+
+
+def notify_reel_posted(reel):
+    """Notify a store's followers that it just posted a new reel (push only,
+    same fan-out shape as notify_live_stream_started)."""
+    from .models import StoreFollow
+
+    store_name = bidi_isolate(reel.store.name)
+
+    follows = StoreFollow.objects.filter(store=reel.store).select_related('follower')
+    for follow in follows:
+        notify_push(
+            follow.follower,
+            f'{store_name} نشر ريلًا جديدًا!',
+            'شاهد أحدث فيديو من متجرك المفضل الآن.',
+            data={
+                'type': 'reel_posted',
+                'reel_id': str(reel.id),
+                'store_id': str(reel.store_id),
             }
         )
 

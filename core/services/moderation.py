@@ -60,6 +60,19 @@ def archive_item(item, *, reason, actor):
     return item
 
 
+def archive_reel(reel, *, reason, actor):
+    """Pulls a reel out of the public feed (status='archived') — same shape
+    as archive_item(), and the same soft-delete path ReelViewSet.destroy()
+    uses when a store owner removes their own reel."""
+    if not reason or not reason.strip():
+        raise ValueError('Archiving a reel requires a reason')
+
+    reel.status = 'archived'
+    reel.admin_notes = _append_note(reel.admin_notes, actor, 'أرشفة الريل', reason)
+    reel.save(update_fields=['status', 'admin_notes'])
+    return reel
+
+
 def stop_live_session(session):
     """Emergency-stops an active broadcast using the same end_live_session()
     the owner's own "end stream" button and the stale-session cleanup task
@@ -91,6 +104,8 @@ def resolve_report(report, *, new_status, action_taken='none', admin_notes='', a
         raise ReportResolutionError('This report is not against a store')
     if action_taken == 'user_suspended' and not report.reported_user_id:
         raise ReportResolutionError('This report is not against a user')
+    if action_taken == 'reel_archived' and not report.reported_reel_id:
+        raise ReportResolutionError('This report is not against a reel')
 
     with transaction.atomic():
         if action_taken == 'item_archived':
@@ -103,6 +118,8 @@ def resolve_report(report, *, new_status, action_taken='none', admin_notes='', a
             # which also flips is_active with no reason trail.
             report.reported_store.is_active = False
             report.reported_store.save(update_fields=['is_active'])
+        elif action_taken == 'reel_archived':
+            archive_reel(report.reported_reel, reason=admin_notes or 'بلاغ من المستخدمين', actor=actor)
 
         report.status = new_status
         report.action_taken = action_taken

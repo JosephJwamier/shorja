@@ -7,6 +7,13 @@ onto Reservation.warranty_days at completion time so a later edit to the item
 doesn't retroactively change the terms of an in-flight order. Nothing
 previously pinned the old 7-day behavior in a test, so these both prove the
 new per-item logic and lock in regression coverage that never existed before.
+
+The warranty clock itself is anchored to Reservation.received_at (the
+outbound DeliveryOrder's delivered_at — when the buyer actually got the
+item), not to completed_at/payment time — see the "counts from delivery,
+not payment" tests below for the regression this guards against: a
+reservation the seller never shipped, or that's still in transit, must not
+age into 'confirmed' just because it was paid for a while ago.
 """
 from datetime import timedelta
 from decimal import Decimal
@@ -15,7 +22,7 @@ import pytest
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from core.models import Category, Dispute, Item, Reservation, User, get_or_create_wallet
+from core.models import Category, DeliveryOrder, Dispute, Item, Reservation, User, get_or_create_wallet
 from core.wallet_utils import complete_reservation
 from core import tasks as core_tasks
 
@@ -40,8 +47,27 @@ def make_item(owner, warranty_days=None, quantity=3):
     return Item.objects.create(**kwargs)
 
 
+def make_delivery_order(reservation, *, status='delivered', delivered_at=None):
+    return DeliveryOrder.objects.create(
+        reservation=reservation, direction='outbound', status=status,
+        from_name='seller', from_phone='0000', from_address='a',
+        to_name='buyer', to_phone='1111', to_address='b',
+        item_summary='item', delivered_at=delivered_at,
+    )
+
+
 def make_reservation(*, item, buyer, total_price=Decimal('100.00'), quantity=1,
-                      completed=True, warranty_days=None, days_ago=0, status='completed'):
+                      completed=True, warranty_days=None, days_ago=0, status='completed',
+                      delivered=True):
+    """
+    `days_ago` is how long ago the buyer received the item (i.e. how long
+    the warranty clock has been running) — it backdates both completed_at
+    (payment) and, when `delivered` is True (the default), an outbound
+    DeliveryOrder's delivered_at to that same moment, matching the common
+    case where cash-at-delivery and physical handoff happen together.
+    Pass `delivered=False` to model a paid-but-not-yet-shipped/delivered
+    order — completed_at is still backdated, but no delivery ever happened.
+    """
     kwargs = dict(
         item=item, buyer=buyer, quantity=quantity,
         deposit_amount=total_price, total_price=total_price,
@@ -52,7 +78,10 @@ def make_reservation(*, item, buyer, total_price=Decimal('100.00'), quantity=1,
         kwargs['completed_at'] = timezone.now() - timedelta(days=days_ago)
     if warranty_days is not None:
         kwargs['warranty_days'] = warranty_days
-    return Reservation.objects.create(**kwargs)
+    reservation = Reservation.objects.create(**kwargs)
+    if completed and delivered:
+        make_delivery_order(reservation, delivered_at=timezone.now() - timedelta(days=days_ago))
+    return reservation
 
 
 def test_item_default_warranty_days_is_seven():
@@ -91,6 +120,58 @@ def test_can_release_payment_blocked_by_open_dispute_regardless_of_warranty():
         title='t', description='d', status='open',
     )
     assert reservation.can_release_payment() is False
+
+
+def test_can_release_payment_false_when_never_delivered_even_if_paid_long_ago():
+    """A reservation the seller never shipped must not auto-confirm just
+    because it was paid for a while ago — this is the bug the received_at
+    anchor fixes (previously the clock ran from completed_at)."""
+    owner, buyer = make_user('owner_undelivered'), make_user('buyer_undelivered')
+    item = make_item(owner, warranty_days=1)
+    reservation = make_reservation(
+        item=item, buyer=buyer, warranty_days=1, days_ago=30, delivered=False,
+    )
+    assert reservation.received_at is None
+    assert reservation.can_release_payment() is False
+
+
+def test_can_release_payment_false_while_delivery_still_in_transit():
+    """assigned/picked_up means the company has the item, not the buyer —
+    the warranty clock must not start yet."""
+    owner, buyer = make_user('owner_transit'), make_user('buyer_transit')
+    item = make_item(owner, warranty_days=1)
+    reservation = make_reservation(
+        item=item, buyer=buyer, warranty_days=1, days_ago=30, delivered=False,
+    )
+    make_delivery_order(reservation, status='picked_up', delivered_at=None)
+    assert reservation.received_at is None
+    assert reservation.can_release_payment() is False
+
+
+def test_can_release_payment_counts_from_delivery_not_payment():
+    """Paid long ago but delivered just now, with a 1-day warranty: not
+    eligible yet, proving the clock is anchored to delivery, not payment."""
+    owner, buyer = make_user('owner_anchor'), make_user('buyer_anchor')
+    item = make_item(owner, warranty_days=1)
+    reservation = make_reservation(
+        item=item, buyer=buyer, warranty_days=1, days_ago=30, delivered=False,
+    )
+    make_delivery_order(reservation, status='delivered', delivered_at=timezone.now())
+    assert reservation.can_release_payment() is False
+
+
+def test_release_payments_after_week_skips_undelivered_reservation():
+    owner, buyer = make_user('owner_task_undelivered'), make_user('buyer_task_undelivered')
+    item = make_item(owner, warranty_days=1)
+    reservation = make_reservation(
+        item=item, buyer=buyer, warranty_days=1, days_ago=30, delivered=False,
+    )
+
+    core_tasks.release_payments_after_week()
+
+    reservation.refresh_from_db()
+    assert reservation.payment_released_to_seller is False
+    assert reservation.status == 'completed'
 
 
 def test_complete_reservation_snapshots_item_warranty_days():

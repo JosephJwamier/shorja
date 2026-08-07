@@ -28,6 +28,7 @@ from .views import (
     StoreReviewViewSet,
     LiveSessionViewSet,
     DeliveryOrderViewSet,
+    ReelViewSet,
 )
 from .legal_api import LegalDocumentViewSet
 
@@ -56,6 +57,7 @@ router.register(r'notifications', NotificationViewSet, basename='notification')
 router.register(r'product-reviews', ProductReviewViewSet, basename='product-review')
 router.register(r'store-reviews', StoreReviewViewSet, basename='store-review')
 router.register(r'live-sessions', LiveSessionViewSet, basename='live-session')
+router.register(r'reels', ReelViewSet, basename='reel')
 router.register(r'delivery-orders', DeliveryOrderViewSet, basename='delivery-order')
 router.register(r'legal/documents', LegalDocumentViewSet, basename='legal-document')
 

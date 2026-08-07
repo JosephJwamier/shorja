@@ -147,6 +147,58 @@ def notify_store_followers_live(session_id):
 
 
 @shared_task
+def notify_store_followers_reel(reel_id):
+    """Fan out the 'store just posted a reel' push to all its followers. Run
+    via .delay() from ReelViewSet.finalize so a store with many followers
+    doesn't block the HTTP response."""
+    from .models import Reel
+    from .notifications import notify_reel_posted
+
+    try:
+        reel = Reel.objects.select_related('store').get(id=reel_id)
+        notify_reel_posted(reel)
+        return f"Notified followers of store {reel.store_id} about reel {reel_id}"
+    except Reel.DoesNotExist:
+        logger.error(f"Reel {reel_id} not found")
+        return f"Reel {reel_id} not found"
+
+
+@shared_task
+def cleanup_orphaned_reel_uploads():
+    """
+    Safety net for an upload flow abandoned mid-way (app closed after
+    request_upload_url but before finalize, network drop mid-PUT, etc).
+    Deletes Reel rows still 'pending_upload' past
+    REEL_PENDING_UPLOAD_CLEANUP_HOURS, along with whatever they may have
+    already put in S3 under the incoming/ prefix — mirrors the S3 lifecycle
+    rule on incoming/* (24h) as a second, faster line of defense that also
+    cleans up the abandoned DB row itself.
+    """
+    from django.conf import settings
+    from . import aws_utils
+    from .models import Reel
+
+    cutoff = timezone.now() - timedelta(
+        hours=getattr(settings, 'REEL_PENDING_UPLOAD_CLEANUP_HOURS', 2)
+    )
+    stale_reels = Reel.objects.filter(status='pending_upload', created_at__lt=cutoff)
+
+    deleted_count = 0
+    for reel in stale_reels:
+        try:
+            if reel.video_key:
+                aws_utils.delete_object(reel.video_key)
+            if reel.thumbnail_key:
+                aws_utils.delete_object(reel.thumbnail_key)
+            reel.delete()
+            deleted_count += 1
+        except Exception as e:
+            logger.error(f"Error cleaning up orphaned reel upload {reel.id}: {str(e)}")
+
+    return f"Cleaned up {deleted_count} orphaned reel uploads"
+
+
+@shared_task
 def auto_end_stale_live_sessions():
     """
     Safety net for a broadcast the owner never explicitly ended (app crash,
@@ -179,9 +231,12 @@ def release_payments_after_week():
     """
     Release payments to sellers once each reservation's item-specific
     warranty period has passed without disputes or buyer approval
-    - Check completed reservations old enough for at least the shortest
-      possible warranty period (1 day) — can_release_payment() below then
-      re-checks the exact per-item warranty
+    - Check reservations whose outbound delivery reached the buyer at least
+      the shortest possible warranty period ago (1 day) — can_release_payment()
+      below then re-checks the exact per-item warranty against
+      Reservation.received_at (the buyer's actual receipt date, not
+      completed_at/payment date — a reservation the seller hasn't shipped
+      yet, or that's still in transit, must never age into 'confirmed' here)
     - Verify no open disputes
     - Release payment to seller (minus commission if applicable)
     - Release commission to representative if applicable
@@ -197,10 +252,12 @@ def release_payments_after_week():
 
     reservations = Reservation.objects.filter(
         status__in=['completed', 'confirmed'],
-        completed_at__lte=min_possible_warranty_ago,
         payment_released_to_seller=False,
-        buyer_approved=False
-    ).select_related('item__owner', 'representative')
+        buyer_approved=False,
+        delivery_orders__direction='outbound',
+        delivery_orders__status__in=['delivered', 'confirmed'],
+        delivery_orders__delivered_at__lte=min_possible_warranty_ago,
+    ).select_related('item__owner', 'representative').distinct()
 
     released_count = 0
     for reservation in reservations:
@@ -592,12 +649,13 @@ def send_purchase_approval_reminder(reservation_id):
     try:
         reservation = Reservation.objects.get(id=reservation_id)
 
-        if reservation.status == 'completed' and not reservation.buyer_approved:
-            days_since_completion = (timezone.now() - reservation.completed_at).days
-            days_remaining = reservation.warranty_days - days_since_completion
+        received_at = reservation.received_at
+        if reservation.status == 'completed' and not reservation.buyer_approved and received_at:
+            days_since_received = (timezone.now() - received_at).days
+            days_remaining = reservation.warranty_days - days_since_received
 
             message = (
-                f"اكتملت عملية شرائك لمنتج '{bidi_isolate(reservation.item.title)}' منذ {days_since_completion} يوم(أيام). "
+                f"استلمت منتج '{bidi_isolate(reservation.item.title)}' منذ {days_since_received} يوم(أيام). "
                 f"إذا كنت راضياً عن عملية الشراء، يرجى الموافقة عليها لتحرير المبلغ للبائع. "
                 f"سيتم تحرير المبلغ تلقائياً خلال {format_days_ar(max(0, days_remaining))} إذا لم يُفتح أي نزاع."
             )
