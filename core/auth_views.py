@@ -239,17 +239,15 @@ def normalize_phone_suffix(value):
 class VerifyPhoneView(APIView):
     """Phone verification.
 
-    Two accepted proofs, in order of preference:
+    The only accepted proof is `id_token` — a Firebase ID token carrying a
+    verified `phone_number` claim. Firebase Phone Auth generates and delivers
+    the SMS itself, from the device, so there is no server-side code to
+    compare against; our job is to verify the token and confirm the phone in
+    it belongs to this account. Same verification path as SocialLoginView.
 
-    - `id_token` — a Firebase ID token carrying a verified `phone_number`
-      claim. This is what the app sends. Firebase Phone Auth generates and
-      delivers the SMS itself, from the device, so there is no server-side
-      code to compare against; our job is to verify the token and confirm the
-      phone in it belongs to this account. Same verification path as
-      SocialLoginView.
-    - `code` — the legacy 6-digit code this view used to generate and send
-      over Twilio. Kept working so an older build in the wild doesn't break;
-      the current app no longer uses it, and neither does the GET below.
+    (The pre-launch 6-digit code sent over Twilio was removed before any
+    build using it shipped — there is no older client to stay compatible
+    with.)
     """
     permission_classes = [IsAuthenticated]
     swagger_schema = None
@@ -261,19 +259,11 @@ class VerifyPhoneView(APIView):
             return Response({'message': 'Phone already verified'})
 
         id_token = request.data.get('id_token')
-        if id_token:
-            return self._verify_with_firebase(user, id_token)
-
-        code = request.data.get('code', '')
-        if user.check_verification_code('phone', code):
-            user.phone_verified = True
-            user.save(update_fields=['phone_verified'])
-            user.clear_verification_code()
-            return Response({'message': 'Phone verified successfully'})
-
-        return Response({
-            'error': 'Invalid or expired verification code'
-        }, status=status.HTTP_400_BAD_REQUEST)
+        if not id_token:
+            return Response({
+                'error': 'id_token is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        return self._verify_with_firebase(user, id_token)
 
     def _verify_with_firebase(self, user, id_token):
         from .firebase import get_firebase_app, FIREBASE_AVAILABLE
@@ -331,27 +321,6 @@ class VerifyPhoneView(APIView):
         # a phone-only Firebase UID would break that lookup (and collide on its
         # unique constraint).
         return Response({'message': 'Phone verified successfully'})
-
-    def get(self, request):
-        """Legacy: generate a code and send it over Twilio. The app now uses
-        Firebase Phone Auth (see the class docstring) and never calls this."""
-        user = request.user
-
-        if not user.phone:
-            return Response({
-                'error': 'Phone number not set'
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        code = user.generate_verification_code('phone')
-        message = f"رمز التفعيل الخاص بك في سوقي هو: {code}"
-        sent = NotificationService.send_sms(user.phone, message)
-
-        if not sent:
-            return Response({
-                'error': 'Failed to send SMS — check the phone number and try again'
-            }, status=status.HTTP_502_BAD_GATEWAY)
-
-        return Response({'message': 'Verification code sent'})
 
 
 class ResendVerificationView(APIView):

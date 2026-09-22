@@ -173,15 +173,14 @@ def test_anonymous_request_is_rejected(client):
 # Legacy code path still works
 # ---------------------------------------------------------------------------
 
-def test_legacy_six_digit_code_still_verifies(client):
-    """An older build in the wild still posts {'code': ...} — that must keep
-    working alongside the Firebase path."""
-    user = make_user('ph_legacy', phone='07701234567')
-    code = user.generate_verification_code('phone')
+def test_request_without_id_token_is_rejected(client):
+    """The pre-launch Twilio code path is gone: a body without id_token is a
+    400, never a silent fall-through to a code check."""
+    user = make_user('ph_nocode', phone='07701234567')
     client.force_authenticate(user=user)
 
-    response = client.post('/api/auth/verify-phone/', {'code': code}, format='json')
+    response = client.post('/api/auth/verify-phone/', {'code': '123456'}, format='json')
 
-    assert response.status_code == 200
+    assert response.status_code == 400
     user.refresh_from_db()
-    assert user.phone_verified is True
+    assert user.phone_verified is False

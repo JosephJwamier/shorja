@@ -10,6 +10,9 @@ class CoreConfig(AppConfig):
 
         # Import for side effects: connects the model invariants in signals.py.
         from . import signals  # noqa: F401
+        # Import for side effects: registers the database deployment checks
+        # (MySQL time zone tables) with the system-check framework.
+        from . import checks  # noqa: F401
 
         self._register_auditlog_models()
 

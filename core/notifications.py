@@ -11,15 +11,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# SMS Support (Twilio)
-try:
-    from twilio.rest import Client
-
-    TWILIO_AVAILABLE = True
-except ImportError:
-    TWILIO_AVAILABLE = False
-    logger.warning("Twilio not installed. SMS notifications disabled.")
-
 # Firebase FCM push notifications
 from .firebase import send_push_notification, FIREBASE_AVAILABLE
 
@@ -108,31 +99,15 @@ class NotificationService:
 
     @staticmethod
     def send_sms(to_phone, message):
-        """
-        Send SMS notification via Twilio
-        """
-        if not TWILIO_AVAILABLE:
-            logger.warning(f"SMS not sent to {to_phone}: Twilio not configured")
-            return False
-
-        try:
-            client = Client(
-                settings.TWILIO_ACCOUNT_SID,
-                settings.TWILIO_AUTH_TOKEN
-            )
-
-            message = client.messages.create(
-                body=message,
-                from_=settings.TWILIO_PHONE_NUMBER,
-                to=to_phone
-            )
-
-            logger.info(f"SMS sent to {to_phone}: {message.sid}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to send SMS to {to_phone}: {str(e)}")
-            return False
+        """No SMS provider is wired up — and none ever delivered a message:
+        the Twilio integration only ever ran with placeholder credentials,
+        so every caller below has effectively been a no-op since day one.
+        Push (FCM) is the transactional transport; phone verification is
+        Firebase Phone Auth on the device. Kept as a stub so the call sites
+        stay in place for whenever an Iraqi SMS gateway is contracted —
+        implement it here, nowhere else."""
+        logger.debug("SMS transport not configured; not sending to %s", to_phone)
+        return False
 
     @staticmethod
     def send_template_email(to_email, template_name, context, subject):

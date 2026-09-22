@@ -253,7 +253,9 @@ CELERY_CACHE_BACKEND = 'django-cache'  # Use Django cache
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
-CELERY_TIMEZONE = 'UTC'
+# Same zone as TIME_ZONE so the crontab hours in CELERY_BEAT_SCHEDULE
+# ('daily at 1 AM', 'weekly Sunday 3 AM') mean Baghdad night, not UTC.
+CELERY_TIMEZONE = 'Asia/Baghdad'
 CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes
@@ -344,7 +346,13 @@ AUTH_PASSWORD_VALIDATORS = [
 
 # Internationalization
 LANGUAGE_CODE = 'en-us'
-TIME_ZONE = 'UTC'
+# Storage stays UTC (USE_TZ=True); this only decides how times are
+# rendered in the admin/templates and how Celery reads its crontabs.
+# MySQL REQUIREMENT: any non-UTC zone makes Django wrap date lookups in
+# CONVERT_TZ(), which needs MySQL's time zone tables loaded
+# (`mysql_tzinfo_to_sql /usr/share/zoneinfo | mysql -u root -p mysql`).
+# core/checks.py refuses `migrate` when they are missing.
+TIME_ZONE = 'Asia/Baghdad'
 USE_I18N = True
 USE_TZ = True
 
@@ -676,11 +684,6 @@ EMAIL_USE_TLS = True
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@reselltrust.com')
-
-# SMS Configuration (Twilio)
-TWILIO_ACCOUNT_SID = os.environ.get('TWILIO_ACCOUNT_SID', '')
-TWILIO_AUTH_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN', '')
-TWILIO_PHONE_NUMBER = os.environ.get('TWILIO_PHONE_NUMBER', '')
 
 # Application Settings
 RESERVATION_EXPIRY_HOURS = int(os.environ.get('RESERVATION_EXPIRY_HOURS', '48'))

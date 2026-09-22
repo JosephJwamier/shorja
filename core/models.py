@@ -1407,7 +1407,7 @@ class Report(models.Model):
         verbose_name_plural = 'البلاغات'
         constraints = [
             models.CheckConstraint(
-                check=(
+                condition=(
                     models.Q(reported_item__isnull=False, reported_store__isnull=True, reported_user__isnull=True, reported_reel__isnull=True) |
                     models.Q(reported_item__isnull=True, reported_store__isnull=False, reported_user__isnull=True, reported_reel__isnull=True) |
                     models.Q(reported_item__isnull=True, reported_store__isnull=True, reported_user__isnull=False, reported_reel__isnull=True) |
