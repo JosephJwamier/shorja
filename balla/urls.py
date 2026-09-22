@@ -18,6 +18,15 @@ from drf_yasg import openapi
 from rest_framework import permissions
 from two_factor.urls import urlpatterns as tf_urls
 from core.legal_views import legal_document_page
+from core.throttling import LoginUsernameThrottle
+from rest_framework.throttling import ScopedRateThrottle
+
+
+class ThrottledTokenObtainPairView(TokenObtainPairView):
+    """/api/auth/token/ is a second login door (username+password -> JWT);
+    it gets the same per-IP + per-username budget as /api/auth/login/."""
+    throttle_classes = [ScopedRateThrottle, LoginUsernameThrottle]
+    throttle_scope = 'auth_login'
 
 schema_view = get_schema_view(
     openapi.Info(
@@ -55,13 +64,8 @@ urlpatterns = [
     # well-known /admin/ every scanner tries first (see ADMIN_URL_PATH).
     path(settings.ADMIN_URL_PATH, admin.site.urls),
 
-    # API Documentation
-    path('swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
-    path('redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
-    path('swagger.json', schema_view.without_ui(cache_timeout=0), name='schema-json'),
-
     # Authentication - JWT
-    path('api/auth/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('api/auth/token/', ThrottledTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('api/auth/token/verify/', TokenVerifyView.as_view(), name='token_verify'),
 
@@ -71,13 +75,22 @@ urlpatterns = [
 
     # API Routes
     path('api/', include('core.urls')),
+    path('api/ledger/', include('ledger.urls')),
 
     # Additional custom endpoints
     path('api/auth/', include('core.auth_urls')),  # Custom auth endpoints
     path('api/webhooks/', include('core.webhook_urls')),  # Stripe webhooks
 ]
 
-# Serve media files in development
+# Development only: media/static served by Django, and the public API
+# explorer. In production the reverse proxy serves files, and the schema
+# (a complete map of every endpoint, wallet and admin routes included) is
+# not published to anonymous callers at all.
 if settings.DEBUG:
+    urlpatterns += [
+        path('swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
+        path('redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
+        path('swagger.json', schema_view.without_ui(cache_timeout=0), name='schema-json'),
+    ]
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
     urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)

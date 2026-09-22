@@ -27,21 +27,37 @@ def process_expired_reservations():
     expiring (see auto_complete_unclaimed_auction_reservations), since they
     already committed real money by winning the bid.
     """
-    from .models import Reservation
+    from .models import ItemVariant, Reservation, Transaction
 
     now = timezone.now()
-    expired_reservations = Reservation.objects.filter(
+    expired_ids = list(Reservation.objects.filter(
         status='pending',
         expires_at__lt=now,
         auction__isnull=True
-    )
+    ).values_list('id', flat=True))
 
     processed_count = 0
-    for reservation in expired_reservations:
+    for reservation_id in expired_ids:
         try:
             with transaction.atomic():
+                reservation = Reservation.objects.select_for_update().get(pk=reservation_id)
+                if reservation.status != 'pending':
+                    continue  # completed or cancelled since the list was built
                 reservation.status = 'expired'
                 reservation.save(update_fields=['status'])
+
+                # A represented sale is the one kind that takes stock at
+                # creation (see ReservationViewSet.create_representative_
+                # reservation) and books a pending commission — both must be
+                # undone here or the stock leaks on every expiry.
+                if reservation.representative_id:
+                    variant = reservation.stock_variant
+                    if variant is not None:
+                        variant = ItemVariant.objects.select_for_update().get(pk=variant.pk)
+                        variant.return_stock(reservation.quantity)
+                    Transaction.objects.filter(
+                        reservation=reservation, transaction_type='commission', status='pending'
+                    ).update(status='cancelled')
 
                 processed_count += 1
                 logger.info(f"Processed expired reservation {reservation.id}")
@@ -170,9 +186,10 @@ def cleanup_orphaned_reel_uploads():
     request_upload_url but before finalize, network drop mid-PUT, etc).
     Deletes Reel rows still 'pending_upload' past
     REEL_PENDING_UPLOAD_CLEANUP_HOURS, along with whatever they may have
-    already put in S3 under the incoming/ prefix — mirrors the S3 lifecycle
-    rule on incoming/* (24h) as a second, faster line of defense that also
-    cleans up the abandoned DB row itself.
+    already put in the bucket under the incoming/ prefix — mirrors the
+    bucket's lifecycle rule on incoming/* (24h; R2 supports the same rule
+    S3 did) as a second, faster line of defense that also cleans up the
+    abandoned DB row itself.
     """
     from django.conf import settings
     from . import aws_utils
@@ -351,41 +368,32 @@ def process_ended_auctions():
       independent of what the winner ends up choosing)
     """
     from .models import AuctionListing
-    from .auction_utils import create_winner_reservation, broadcast_live_auction_ended
-    from .wallet_utils import credit_earnings
+    from .auction_utils import (
+        create_winner_reservation, broadcast_live_auction_ended, refund_losing_deposits,
+    )
 
     now = timezone.now()
-    ended_auctions = AuctionListing.objects.filter(
-        status='active',
-        end_time__lt=now
-    ).select_related('item__owner')
+    ended_ids = list(AuctionListing.objects.filter(
+        status='active', end_time__lt=now
+    ).values_list('id', flat=True))
 
     processed_count = 0
-    for auction in ended_auctions:
+    for auction_id in ended_ids:
         try:
             reservation = None
             with transaction.atomic():
+                # Lock and re-read: end_early or a second worker may have
+                # settled this auction since the list above was built, and
+                # settling twice would refund deposits twice.
+                auction = AuctionListing.objects.select_for_update().select_related(
+                    'item__owner').get(pk=auction_id)
+                if auction.status != 'active':
+                    continue
+
                 winning_bid = auction.bids.filter(is_winning=True).first()
 
                 if winning_bid:
-                    deposit = auction.bid_deposit or Decimal('0')
-
-                    # Refund deposit to every losing bidder who paid it
-                    losing_bids = auction.bids.filter(
-                        deposit_paid=True,
-                        deposit_refunded=False
-                    ).exclude(id=winning_bid.id).select_related('bidder')
-
-                    for bid in losing_bids:
-                        credit_earnings(
-                            user=bid.bidder,
-                            amount=deposit,
-                            transaction_type='refund',
-                            auction=auction
-                        )
-                        bid.deposit_refunded = True
-                        bid.save(update_fields=['deposit_refunded'])
-
+                    refund_losing_deposits(auction, winning_bid)
                     reservation = create_winner_reservation(auction, winning_bid)
 
                     auction.status = 'ended'
@@ -508,6 +516,29 @@ def auto_close_resolved_disputes():
 
 
 @shared_task
+def recompute_store_levels():
+    """Nightly: re-derive every active store's performance level
+    (برونزي/فضّي/ذهبي/ماسي) from its last-90-day confirmed sales, rating and
+    followers, and keep the automatic `verified` badge in step with the
+    owner's verification flags. Levels are derived, so this is the only
+    writer of UserStore.level."""
+    from .models import UserStore
+    from .services.store_badges import recompute_level, sync_verified_badge
+
+    changed = 0
+    for store in UserStore.objects.filter(is_active=True).select_related('user'):
+        try:
+            old, new = recompute_level(store)
+            sync_verified_badge(store)
+            if old != new:
+                changed += 1
+                logger.info("store %s level %s -> %s", store.id, old or '-', new or '-')
+        except Exception as exc:  # one bad store must not stop the sweep
+            logger.error("level recompute failed for store %s: %s", store.id, exc)
+    return "Recomputed levels; %d changed" % changed
+
+
+@shared_task
 def calculate_user_trust_scores():
     """
     Recalculate trust scores for all users based on ratings
@@ -579,19 +610,19 @@ def send_payment_release_notification(reservation_id, release_type='auto_release
         if release_type == 'auto_release':
             subject = f"تم تحرير الدفعة - مرور {format_days_ar(reservation.warranty_days)}"
             message = (
-                f"تم تحرير دفعة بمبلغ ${reservation.total_price} لمنتج '{item_title}' "
+                f"تم تحرير دفعة بمبلغ {reservation.total_price} IQD لمنتج '{item_title}' "
                 f"إليك تلقائياً بعد مرور {format_days_ar(reservation.warranty_days)} دون أي نزاع."
             )
         elif release_type == 'buyer_approved':
             subject = "تم تحرير الدفعة - موافقة المشتري"
             message = (
-                f"تم تحرير دفعة بمبلغ ${reservation.total_price} لمنتج '{item_title}' "
+                f"تم تحرير دفعة بمبلغ {reservation.total_price} IQD لمنتج '{item_title}' "
                 f"بعد موافقة المشتري."
             )
         else:  # admin_approved
             subject = "تم تحرير الدفعة - موافقة الإدارة"
             message = (
-                f"تم تحرير دفعة بمبلغ ${reservation.total_price} لمنتج '{item_title}' "
+                f"تم تحرير دفعة بمبلغ {reservation.total_price} IQD لمنتج '{item_title}' "
                 f"بعد قرار الإدارة في النزاع."
             )
 
@@ -760,7 +791,7 @@ def send_auction_ending_reminder(auction_id):
 
             message = (
                 f"المزاد على '{bidi_isolate(auction.item.title)}' ينتهي خلال {minutes_remaining} دقيقة! "
-                f"السعر الحالي: ${auction.current_price}"
+                f"السعر الحالي: {auction.current_price} IQD"
             )
 
             for email in bidders:
@@ -791,6 +822,44 @@ def cleanup_old_messages():
 
     logger.info(f"Deleted {deleted_count} old system messages")
     return f"Deleted {deleted_count} messages"
+
+
+@shared_task
+def decay_category_affinities(factor=0.9):
+    """
+    Weekly multiplicative decay on every UserCategoryAffinity.score.
+
+    record_interest() (see models.py) only ever adds — a purchase, favorite,
+    or store-follow bumps a category's score but nothing ever reduces it.
+    Without this task a customer's interests from months ago stay stuck at
+    whatever they reached and can keep outranking a genuinely new interest
+    in `recommended` indefinitely, since the new one has to out-accumulate
+    the old rather than the old one fading. factor=0.9 run weekly gives
+    roughly a 6-7 week half-life — old signal fades over a month or two
+    instead of vanishing overnight or lingering forever.
+
+    Rows that decay to 0 are deleted outright rather than left at 0 — a
+    zero-score affinity is equivalent to no affinity (top_category_ids
+    already filters score__gt=0) and leaving it around just grows the table.
+
+    Uses Floor rather than Cast(...AS SIGNED): MySQL's integer CAST rounds
+    to nearest rather than truncating, so a score of 1 would decay to
+    round(0.9) == 1 forever and never actually reach 0.
+    """
+    from django.db.models import F, IntegerField
+    from django.db.models.functions import Floor
+    from .models import UserCategoryAffinity
+
+    decayed = UserCategoryAffinity.objects.filter(score__gt=0).update(
+        score=Floor(F('score') * factor, output_field=IntegerField())
+    )
+    zeroed_out, _ = UserCategoryAffinity.objects.filter(score=0).delete()
+
+    logger.info(
+        f"decay_category_affinities: decayed {decayed} rows, "
+        f"removed {zeroed_out} that hit 0 (factor={factor})"
+    )
+    return f"Decayed {decayed} affinities, removed {zeroed_out} zeroed-out rows"
 
 
 @shared_task
@@ -1016,7 +1085,7 @@ def send_payment_release_request_notification(reservation_id, seller_username, b
         message = (
             f"طلب منك {seller_username} الموافقة على تحرير الدفعة لحجزك المكتمل. "
             f"المنتج: {item_title}، "
-            f"المبلغ: ${reservation.total_price}. "
+            f"المبلغ: {reservation.total_price} IQD. "
             f"إذا كنت راضياً عن العملية، يرجى الموافقة على الحجز لتحرير المبلغ للبائع."
         )
 
@@ -1056,7 +1125,7 @@ def send_payment_released_notification(reservation_id, seller_id):
         message = (
             f"تم تحرير الدفعة الخاصة بالحجز رقم #{reservation_id}. "
             f"المنتج: {bidi_isolate(reservation.item.title)}, "
-            f"المبلغ: ${reservation.total_price}, "
+            f"المبلغ: {reservation.total_price} IQD, "
             f"المشتري: {bidi_isolate(reservation.buyer.username)}. "
             f"أصبح المبلغ متاحاً الآن في حسابك."
         )
@@ -1213,19 +1282,19 @@ def send_representative_sale_notification(reservation_id, representative_assignm
         # completion, so read the item's current configured value instead.
         message = (
             f"أخبار رائعة! اشترى {bidi_isolate(reservation.buyer.username)} منتج '{item_title}' عبر رابط تمثيلك. "
-            f"مبلغ البيع: ${reservation.total_price}, "
-            f"عمولتك: ${reservation.commission_amount} ({representative_assignment.commission_percentage}%). "
+            f"مبلغ البيع: {reservation.total_price} IQD, "
+            f"عمولتك: {reservation.commission_amount} IQD ({representative_assignment.commission_percentage}%). "
             f"ستُدفع العمولة عند موافقة المشتري على الشراء أو بعد {format_days_ar(reservation.item.warranty_days)}."
         )
 
         NotificationService.send_email(
             to_email=representative.email,
-            subject=f"حصلت على عمولة ${reservation.commission_amount}!",
+            subject=f"حصلت على عمولة {reservation.commission_amount} IQD!",
             message=message
         )
         notify_push(
             representative,
-            title=f"حصلت على عمولة ${reservation.commission_amount}!",
+            title=f"حصلت على عمولة {reservation.commission_amount} IQD!",
             body=f'اشترى {bidi_isolate(reservation.buyer.username)} "{item_title}" عبر رابط تمثيلك.',
             data={
                 'type': 'representative_sale',
@@ -1274,8 +1343,8 @@ def send_reservation_created_notification(reservation_id, owner_id):
                 f"عبر الممثل {bidi_isolate(reservation.representative.username)} "
                 f"لمنتجك '{item_title}'. "
                 f"الكمية: {reservation.quantity}, "
-                f"الإجمالي: ${reservation.total_price}, "
-                f"عمولة الممثل: ${reservation.commission_amount}. "
+                f"الإجمالي: {reservation.total_price} IQD, "
+                f"عمولة الممثل: {reservation.commission_amount} IQD. "
                 f"رقم الحجز: #{reservation.id}"
             )
             subject = f"حجز جديد (عبر ممثل) - {item_title}"
@@ -1284,7 +1353,7 @@ def send_reservation_created_notification(reservation_id, owner_id):
                 f"حجز جديد من {bidi_isolate(reservation.buyer.username)} "
                 f"لمنتجك '{item_title}'. "
                 f"الكمية: {reservation.quantity}, "
-                f"الإجمالي: ${reservation.total_price}. "
+                f"الإجمالي: {reservation.total_price} IQD. "
                 f"رقم الحجز: #{reservation.id}"
             )
             subject = f"حجز جديد - {item_title}"
@@ -1328,7 +1397,7 @@ def send_commission_paid_notification(reservation_id, representative_id):
 
         message = (
             f"تم دفع عمولتك! "
-            f"المبلغ: ${reservation.commission_amount} "
+            f"المبلغ: {reservation.commission_amount} IQD "
             f"مقابل بيع '{item_title}' إلى {bidi_isolate(reservation.buyer.username)}. "
             f"رقم الحجز: #{reservation.id}. "
             f"أصبح المبلغ متاحاً الآن في حسابك."
@@ -1336,12 +1405,12 @@ def send_commission_paid_notification(reservation_id, representative_id):
 
         NotificationService.send_email(
             to_email=representative.email,
-            subject=f"دفعة عمولة: ${reservation.commission_amount}",
+            subject=f"دفعة عمولة: {reservation.commission_amount} IQD",
             message=message
         )
         notify_push(
             representative,
-            title=f"دفعة عمولة: ${reservation.commission_amount}",
+            title=f"دفعة عمولة: {reservation.commission_amount} IQD",
             body=f'تم دفع عمولتك مقابل بيع "{item_title}". أصبح المبلغ متاحاً الآن في حسابك.',
             data={'type': 'representative_commission_paid', 'reservation_id': str(reservation.id)},
         )

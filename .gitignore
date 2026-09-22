@@ -14,7 +14,7 @@ __pycache__/
 # Django
 /staticfiles/
 /media/
-logs/*.log
+logs/
 db.sqlite3
 
 # Celery
@@ -31,3 +31,7 @@ env/
 *.swp
 .DS_Store
 Thumbs.db
+.gstack/
+
+# Committed template; the real infra/live/.env stays ignored by the rule above.
+!infra/live/.env.example

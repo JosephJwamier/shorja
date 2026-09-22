@@ -1,7 +1,17 @@
 from django.db import transaction as db_transaction
 from django.utils import timezone
 from decimal import Decimal
-from .models import Transaction, get_or_create_wallet
+from .models import Reservation, Transaction, get_or_create_wallet
+
+
+def _lock_reservation(reservation):
+    """Re-reads the row under a lock so the state check that follows is the
+    one that counts. Every money move on a reservation goes through here:
+    the buyer double-tapping 'complete', the warranty task racing the
+    buyer's 'received', two 'cancel' taps — each would otherwise charge,
+    pay or refund twice, because the view checked the status *before*
+    opening its transaction."""
+    return Reservation.objects.select_for_update().select_related('item').get(pk=reservation.pk)
 
 
 def credit_earnings(user, amount, transaction_type, **transaction_kwargs):
@@ -63,6 +73,13 @@ def complete_reservation(reservation, payment_type):
     from .models import Item
     from .delivery_utils import compute_delivery_fee
 
+    locked = _lock_reservation(reservation)
+    if locked.status != 'pending':
+        raise ValueError("Reservation is %s, not pending" % locked.status)
+    # Continue on the caller's instance so its in-memory fields (a delivery
+    # location attached moments ago) are what get saved.
+    reservation.status = locked.status
+
     if reservation.auction_id:
         # Winning an auction already charged deposit_amount as the winning
         # bid's deposit while bidding (see auction_utils.create_winner_reservation).
@@ -113,12 +130,23 @@ def complete_reservation(reservation, payment_type):
 
     # Stock is only taken now — not at reservation creation — so lock and
     # re-read it fresh (another reservation on the same item may have
-    # completed in the meantime).
+    # completed in the meantime). Represented sales are the one exception:
+    # their stock was already taken when the reservation was created.
+    from .models import ItemVariant
+    variant = reservation.stock_variant
+    if variant is not None and not reservation.representative_id:
+        variant = ItemVariant.objects.select_for_update().get(pk=variant.pk)
+        # Clamp rather than raise: the reservation is already committed and
+        # paid for by this point, and the old code clamped to zero here too.
+        variant.take_stock(min(reservation.quantity, variant.quantity))
     item = Item.objects.select_for_update().get(id=reservation.item_id)
-    item.quantity = max(0, item.quantity - reservation.quantity)
     item.sold_count += reservation.quantity
-    item.status = 'active' if item.quantity > 0 else 'sold'
-    item.save(update_fields=['quantity', 'status', 'sold_count'])
+    item.save(update_fields=['sold_count'])
+
+    # The sale is real from here on: write it into the seller's book so the
+    # dashboard counts it alongside what they sell over the counter.
+    from ledger.services import record_app_sale
+    record_app_sale(reservation)
 
 
 def release_reservation_payment(reservation, amount=None):
@@ -137,6 +165,14 @@ def release_reservation_payment(reservation, amount=None):
     reservation.payment_released_to_seller first, and for wrapping this in
     an outer transaction.atomic().
     """
+    locked = _lock_reservation(reservation)
+    if locked.payment_released_to_seller:
+        # Already paid out by a concurrent caller — a second run here would
+        # credit the seller (and representative, and courier) again.
+        reservation.payment_released_to_seller = True
+        reservation.payment_released_at = locked.payment_released_at
+        return
+
     update_fields = ['payment_released_to_seller', 'payment_released_at']
     reservation.payment_released_to_seller = True
     reservation.payment_released_at = timezone.now()
@@ -158,6 +194,33 @@ def release_reservation_payment(reservation, amount=None):
                 reservation=reservation,
             )
         charged -= reservation.delivery_fee
+
+    # Platform commission comes off the seller's side, never the buyer's,
+    # the courier's or the representative's. Frozen at creation
+    # (services.commission.freeze_on_reservation); on a partial refund it is
+    # scaled to what the seller side actually receives so the platform never
+    # keeps a share of money that went back to the buyer.
+    platform_cut = Decimal('0.00')
+    if reservation.platform_commission_amount > 0 and charged > 0:
+        base_total = reservation.amount_charged - reservation.delivery_fee
+        if amount is not None and base_total > 0:
+            platform_cut = (reservation.platform_commission_amount * charged / base_total
+                            ).quantize(Decimal('0.01'))
+        else:
+            platform_cut = reservation.platform_commission_amount
+        platform_cut = min(platform_cut, charged)
+        if platform_cut > 0:
+            from .services.commission import platform_account
+            credit_earnings(
+                user=platform_account(),
+                amount=platform_cut,
+                transaction_type='commission',
+                item=reservation.item,
+                reservation=reservation,
+            )
+            charged -= platform_cut
+            from ledger.services import record_platform_commission
+            record_platform_commission(reservation, platform_cut)
 
     if reservation.representative and reservation.commission_amount:
         seller_net = charged - reservation.commission_amount

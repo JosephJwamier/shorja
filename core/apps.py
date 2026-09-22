@@ -8,6 +8,9 @@ class CoreConfig(AppConfig):
         from .admin_site import configure_admin_site
         configure_admin_site()
 
+        # Import for side effects: connects the model invariants in signals.py.
+        from . import signals  # noqa: F401
+
         self._register_auditlog_models()
 
     def _register_auditlog_models(self):

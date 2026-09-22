@@ -34,7 +34,7 @@ class ItemStandardPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = 'page_size'
     max_page_size = 100
-from .models import (ItemImage, Location,
+from .models import (ItemImage, ItemVariant, Location,
     Item, FixedPriceListing, AuctionListing, Bid,
     Reservation, Representative, ItemTransfer, Category,
     UserStore, Rating, Transaction, Chat, Message, Dispute, Report, Notification,
@@ -42,7 +42,7 @@ from .models import (ItemImage, Location,
     LiveSession, LiveSessionItem, LiveSessionLike, LiveSessionComment, LiveSessionViewer,
     LiveSessionModerator, LiveSessionBan,
     UserCategoryAffinity, record_interest,
-    Reel, ReelLike, ReelComment, ReelView,
+    Reel, ReelLike, ReelComment, ReelView, Favorite,
 )
 
 from .serializers import (ItemImageSerializer, FixedPriceListingCreateSerializer,
@@ -316,7 +316,11 @@ class ItemViewSet(viewsets.ModelViewSet):
     )
     serializer_class = ItemSerializer
     permission_classes = [IsAuthenticated]
-    parser_classes = [MultiPartParser, FormParser]
+    # JSONParser added for variants: nested option/variant structures are
+    # natural JSON, while images still arrive as multipart. Multipart
+    # callers send `options`/`variants` as JSON-encoded strings — the
+    # serializer decodes those.
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_class = ItemFilter
     search_fields = ['title', 'name_ar', 'description']
@@ -419,6 +423,8 @@ class ItemViewSet(viewsets.ModelViewSet):
     )
     def create(self, request, *args, **kwargs):
         """Create item with images using transaction"""
+        # request.data is a QueryDict for multipart and a dict for JSON;
+        # copy without flattening so nested variants survive intact.
         form_data = {k: v for k, v in request.data.items() if k != 'images'}
         try:
             serializer = self.get_serializer(data=form_data)
@@ -875,6 +881,32 @@ class ItemViewSet(viewsets.ModelViewSet):
             'data': ItemSerializer(item, context={'request': request}).data,
         })
 
+    @action(detail=True, methods=['post'])
+    def favorite(self, request, pk=None):
+        """POST /api/items/{id}/favorite/ — أضف المنتج إلى المفضلة"""
+        item = self.get_object()
+        _favorite, created = Favorite.objects.get_or_create(item=item, user=request.user)
+        if created:
+            # Favoriting is a deliberate, item-specific signal — stronger than
+            # following a store (weight=1) but short of an actual purchase
+            # (weight=3). Only on first-time favorite so repeated toggle
+            # calls (already deduped by get_or_create) can't inflate it.
+            record_interest(request.user, item.category, weight=2)
+        return Response({
+            'success': True,
+            'is_favorited': True,
+        })
+
+    @action(detail=True, methods=['post'])
+    def unfavorite(self, request, pk=None):
+        """POST /api/items/{id}/unfavorite/ — أزل المنتج من المفضلة"""
+        item = self.get_object()
+        Favorite.objects.filter(item=item, user=request.user).delete()
+        return Response({
+            'success': True,
+            'is_favorited': False,
+        })
+
 
 class FixedPriceListingViewSet(viewsets.ReadOnlyModelViewSet):
     """View fixed price listings — supports category browsing"""
@@ -949,6 +981,44 @@ class FixedPriceListingViewSet(viewsets.ReadOnlyModelViewSet):
         # the ranked id order before serializing.
         listings_by_id = {obj.pk: obj for obj in self.get_queryset().filter(pk__in=page_ids)}
         ordered_page = [listings_by_id[pk] for pk in page_ids if pk in listings_by_id]
+
+        serializer = FixedPriceListingSerializer(ordered_page, many=True, context={'request': request})
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
+    def favorites(self, request):
+        """المفضلة — قوائم السعر الثابت للمنتجات التي فضّلها المستخدم، الأحدث تفضيلاً أولاً.
+
+        Ranked by ``Favorite.created_at`` fetched directly from the Favorite
+        table rather than via `.order_by('item__favorited_by__created_at')`
+        on this viewset's queryset: chaining that order_by after
+        `.filter(item__favorited_by__user=...)` risks Django adding the
+        ORDER BY join separately from the WHERE join, so for an item
+        favorited by more than one user the join could pick a *different*
+        user's row and duplicate the listing in the results. Fetching ids
+        first (same approach `_recommended_listing_ids` uses above) sidesteps
+        that entirely.
+        """
+        favorited_item_ids = list(
+            Favorite.objects.filter(user=request.user)
+            # -id as a tiebreaker: two favorites created back-to-back can
+            # land on the same created_at value (MySQL datetime(6) is still
+            # coarser than how fast two INSERTs can fire), which would
+            # otherwise leave "most recent first" order undefined for them.
+            .order_by('-created_at', '-id')
+            .values_list('item_id', flat=True)
+        )
+
+        page = self.paginate_queryset(favorited_item_ids)
+        page_ids = page if page is not None else favorited_item_ids
+
+        listings_by_item_id = {
+            listing.item_id: listing
+            for listing in self.get_queryset().filter(item_id__in=page_ids)
+        }
+        ordered_page = [listings_by_item_id[i] for i in page_ids if i in listings_by_item_id]
 
         serializer = FixedPriceListingSerializer(ordered_page, many=True, context={'request': request})
         if page is not None:
@@ -1450,30 +1520,13 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
 
         Returns the created Reservation, or None if there were no bids.
         """
-        from .auction_utils import create_winner_reservation
+        from .auction_utils import create_winner_reservation, refund_losing_deposits
 
         winning_bid = auction.bids.filter(is_winning=True).first()
         if not winning_bid:
             return None  # No bids — nothing to settle
 
-        deposit = auction.bid_deposit or Decimal('0')
-
-        # Refund deposit to every losing bidder who had paid it
-        losing_bids = auction.bids.filter(
-            deposit_paid=True,
-            deposit_refunded=False
-        ).exclude(id=winning_bid.id).select_related('bidder')
-
-        for bid in losing_bids:
-            credit_earnings(
-                user=bid.bidder,
-                amount=deposit,
-                transaction_type='refund',
-                auction=auction
-            )
-            bid.deposit_refunded = True
-            bid.save(update_fields=['deposit_refunded'])
-
+        refund_losing_deposits(auction, winning_bid)
         return create_winner_reservation(auction, winning_bid)
 
     @swagger_auto_schema(
@@ -1702,6 +1755,16 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
         try:
             reservation = None
             with transaction.atomic():
+                # Lock and re-check: the scheduled sweep (tasks.process_ended_auctions)
+                # or a double tap may settle this auction concurrently, and
+                # settling twice would refund deposits twice.
+                auction = AuctionListing.objects.select_for_update().select_related(
+                    'item').get(pk=auction.pk)
+                if auction.status != 'active':
+                    return Response({
+                        'success': False,
+                        'message': f'Auction is {auction.status}, cannot end early'
+                    }, status=status.HTTP_400_BAD_REQUEST)
                 auction.status = 'ended'
                 auction.end_time = timezone.now()
                 auction.save(update_fields=['status', 'end_time'])
@@ -2754,10 +2817,20 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                         'message': 'Cannot reserve your own item'
                     }, status=status.HTTP_403_FORBIDDEN)
 
-                if quantity > item.quantity:
+                # Live sales go through the item's default variant. The live
+                # queue has no picker for colour/size yet, so a live-listed
+                # item is treated as its default combination; an optioned item
+                # would need a variant on the queue entry before it could be
+                # sold live.
+                live_variant = item.default_variant
+                if live_variant is None:
+                    return Response({'success': False, 'message': 'المنتج غير متاح للبيع'},
+                                    status=status.HTTP_400_BAD_REQUEST)
+                live_variant = ItemVariant.objects.select_for_update().get(pk=live_variant.pk)
+                if quantity > live_variant.quantity:
                     return Response({
                         'success': False,
-                        'message': f'Only {item.quantity} available'
+                        'message': f'Only {live_variant.quantity} available'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 total_price = queue_item.price * quantity
@@ -2775,8 +2848,13 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                         'message': 'Please add a delivery address before reserving an item'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
+                from .services.commission import commission_for
+                live_platform_percent, live_platform_amount = commission_for(item, total_price)
                 reservation = Reservation.objects.create(
                     item=item,
+                    variant=live_variant,
+                    platform_commission_percent=live_platform_percent,
+                    platform_commission_amount=live_platform_amount,
                     buyer=request.user,
                     quantity=quantity,
                     deposit_amount=deposit_amount,
@@ -2807,10 +2885,10 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                     reservation=reservation
                 )
 
-                item.quantity = max(0, item.quantity - quantity)
+                live_variant.take_stock(quantity)
+                item.refresh_from_db(fields=['quantity', 'status'])
                 item.sold_count += quantity
-                item.status = 'active' if item.quantity > 0 else 'sold'
-                item.save(update_fields=['quantity', 'status', 'sold_count'])
+                item.save(update_fields=['sold_count'])
 
                 if item.quantity == 0:
                     sold_out = True
@@ -3283,6 +3361,28 @@ def _mark_reservation_received(reservation):
     release_reservation_payment(reservation)
 
 
+def _resolve_variant(item, variant_id):
+    """Which combination a reservation is for.
+
+    Returns (variant, None) or (None, error message). Rules:
+      - item has no options -> its default variant, whatever the client sent
+        (so a client that never learned about variants keeps working);
+      - item has options and no variant_id -> error, never a silent guess at
+        which colour the buyer meant;
+      - variant_id must belong to this item and still be active.
+    """
+    if not item.options:
+        variant = item.default_variant
+        return (variant, None) if variant else (None, 'هذا المنتج غير متاح للبيع حالياً')
+    if not variant_id:
+        return None, 'اختر اللون/المقاس أولاً'
+    variant = ItemVariant.objects.select_for_update().filter(
+        pk=variant_id, item=item, is_active=True).first()
+    if variant is None:
+        return None, 'الخيار المحدّد غير متوفّر'
+    return variant, None
+
+
 class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                           mixins.UpdateModelMixin, mixins.ListModelMixin,
                           viewsets.GenericViewSet):
@@ -3332,6 +3432,32 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             404: "Item or listing not found"
         }
     )
+    @action(detail=False, methods=['get'], url_path='delivery-quote')
+    def delivery_quote(self, request):
+        """What delivery will cost for `item_id` to `location_id` — so the
+        reservation sheet can show the fee before the buyer commits. Same
+        rule as the charge itself (delivery_utils.quote_delivery_fee)."""
+        from .delivery_utils import get_active_delivery_company, quote_delivery_fee, _party_location
+        try:
+            item = Item.objects.select_related('owner', 'current_holder').get(
+                id=int(request.query_params.get('item_id', 0)))
+            location = Location.objects.get(
+                id=int(request.query_params.get('location_id', 0)), user=request.user)
+        except (Item.DoesNotExist, Location.DoesNotExist, ValueError):
+            return Response({'success': False, 'message': 'المنتج أو العنوان غير موجود'},
+                            status=status.HTTP_404_NOT_FOUND)
+        company = get_active_delivery_company()
+        if company is None:
+            return Response({'success': True, 'data': {'fee': '0.00', 'company': None}})
+        seller_location = _party_location(item.current_holder or item.owner)
+        fee = quote_delivery_fee(company, seller_location.state if seller_location else '',
+                                 location.state, item.package_size)
+        return Response({'success': True, 'data': {
+            'fee': str(fee), 'company': company.name,
+            'from_governorate': seller_location.state if seller_location else None,
+            'to_governorate': location.state, 'package_size': item.package_size,
+        }})
+
     @action(detail=False, methods=['post'])
     def create_reservation(self, request):
         """Create a new reservation (handles both regular and resale items)"""
@@ -3392,11 +3518,24 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                         'message': f'Item is not available. Current status: {item.status}'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
-                if quantity > item.quantity:
+                # Stock is checked on the combination being bought, not on the
+                # item's total: 20 in stock across four colours says nothing about
+                # whether red / L has any. A plain item resolves to its default
+                # variant so older clients that send no variant_id still work.
+                variant, variant_error = _resolve_variant(
+                    item, serializer.validated_data.get('variant_id'))
+                if variant_error:
+                    return Response({'success': False, 'message': variant_error},
+                                    status=status.HTTP_400_BAD_REQUEST)
+                if quantity > variant.quantity:
                     return Response({
                         'success': False,
-                        'message': f'Insufficient quantity. Only {item.quantity} available'
+                        'message': f'Insufficient quantity. Only {variant.quantity} available'
                     }, status=status.HTTP_400_BAD_REQUEST)
+
+                # A variant can carry its own price; the buyer pays for the
+                # combination they chose.
+                unit_price = variant.price if variant.price is not None else fixed_listing.price
 
                 # Redeem a collected store coupon (كوبون المتجر), if provided
                 coupon_collection = None
@@ -3430,7 +3569,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                             'message': 'هذا الكوبون لا يخص متجر هذا المنتج'
                         }, status=status.HTTP_400_BAD_REQUEST)
 
-                    if (fixed_listing.price * quantity) < coupon_collection.coupon.min_order_amount:
+                    if (unit_price * quantity) < coupon_collection.coupon.min_order_amount:
                         return Response({
                             'success': False,
                             'message': f'الحد الأدنى لاستخدام هذا الكوبون هو {coupon_collection.coupon.min_order_amount} IQD'
@@ -3491,12 +3630,25 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                     hours=getattr(settings, 'RESERVATION_EXPIRY_HOURS', 24)
                 )
 
-                total_price = fixed_listing.price * quantity
-                deposit_amount = fixed_listing.deposit_amount * quantity
+                total_price = unit_price * quantity
+                # The listing's stored deposit is per unit *at the listing
+                # price*; a variant with its own price needs the percentage
+                # applied to that price, or a 150-IQD variant would carry a
+                # 12,000-IQD deposit.
+                if variant.price is not None:
+                    deposit_amount = (
+                        unit_price * fixed_listing.deposit_percentage / Decimal('100')
+                    ) * quantity
+                else:
+                    deposit_amount = fixed_listing.deposit_amount * quantity
 
                 if coupon_collection:
                     coupon_discount = min(coupon_collection.coupon.amount, total_price)
                     total_price -= coupon_discount
+                    # The deposit was sized on the undiscounted price; a big
+                    # coupon could leave it larger than the whole order, which
+                    # turned the cash-on-delivery remainder negative.
+                    deposit_amount = min(deposit_amount, total_price)
 
                 if offer_message:
                     # The negotiated price replaces the listing price entirely
@@ -3522,8 +3674,11 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 # delivery location; stock isn't touched until the buyer
                 # actually completes the reservation (pays deposit or full
                 # price), so multiple reservations can coexist on one item.
+                from .services.commission import commission_for
+                commission_percent, commission_amount_platform = commission_for(item, total_price)
                 reservation = Reservation.objects.create(
                     item=item,
+                    variant=variant,
                     buyer=request.user,
                     quantity=quantity,
                     deposit_amount=deposit_amount,
@@ -3532,7 +3687,9 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                     delivery_location=delivery_location,
                     applied_coupon=coupon_collection,
                     coupon_discount=coupon_discount,
-                    applied_offer=offer_message
+                    applied_offer=offer_message,
+                    platform_commission_percent=commission_percent,
+                    platform_commission_amount=commission_amount_platform,
                 )
 
             # Send notifications to seller and buyer
@@ -3966,10 +4123,19 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 'message': f'Reservation cannot be cancelled. Current status: {reservation.status}'
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        # Once the money has gone to the seller the sale is settled for both
+        # sides — the buyer confirmed receipt (or the warranty ran out) and
+        # the courier was paid. Nothing is reversible from here; a problem
+        # after this point is a dispute, not a cancellation.
+        if reservation.payment_released_to_seller:
+            return Response({
+                'success': False,
+                'message': 'لا يمكن الإلغاء بعد تحرير المبلغ للبائع'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         # Sellers may cancel a reservation even after the buyer has paid the
         # deposit/full price ('completed') — e.g. they can no longer fulfill
-        # it. The buyer is refunded automatically below (clawed back from
-        # the seller's wallet first if payment was already released to them).
+        # it. The buyer is refunded automatically below from the escrow.
         if is_seller and not is_buyer:
             # ...but not once the delivery company has already picked the
             # item up — it's no longer physically in the seller's hands to
@@ -3982,13 +4148,6 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 }, status=status.HTTP_400_BAD_REQUEST)
         else:
             # Buyer cancellation rules (unchanged)
-            paid = reservation.status == 'completed'
-            if paid and reservation.payment_released_to_seller and not reservation.can_buyer_cancel():
-                return Response({
-                    'success': False,
-                    'message': 'Cannot cancel. Payment has already been released.'
-                }, status=status.HTTP_400_BAD_REQUEST)
-
             if not reservation.can_buyer_cancel():
                 return Response({
                     'success': False,
@@ -3997,16 +4156,34 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
         try:
             with transaction.atomic():
+                # Re-read under a lock: the checks above ran outside the
+                # transaction, and two concurrent cancels (or a cancel racing
+                # the warranty release) would otherwise refund twice.
+                reservation = Reservation.objects.select_for_update().select_related(
+                    'item', 'buyer').get(pk=reservation.pk)
+                if reservation.status not in ['pending', 'completed'] or reservation.payment_released_to_seller:
+                    return Response({
+                        'success': False,
+                        'message': f'Reservation cannot be cancelled. Current status: {reservation.status}'
+                    }, status=status.HTTP_400_BAD_REQUEST)
                 old_status = reservation.status
-                stock_was_taken = old_status == 'completed'
+                # Stock is normally taken at completion; a represented sale
+                # takes it at creation, so it comes back on cancel either way.
+                stock_was_taken = old_status == 'completed' or bool(reservation.representative_id)
 
                 # Stock is only taken at completion, so only restore it if
                 # this reservation had actually reached that point.
                 if stock_was_taken:
+                    stock_variant = reservation.stock_variant
+                    if stock_variant is not None:
+                        stock_variant = ItemVariant.objects.select_for_update().get(
+                            pk=stock_variant.pk
+                        )
+                        stock_variant.return_stock(reservation.quantity)
+                    if old_status == 'completed':
+                        from ledger.services import void_app_sale
+                        void_app_sale(reservation, 'أُلغي الحجز')
                     item = Item.objects.select_for_update().get(id=reservation.item_id)
-                    item.quantity += reservation.quantity
-                    item.status = 'active'
-                    item.save(update_fields=['quantity', 'status'])
 
                     # This reservation may have been the one that sold out its
                     # live-session queue entry — now that stock is back,
@@ -4020,19 +4197,17 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
                 reservation.status = 'cancelled'
                 reservation.save(update_fields=['status'])
+                # A represented sale booked its commission as a pending row
+                # at creation; nothing will ever release it now.
+                Transaction.objects.filter(
+                    reservation=reservation, transaction_type='commission', status='pending'
+                ).update(status='cancelled')
 
                 # Refund buyer's wallet for whatever they'd actually paid
+                # The money is still in escrow (release is blocked above), so
+                # the refund comes from the platform's held funds, nobody's wallet.
                 refund_amount = reservation.amount_charged
                 if refund_amount > 0:
-                    if reservation.payment_released_to_seller:
-                        # Seller already holds the funds — claw them back first
-                        debit_balance(
-                            user=reservation.item.owner,
-                            amount=refund_amount,
-                            transaction_type='refund',
-                            item=item,
-                            reservation=reservation
-                        )
                     credit_earnings(
                         user=reservation.buyer,
                         amount=refund_amount,
@@ -4187,7 +4362,7 @@ class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = DeliveryOrderSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['status', 'direction', 'reservation']
+    filterset_fields = ['status', 'direction', 'reservation', 'from_governorate']
 
     def get_queryset(self):
         if getattr(self, 'swagger_fake_view', False):
@@ -5212,6 +5387,8 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                 )
 
                 # Create reservation WITH representative info
+                from .services.commission import commission_for
+                platform_percent, platform_amount = commission_for(item, total_price)
                 reservation = Reservation.objects.create(
                     item=item,
                     buyer=request.user,
@@ -5221,7 +5398,9 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                     expires_at=expiry_time,
                     representative=representative_assignment.representative,
                     representative_assignment=representative_assignment,
-                    commission_amount=commission_amount
+                    commission_amount=commission_amount,
+                    platform_commission_percent=platform_percent,
+                    platform_commission_amount=platform_amount,
                 )
 
                 # === NEW: Create pending commission transaction for representative ===
@@ -5234,16 +5413,17 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                     reservation=reservation
                 )
 
-                # Decrease item quantity
-                item.quantity -= quantity
-
-                # Update item status
-                if item.quantity == 0:
-                    item.status = 'sold'
-                else:
+                # Decrease stock on the reserved variant (the reservation's
+                # own variant, or the item's default one for a plain item).
+                stock_variant = ItemVariant.objects.select_for_update().get(
+                    pk=reservation.stock_variant.pk
+                )
+                stock_variant.take_stock(quantity)
+                # sync_stock_from_variants() sets active/sold; a represented
+                # sale that still has stock reads as 'reserved' here as before.
+                if item.quantity > 0:
                     item.status = 'reserved'
-
-                item.save(update_fields=['quantity', 'status'])
+                    item.save(update_fields=['status'])
 
                 # Notify representative about the sale
                 from .tasks import send_representative_sale_notification
@@ -7777,6 +7957,26 @@ class CategoryViewSet(viewsets.ModelViewSet):  # Changed from ReadOnlyModelViewS
                 qs = qs.filter(parent_id=parent_param)
         return qs
 
+    def get_serializer_context(self):
+        # يُحسب مرّة واحدة لكل طلب (لا لكل تصنيف) ليعرف الـ serializer أيّ
+        # تصنيف (رئيسي أو فرعي) لديه فعلاً منتج واحد على الأقل منشور
+        # (has_products) — يُستخدم في التطبيق لإخفاء التصنيفات الفارغة من
+        # بنر الصفحة الرئيسية.
+        context = super().get_serializer_context()
+        context['active_category_ids'] = set(
+            Item.objects.filter(status='active')
+            .filter(Q(fixed_listing__isnull=False) | Q(auction_listing__isnull=False))
+            .values_list('category_id', flat=True)
+            .distinct()
+        )
+        children_map = {}
+        for child_id, parent_id in Category.objects.filter(
+            is_active=True, parent__isnull=False
+        ).values_list('id', 'parent_id'):
+            children_map.setdefault(parent_id, []).append(child_id)
+        context['children_map'] = children_map
+        return context
+
     def destroy(self, request, *args, **kwargs):
         # A hard delete here would CASCADE every child category, and raise
         # an unhandled ProtectedError (500) the moment any Item still
@@ -7817,50 +8017,22 @@ class WalletViewSet(viewsets.ViewSet):
         wallet = get_or_create_wallet(request.user)
         return Response({'success': True, 'data': WalletSerializer(wallet).data})
 
-    @swagger_auto_schema(request_body=DepositCreateSerializer)
-    @action(detail=False, methods=['post'])
-    def deposit(self, request):
-        """Charge balance from the app Mastercard (SIMULATED — instantly succeeds)."""
-        serializer = DepositCreateSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response({'success': False, 'errors': serializer.errors},
-                            status=status.HTTP_400_BAD_REQUEST)
-
-        amount = serializer.validated_data['amount']
-        card_last4 = serializer.validated_data.get('card_last4', '')
-
+    @action(detail=False, methods=['get'])
+    def activity(self, request):
+        """Every movement of this user's money with a direction and a
+        from → to pair, plus what is parked in escrow. Read-only; the manual
+        re-sync of unfinished card top-ups is POST /payments/sync-pending/."""
+        from .services.wallet_activity import build_activity
         try:
-            with transaction.atomic():
-                deposit = DepositRequest.objects.create(
-                    user=request.user,
-                    amount=amount,
-                    card_last4=card_last4,
-                    reference=f"SIM-{uuid.uuid4().hex[:12]}",
-                    status='completed',
-                    completed_at=timezone.now(),
-                )
-                # Simulated gateway always succeeds -> credit immediately
-                wallet = get_or_create_wallet(request.user)
-                wallet.credit(amount)
+            limit = max(1, min(int(request.query_params.get('limit', 200)), 500))
+        except (TypeError, ValueError):
+            limit = 200
+        return Response({'success': True, 'data': build_activity(request.user, limit=limit)})
 
-                Transaction.objects.create(
-                    user=request.user,
-                    transaction_type='payment',  # money coming IN to balance
-                    amount=amount,
-                    status='completed',
-                )
-
-            return Response({
-                'success': True,
-                'message': f'Deposited ${amount} to your balance',
-                'data': {
-                    'deposit': DepositRequestSerializer(deposit).data,
-                    'wallet': WalletSerializer(wallet).data,
-                }
-            }, status=status.HTTP_201_CREATED)
-        except Exception as e:
-            return Response({'success': False, 'message': 'Deposit failed', 'errors': str(e)},
-                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    # The pre-gateway `deposit` action (a *simulated* card charge that credited
+    # the wallet instantly) used to live here. It stayed reachable after the
+    # real gateway shipped, which let any signed-in user mint balance with one
+    # POST. Top-ups now go through /api/payments/ only — see payment_views.
 
     @swagger_auto_schema(request_body=WithdrawalCreateSerializer)
     @action(detail=False, methods=['post'])

@@ -11,13 +11,13 @@ from django.urls import path, reverse
 from django.utils.html import format_html
 from django.utils import timezone
 from import_export import resources
-from import_export.admin import ExportActionMixin
+from import_export.admin import ExportActionMixin, ImportExportModelAdmin
 from unfold.admin import ModelAdmin, TabularInline
-from unfold.contrib.import_export.forms import SelectableFieldsExportForm
+from unfold.contrib.import_export.forms import ExportForm, ImportForm, SelectableFieldsExportForm
 
 from .models import (
     User, Location, UserStore, Representative,
-    Category, Item, ItemImage, ItemLocationHistory,
+    Category, Item, ItemImage, ItemLocationHistory, Favorite,
     FixedPriceListing, AuctionListing, Bid, ItemTransfer, StorageFeePayment,
     Reservation, Transaction, Dispute, Report,
     Rating, ProductReview, StoreReview, Chat, Message,
@@ -26,6 +26,8 @@ from .models import (
     DeliveryCompany, DeliveryOrder, CashSettlement, DeliveryBatch,
     Wallet, Notification, DepositRequest, WithdrawalRequest,
     Reel, ReelLike, ReelComment, ReelView,
+    ItemVariant, PaymentIntent, StoreBadge, DeliveryRate,
+    LiveSessionViewer, LiveSessionBan, LiveSessionModerator, UserCategoryAffinity,
 )
 from .services.disputes import resolve_dispute, DisputeResolutionError
 from .services.withdrawals import approve_withdrawal, reject_withdrawal, WithdrawalReviewError
@@ -223,14 +225,117 @@ class LocationAdmin(ModelAdmin):
     list_select_related = ('user',)
 
 
+class StoreBadgeInline(TabularInline):
+    """Granted badges, history included (revoked rows stay for the audit
+    trail). Grant/revoke through the store actions so caps are enforced;
+    this inline is for reading and for fixing a note."""
+    model = StoreBadge
+    extra = 0
+    fields = ('kind', 'granted_by', 'granted_at', 'revoked_at', 'revoked_by', 'note')
+    readonly_fields = ('kind', 'granted_by', 'granted_at', 'revoked_at', 'revoked_by')
+    can_delete = False
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
 @admin.register(UserStore)
 class UserStoreAdmin(ModelAdmin):
-    list_display = ('name', 'user', 'is_active', 'rating', 'phone_number', 'whatsapp_number', 'created_at')
-    list_filter = ('is_active',)
+    list_display = ('name', 'user', 'is_active', 'rating', 'level_badge', 'badges_display',
+                    'phone_number', 'created_at')
+    list_filter = ('is_active', 'level', 'badges__kind')
     search_fields = ('name', 'user__username', 'phone_number', 'whatsapp_number')
     raw_id_fields = ('user', 'default_location')
     list_select_related = ('user',)
-    actions = ['deactivate_stores_action', 'activate_stores_action']
+    readonly_fields = ('level', 'level_updated_at')
+    inlines = [StoreBadgeInline]
+    actions = [
+        'deactivate_stores_action', 'activate_stores_action',
+        'grant_founder', 'grant_pioneer', 'grant_certified',
+        'revoke_founder', 'revoke_pioneer', 'revoke_certified',
+        'recompute_levels_now', 'grant_reward_coupon',
+    ]
+
+    @admin.display(description='المستوى', ordering='level')
+    def level_badge(self, obj):
+        colors = {'bronze': '#A8652A', 'silver': '#7C858C', 'gold': '#D1A626', 'diamond': '#4E6073'}
+        if not obj.level:
+            return '—'
+        return format_html('<span style="color:{};font-weight:700">{}</span>',
+                           colors.get(obj.level, '#333'), obj.get_level_display())
+
+    @admin.display(description='الشارات')
+    def badges_display(self, obj):
+        names = dict(StoreBadge.KIND_CHOICES)
+        kinds = [k for k in obj.badge_kinds() if k in names]
+        return '، '.join(names[k] for k in kinds) or '—'
+
+    # -- granting (caps enforced in services.store_badges) -----------------
+    def _grant(self, request, queryset, kind):
+        from .services.store_badges import BadgeError, grant_badge
+        done, failed = 0, []
+        for store in queryset:
+            try:
+                before = store.badges.filter(kind=kind, revoked_at__isnull=True).exists()
+                grant_badge(store, kind, by=request.user, note='مُنحت من لوحة الإدارة')
+                done += 0 if before else 1
+            except BadgeError as exc:
+                failed.append('%s: %s' % (store.name, exc))
+        label = dict(StoreBadge.KIND_CHOICES)[kind]
+        if done:
+            self.message_user(request, 'مُنحت شارة «%s» لـ%d متجر.' % (label, done), level=messages.SUCCESS)
+        for line in failed:
+            self.message_user(request, line, level=messages.ERROR)
+
+    def _revoke(self, request, queryset, kind):
+        from .services.store_badges import revoke_badge
+        count = sum(1 for st in queryset if revoke_badge(st, kind, by=request.user, note='سُحبت من لوحة الإدارة'))
+        self.message_user(request, 'سُحبت الشارة من %d متجر.' % count, level=messages.SUCCESS)
+
+    @admin.action(description='منح شارة «مؤسِّس» (الخمسون الأوائل)', permissions=['change'])
+    def grant_founder(self, request, queryset):
+        self._grant(request, queryset, StoreBadge.KIND_FOUNDER)
+
+    @admin.action(description='منح شارة «رائد» (51–250)', permissions=['change'])
+    def grant_pioneer(self, request, queryset):
+        self._grant(request, queryset, StoreBadge.KIND_PIONEER)
+
+    @admin.action(description='منح شارة «بائع معتمد» (خرّيج المدرسة)', permissions=['change'])
+    def grant_certified(self, request, queryset):
+        self._grant(request, queryset, StoreBadge.KIND_CERTIFIED)
+
+    @admin.action(description='سحب شارة «مؤسِّس»', permissions=['change'])
+    def revoke_founder(self, request, queryset):
+        self._revoke(request, queryset, StoreBadge.KIND_FOUNDER)
+
+    @admin.action(description='سحب شارة «رائد»', permissions=['change'])
+    def revoke_pioneer(self, request, queryset):
+        self._revoke(request, queryset, StoreBadge.KIND_PIONEER)
+
+    @admin.action(description='سحب شارة «بائع معتمد»', permissions=['change'])
+    def revoke_certified(self, request, queryset):
+        self._revoke(request, queryset, StoreBadge.KIND_CERTIFIED)
+
+    @admin.action(description='إعادة حساب المستوى الآن', permissions=['change'])
+    def recompute_levels_now(self, request, queryset):
+        from .services.store_badges import recompute_level, sync_verified_badge
+        changed = 0
+        for store in queryset.select_related('user'):
+            old, new = recompute_level(store)
+            sync_verified_badge(store)
+            changed += old != new
+        self.message_user(request, 'أُعيد الحساب؛ تغيّر مستوى %d متجر.' % changed, level=messages.SUCCESS)
+
+    @admin.action(description='منح كوبون مكافأة لزبائن المتاجر المحددة', permissions=['change'])
+    def grant_reward_coupon(self, request, queryset):
+        """Creates a store coupon on the store's behalf so its customers can
+        collect it (the platform's thank-you to a badged store). The discount
+        is borne the same way as the store's own coupons; a platform-funded
+        variant would need a platform account and is a separate decision."""
+        from .services.store_badges import grant_reward_coupon
+        made = sum(1 for st in queryset if grant_reward_coupon(st, by=request.user))
+        self.message_user(request, 'أُنشئ %d كوبون مكافأة (5,000 IQD، حد أدنى 50,000، 30 يوماً).' % made,
+                          level=messages.SUCCESS)
 
     @admin.action(description='تعطيل المتاجر المحددة', permissions=['change'])
     def deactivate_stores_action(self, request, queryset):
@@ -266,9 +371,16 @@ class RepresentativeAdmin(ModelAdmin):
 
 @admin.register(Category)
 class CategoryAdmin(ModelAdmin):
-    list_display = ('thumbnail', 'name_ar', 'name', 'parent', 'order', 'is_active')
+    list_display = ('thumbnail', 'name_ar', 'name', 'parent', 'commission_percent',
+                    'effective_commission', 'order', 'is_active')
     list_display_links = ('name_ar', 'name')
-    list_editable = ('order', 'is_active')
+    list_editable = ('commission_percent', 'order', 'is_active')
+
+    @admin.display(description='العمولة الفعلية %')
+    def effective_commission(self, obj):
+        # What a sale in this category is actually charged today — the row's
+        # own rate, an ancestor's, or the platform default.
+        return obj.effective_commission_percent()
     list_filter = ('is_active',)
     search_fields = ('name', 'name_ar', 'slug')
     autocomplete_fields = ('parent',)
@@ -302,6 +414,14 @@ class ItemImageInline(TabularInline):
         return '—'
 
 
+class ItemVariantInline(TabularInline):
+    """Stock is edited here, per combination — Item.quantity is a derived
+    total and is read-only on the parent form for that reason."""
+    model = ItemVariant
+    extra = 0
+    fields = ('attributes', 'sku', 'quantity', 'price', 'cost_price', 'is_active')
+
+
 @admin.register(Item)
 class ItemAdmin(ModelAdmin):
     list_display = ('title', 'owner', 'category', 'status', 'condition', 'quantity', 'warranty_days', 'sold_count', 'rating', 'created_at')
@@ -309,9 +429,15 @@ class ItemAdmin(ModelAdmin):
     search_fields = ('title', 'name_ar', 'owner__username')
     raw_id_fields = ('owner', 'current_holder', 'current_location', 'category')
     list_select_related = ('owner', 'category')
-    inlines = [ItemImageInline]
+    inlines = [ItemVariantInline, ItemImageInline]
+    readonly_fields = ('quantity',)
     date_hierarchy = 'created_at'
     actions = ['archive_selected_items']
+
+    def save_related(self, request, form, formsets, change):
+        # Inline variant edits change the total; recompute after they land.
+        super().save_related(request, form, formsets, change)
+        form.instance.sync_stock_from_variants()
 
     @admin.action(description='أرشفة/إخفاء المنتجات المحددة (بسبب)', permissions=['change'])
     def archive_selected_items(self, request, queryset):
@@ -364,6 +490,17 @@ class ItemLocationHistoryAdmin(ModelAdmin):
 
     def has_add_permission(self, request):
         return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(Favorite)
+class FavoriteAdmin(ModelAdmin):
+    list_display = ('user', 'item', 'created_at')
+    search_fields = ('user__username', 'item__title')
+    raw_id_fields = ('user', 'item')
+    list_select_related = ('user', 'item')
 
     def has_change_permission(self, request, obj=None):
         return False
@@ -961,8 +1098,18 @@ class ReelViewAdmin(ModelAdmin):
 # التوصيل
 # =============================================================================
 
+class DeliveryRateInline(TabularInline):
+    """Per-route, per-size prices. Blank = wildcard; the most specific row
+    wins, and the two flat fees on the company are the last resort."""
+    model = DeliveryRate
+    extra = 0
+    fields = ('from_governorate', 'to_governorate', 'package_size', 'fee', 'is_active')
+    ordering = ('from_governorate', 'to_governorate', 'package_size')
+
+
 @admin.register(DeliveryCompany)
 class DeliveryCompanyAdmin(ModelAdmin):
+    inlines = [DeliveryRateInline]
     list_display = (
         'name', 'account', 'primary_contact_phone',
         'intra_governorate_fee', 'inter_governorate_fee', 'outstanding_liability_badge', 'is_active', 'created_at',
@@ -1349,3 +1496,110 @@ class LegalAcceptanceAdmin(ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+# =============================================================================
+# Product variants & payments
+# =============================================================================
+@admin.register(ItemVariant)
+class ItemVariantAdmin(ModelAdmin):
+    list_display = ('item', 'label', 'sku', 'quantity', 'price', 'is_active')
+    list_filter = ('is_active',)
+    search_fields = ('item__title', 'sku')
+    raw_id_fields = ('item', 'image')
+    list_select_related = ('item',)
+
+    @admin.display(description='المتغيّر')
+    def label(self, obj):
+        return obj.label or 'افتراضي'
+
+
+@admin.register(PaymentIntent)
+class PaymentIntentAdmin(ModelAdmin):
+    """Money records are for looking at, not editing: every field that would
+    matter is set by the gateway flow, and a hand-edit here would desync the
+    row from what the gateway holds."""
+    list_display = ('reference', 'user', 'provider', 'purpose', 'amount', 'currency',
+                    'state', 'applied_at', 'created_at')
+    list_filter = ('provider', 'state', 'purpose')
+    search_fields = ('reference', 'provider_payment_id', 'user__username')
+    raw_id_fields = ('user', 'deposit')
+    list_select_related = ('user',)
+    date_hierarchy = 'created_at'
+    readonly_fields = tuple(f.name for f in PaymentIntent._meta.fields)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+# Live-session bookkeeping rows. Registered so the "every model has an admin"
+# rule holds and support can look them up; nothing here is authored by hand.
+@admin.register(LiveSessionViewer)
+class LiveSessionViewerAdmin(ModelAdmin):
+    list_display = ('session', 'user', 'is_watching', 'joined_at', 'last_seen_at')
+    raw_id_fields = ('session', 'user')
+    list_select_related = ('session', 'user')
+
+
+@admin.register(LiveSessionBan)
+class LiveSessionBanAdmin(ModelAdmin):
+    list_display = ('session', 'user', 'banned_by', 'created_at')
+    raw_id_fields = ('session', 'user', 'banned_by')
+    list_select_related = ('session', 'user', 'banned_by')
+
+
+@admin.register(LiveSessionModerator)
+class LiveSessionModeratorAdmin(ModelAdmin):
+    list_display = ('session', 'user', 'added_by', 'created_at')
+    raw_id_fields = ('session', 'user', 'added_by')
+    list_select_related = ('session', 'user', 'added_by')
+
+
+@admin.register(UserCategoryAffinity)
+class UserCategoryAffinityAdmin(ModelAdmin):
+    list_display = ('user', 'category', 'score', 'updated_at')
+    raw_id_fields = ('user', 'category')
+    list_select_related = ('user', 'category')
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(StoreBadge)
+class StoreBadgeAdmin(ModelAdmin):
+    list_display = ('store', 'kind', 'granted_by', 'granted_at', 'revoked_at')
+    list_filter = ('kind', ('revoked_at', admin.EmptyFieldListFilter))
+    search_fields = ('store__name', 'store__user__username')
+    raw_id_fields = ('store', 'granted_by', 'revoked_by')
+    list_select_related = ('store', 'granted_by')
+    readonly_fields = ('granted_at',)
+
+    def has_add_permission(self, request):
+        # Grant through the store actions so the caps apply.
+        return False
+
+
+class DeliveryRateResource(resources.ModelResource):
+    """Excel in / Excel out for the whole tariff: columns company, from,
+    to, size, fee. Lets the company hand you a sheet instead of typing
+    18×18 governorate pairs by hand."""
+    class Meta:
+        model = DeliveryRate
+        fields = ('id', 'company', 'from_governorate', 'to_governorate', 'package_size', 'fee', 'is_active')
+        import_id_fields = ('id',)
+
+
+@admin.register(DeliveryRate)
+class DeliveryRateAdmin(ImportExportModelAdmin, ModelAdmin):
+    resource_class = DeliveryRateResource
+    import_form_class = ImportForm
+    export_form_class = ExportForm
+    list_display = ('company', 'from_governorate', 'to_governorate', 'package_size', 'fee', 'is_active', 'updated_at')
+    list_filter = ('company', 'is_active', 'package_size', 'from_governorate', 'to_governorate')
+    list_editable = ('fee', 'is_active')
+    search_fields = ('company__name',)
+    raw_id_fields = ('company',)
+    list_select_related = ('company',)

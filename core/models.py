@@ -198,11 +198,81 @@ class UserStore(models.Model):
     def __str__(self):
         return f"{self.user.username}'s Store - {self.name}"
 
+    # Performance level (برونزي/فضّي/ذهبي/ماسي). Derived — recomputed by
+    # tasks.recompute_store_levels from confirmed sales, rating and
+    # followers (rules in services/store_badges.py); never edited by hand.
+    LEVEL_NONE, LEVEL_BRONZE, LEVEL_SILVER, LEVEL_GOLD, LEVEL_DIAMOND = '', 'bronze', 'silver', 'gold', 'diamond'
+    LEVEL_CHOICES = [
+        (LEVEL_NONE, 'بلا مستوى'), (LEVEL_BRONZE, 'برونزي'), (LEVEL_SILVER, 'فضّي'),
+        (LEVEL_GOLD, 'ذهبي'), (LEVEL_DIAMOND, 'ماسي'),
+    ]
+    level = models.CharField(max_length=10, choices=LEVEL_CHOICES, default='', blank=True, db_index=True)
+    level_updated_at = models.DateTimeField(null=True, blank=True)
+
     def update_rating(self):
         """Recalculate average rating from all store reviews"""
         avg = self.store_reviews.aggregate(models.Avg('score'))['score__avg']
         self.rating = Decimal(str(avg)) if avg else Decimal('0.00')
         self.save(update_fields=['rating'])
+
+    def badge_kinds(self):
+        """Every badge this store currently shows, granted and derived alike,
+        in display order. What the app renders next to the store name."""
+        from .services.store_badges import badges_for_store
+        return badges_for_store(self)
+
+
+class StoreBadge(models.Model):
+    """A badge the platform *gave* a store — as opposed to the performance
+    level, which the store earns and loses on its own (UserStore.level).
+
+    founder / pioneer / certified are admin-only and capped (the first 50
+    stores, the next 200, course graduates). `verified` is granted
+    automatically when the owner's identity and phone are verified, but is
+    still a row so support can see when and revoke it. Revoking never
+    deletes: the row keeps `revoked_at` so a re-grant is visibly a re-grant."""
+    KIND_FOUNDER, KIND_PIONEER, KIND_CERTIFIED, KIND_VERIFIED = 'founder', 'pioneer', 'certified', 'verified'
+    KIND_CHOICES = [
+        (KIND_FOUNDER, 'مؤسِّس'), (KIND_PIONEER, 'رائد'),
+        (KIND_CERTIFIED, 'بائع معتمد'), (KIND_VERIFIED, 'موثَّق'),
+    ]
+    ADMIN_ONLY = (KIND_FOUNDER, KIND_PIONEER, KIND_CERTIFIED)
+    # Founders are the first 50 stores, pioneers the next 200: caps, not
+    # first-come — the admin chooses who, the cap just cannot be exceeded.
+    CAPS = {KIND_FOUNDER: 50, KIND_PIONEER: 200}
+    # Lifetime platform-commission multiplier the badge promises. There is
+    # no platform commission charged yet; this is the single place the
+    # promise is recorded so the fee code, when it comes, reads it here.
+    COMMISSION_MULTIPLIER = {KIND_FOUNDER: Decimal('0'), KIND_PIONEER: Decimal('0.5')}
+
+    store = models.ForeignKey(UserStore, on_delete=models.CASCADE, related_name='badges')
+    kind = models.CharField(max_length=12, choices=KIND_CHOICES)
+    granted_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name='badges_granted',
+        help_text='فارغ = مُنح تلقائياً')
+    note = models.CharField(max_length=200, blank=True)
+    granted_at = models.DateTimeField(auto_now_add=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+
+    class Meta:
+        verbose_name = 'شارة متجر'
+        verbose_name_plural = 'شارات المتاجر'
+        ordering = ['-granted_at']
+        constraints = [
+            # One live badge of a kind per store; history rows (revoked) may repeat.
+            models.UniqueConstraint(
+                fields=['store', 'kind'], condition=models.Q(revoked_at__isnull=True),
+                name='one_active_badge_per_kind'),
+        ]
+
+    def __str__(self):
+        return '%s — %s' % (self.store.name, self.get_kind_display())
+
+    @property
+    def is_active(self):
+        return self.revoked_at is None
 
 
 class Category(models.Model):
@@ -221,6 +291,15 @@ class Category(models.Model):
     )
     order = models.IntegerField(default=0)
     is_active = models.BooleanField(default=True)
+    # Platform commission taken from the SELLER on every released sale in
+    # this category, as a percentage of the item price. Blank = inherit
+    # from the parent category, then from settings.PLATFORM_COMMISSION_PERCENT.
+    # Read through effective_commission_percent(); never this field directly.
+    commission_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text='نسبة عمولة المنصّة من البائع (%)؛ فارغ = ترث من الفئة الأم أو الافتراضي',
+    )
 
     class Meta:
         verbose_name = 'تصنيف'
@@ -229,6 +308,17 @@ class Category(models.Model):
 
     def __str__(self):
         return self.name
+
+    def effective_commission_percent(self):
+        """This category's rate, or the nearest ancestor's, or the platform
+        default. Walks up at most the tree's depth (a few levels)."""
+        from django.conf import settings
+        node, seen = self, 0
+        while node is not None and seen < 10:
+            if node.commission_percent is not None:
+                return node.commission_percent
+            node, seen = node.parent, seen + 1
+        return Decimal(str(getattr(settings, 'PLATFORM_COMMISSION_PERCENT', '0')))
 
 
 class UserCategoryAffinity(models.Model):
@@ -314,7 +404,20 @@ class Item(models.Model):
     description = models.TextField()
     category = models.ForeignKey(Category, on_delete=models.PROTECT)
     condition = models.CharField(max_length=20, choices=CONDITION_CHOICES)
+    # Kept as the denormalised TOTAL across variants. Stock actually lives on
+    # ItemVariant rows; every read site that only wants "how many are left"
+    # keeps working unchanged, while every write goes through
+    # ItemVariant.take_stock / return_stock, which recompute this.
     quantity = models.PositiveIntegerField(default=1, help_text="Number of items available")
+
+    # The axes a buyer picks along, e.g.
+    #   [{"name": "اللون", "values": ["أحمر", "أزرق"]},
+    #    {"name": "المقاس", "values": ["M", "L"]}]
+    # Empty for a plain item. JSON rather than tables because these are only
+    # ever rendered inside one product page — nothing queries "every red item
+    # in the marketplace" — and a nested table trio would buy that query at
+    # the price of three joins on every product read.
+    options = models.JSONField(default=list, blank=True)
     package_size = models.CharField(
         max_length=10, choices=PACKAGE_SIZE_CHOICES, default='medium',
         help_text='الحجم التقريبي للطرد — يُستخدم لتحديد عدد المنتجات القابلة لدمجها بشحنة توصيل واحدة'
@@ -358,6 +461,26 @@ class Item(models.Model):
             models.Index(fields=['category', 'status']),
             models.Index(fields=['status', 'condition']),
         ]
+
+    @property
+    def default_variant(self):
+        """The variant a plain item carries. Also the fallback for any legacy
+        reservation created before variants existed (variant FK is null)."""
+        return self.variants.filter(is_active=True).order_by('id').first()
+
+    def sync_stock_from_variants(self):
+        """Recomputes the denormalised total and the derived status.
+
+        Status follows stock the same way the old per-item code did: sold out
+        when nothing is left, otherwise active — except a draft stays a draft,
+        the seller hasn't published it yet regardless of what's in stock."""
+        from django.db.models import Sum
+        total = self.variants.filter(is_active=True).aggregate(
+            t=Sum('quantity'))['t'] or 0
+        self.quantity = total
+        if self.status != 'draft':
+            self.status = 'sold' if total == 0 else 'active'
+        self.save(update_fields=['quantity', 'status'])
 
     def __str__(self):
         return f"{self.title} - {self.owner.username}"
@@ -403,6 +526,89 @@ class ItemLocationHistory(models.Model):
         return f"{self.item.title} moved to {self.location} on {self.moved_at}"
 
 
+class ItemVariant(models.Model):
+    """One sellable combination of an item's options — what a buyer actually
+    reserves, what stock is counted on, and what a wholesale transfer moves.
+
+    Every item has at least one. A plain item with no options carries a single
+    variant with empty `attributes` holding all of its stock; the data
+    migration creates it for every pre-existing row. That invariant is what
+    lets reservations, transfers and delivery all speak to a variant without
+    a "but what if the item has none" branch anywhere.
+
+    `price` is an override: null means "the item's listing price". `image` is
+    likewise optional and falls back to the item's gallery. A variant is
+    deactivated rather than deleted once anything references it, so a
+    reservation for "red / L" still knows what it was for after the seller
+    drops red from the range.
+    """
+    item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name='variants')
+    # {"اللون": "أحمر", "المقاس": "L"} — keys are the names in Item.options.
+    attributes = models.JSONField(default=dict, blank=True)
+    sku = models.CharField(max_length=64, blank=True)
+    quantity = models.PositiveIntegerField(default=0)
+    price = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True,
+        help_text='سعر خاص بهذا المتغيّر؛ فارغ = سعر المنتج الأساسي'
+    )
+    # What the merchant paid per unit. Optional and private to the seller:
+    # the dashboard uses it for gross profit, the buyer never sees it.
+    cost_price = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True,
+        help_text='كلفة الوحدة على التاجر (اختياري، لا تظهر للمشتري)'
+    )
+    image = models.ForeignKey(
+        'ItemImage', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='variants'
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['id']
+        verbose_name = 'متغيّر منتج'
+        verbose_name_plural = 'متغيّرات المنتجات'
+
+    def __str__(self):
+        return "%s [%s]" % (self.item_id, self.label or 'default')
+
+    @property
+    def label(self):
+        """'أحمر / L' — for receipts, admin and notifications.
+
+        Ordered by the item's option declaration, not the JSON's key order:
+        MySQL normalises object keys (shorter first), which would turn
+        اللون / المقاس into المقاس / اللون on the way back out."""
+        attrs = self.attributes or {}
+        names = [str(o.get('name')) for o in (self.item.options or [])]
+        ordered = [attrs[n] for n in names if n in attrs]
+        rest = [v for k, v in attrs.items() if k not in names]
+        return " / ".join(str(v) for v in ordered + rest)
+
+    @property
+    def effective_price(self):
+        if self.price is not None:
+            return self.price
+        listing = getattr(self.item, 'fixed_listing', None)
+        return listing.price if listing else None
+
+    # -- the only two ways stock changes ---------------------------------
+    def take_stock(self, qty):
+        """Removes [qty] units. Raises ValueError when there aren't enough,
+        so a caller can never overdraw by racing another buyer — call this on
+        a `select_for_update()`-locked row inside the caller's transaction."""
+        if qty > self.quantity:
+            raise ValueError("Insufficient stock. Only %d available" % self.quantity)
+        self.quantity -= qty
+        self.save(update_fields=['quantity'])
+        self.item.sync_stock_from_variants()
+
+    def return_stock(self, qty):
+        self.quantity += qty
+        self.save(update_fields=['quantity'])
+        self.item.sync_stock_from_variants()
+
+
 class ItemImage(models.Model):
     """Item images"""
     item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name='images')
@@ -414,6 +620,22 @@ class ItemImage(models.Model):
         ordering = ['order']
         verbose_name = 'صورة منتج'
         verbose_name_plural = 'صور المنتجات'
+
+
+class Favorite(models.Model):
+    """A buyer marking an item as a favorite/wishlist entry — mirrors ReelLike's pattern."""
+    item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name='favorited_by')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='favorites')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ['item', 'user']
+        ordering = ['-created_at']
+        verbose_name = 'مفضلة'
+        verbose_name_plural = 'المفضلات'
+
+    def __str__(self):
+        return f"{self.user.username} favorited item #{self.item_id}"
 
 
 class FixedPriceListing(models.Model):
@@ -575,6 +797,12 @@ class ItemTransfer(models.Model):
         default=1, validators=[MinValueValidator(1)],
         help_text="Quantity of the item being transferred to the reseller's ownership"
     )
+    # Which combination is being bought wholesale. Same PROTECT/nullable
+    # reasoning as Reservation.variant.
+    variant = models.ForeignKey(
+        'ItemVariant', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='transfers'
+    )
     wholesale_price_per_unit = models.DecimalField(
         max_digits=12, decimal_places=2, null=True, blank=True,
         help_text="Snapshot of the item's per-unit price at approval time"
@@ -650,16 +878,22 @@ class ItemTransfer(models.Model):
         fixed_listing = getattr(item, 'fixed_listing', None)
         if not fixed_listing or not fixed_listing.price or fixed_listing.price <= 0:
             raise ValueError("Item has no fixed price listing")
-        if self.quantity > item.quantity:
-            raise ValueError(f"Insufficient stock. Only {item.quantity} available")
 
-        wholesale_price_per_unit = fixed_listing.price
+        # Stock comes off one specific combination. A transfer that named no
+        # variant (legacy, or a plain item) resolves to the default one.
+        variant = self.variant or item.default_variant
+        if variant is None:
+            raise ValueError("Item has no sellable variant")
+        variant = ItemVariant.objects.select_for_update().get(pk=variant.pk)
+        if self.quantity > variant.quantity:
+            raise ValueError(f"Insufficient stock. Only {variant.quantity} available")
+
+        # A variant can carry its own price; wholesale is struck on whatever
+        # the buyer would actually pay for that combination.
+        wholesale_price_per_unit = variant.price if variant.price is not None else fixed_listing.price
         total_price = wholesale_price_per_unit * self.quantity
 
-        item.quantity -= self.quantity
-        if item.quantity == 0:
-            item.status = 'sold'
-        item.save(update_fields=['quantity', 'status'])
+        variant.take_stock(self.quantity)
 
         debit_balance(self.to_user, total_price, 'purchase', item=item, transfer=self)
         credit_earnings(self.from_user, total_price, 'payout', item=item, transfer=self)
@@ -678,6 +912,15 @@ class ItemTransfer(models.Model):
         )
         for img in item.images.all():
             ItemImage.objects.create(item=new_item, image=img.image, order=img.order)
+        # The reseller's copy is a single-combination item: they bought "red /
+        # L", so that is all their listing offers. The post_save signal already
+        # created its one variant holding `quantity`; label it with the
+        # attributes they were sold rather than adding a second row, which
+        # would double the stock.
+        new_variant = new_item.default_variant
+        new_variant.attributes = dict(variant.attributes or {})
+        new_variant.sku = variant.sku
+        new_variant.save(update_fields=['attributes', 'sku'])
 
         now = timezone.now()
         self.wholesale_price_per_unit = wholesale_price_per_unit
@@ -781,6 +1024,14 @@ class Reservation(models.Model):
     ]
 
     item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name='reservations')
+    # Which combination was reserved. PROTECT rather than SET_NULL: a variant
+    # with reservations against it is deactivated, never deleted, so the
+    # receipt for "red / L" keeps saying red / L. Nullable only for rows that
+    # predate variants — see `stock_variant`.
+    variant = models.ForeignKey(
+        'ItemVariant', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='reservations'
+    )
     buyer = models.ForeignKey(User, on_delete=models.CASCADE, related_name='reservations')
 
     quantity = models.PositiveIntegerField(default=1)
@@ -845,6 +1096,15 @@ class Reservation(models.Model):
     )
     commission_paid = models.BooleanField(default=False)
     commission_paid_at = models.DateTimeField(null=True, blank=True)
+
+    # Platform commission, frozen at creation like the price: the category
+    # rate (after the store's badge multiplier — founders pay 0, pioneers
+    # half) applied to total_price. Taken from the SELLER's share when the
+    # payment is released — never before, the money is in escrow until then.
+    platform_commission_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal('0.00'))
+    platform_commission_amount = models.DecimalField(
+        max_digits=10, decimal_places=2, default=Decimal('0.00'))
 
     # NEW: Transfer-related fields
     is_transfer_resale = models.BooleanField(
@@ -1022,6 +1282,13 @@ class Reservation(models.Model):
     class Meta:
         verbose_name = 'حجز'
         verbose_name_plural = 'الحجوزات'
+
+    @property
+    def stock_variant(self):
+        """The variant this reservation's stock lives on. Legacy rows carry
+        no variant and resolve to the item's default one — the same row the
+        data migration moved their stock into."""
+        return self.variant or self.item.default_variant
 
     def __str__(self):
         return f"Reservation #{self.id} - {self.item.title} by {self.buyer.username}"
@@ -1283,6 +1550,47 @@ class DeliveryBatch(models.Model):
         return f"Batch #{self.id} — {self.buyer.username} ({self.delivery_orders.count()} items)"
 
 
+class DeliveryRate(models.Model):
+    """One delivery price for a company: from a governorate, to a
+    governorate, for a package size. Any of the three may be blank as a
+    wildcard, and the most specific matching row wins — see
+    delivery_utils.compute_delivery_fee for the fallback order. The
+    company's two flat fees remain the last resort, so a company with no
+    rate rows behaves exactly as before."""
+    company = models.ForeignKey(DeliveryCompany, on_delete=models.CASCADE, related_name='rates')
+    from_governorate = models.CharField(
+        max_length=100, choices=IRAQ_GOVERNORATE_CHOICES, blank=True,
+        help_text='فارغ = أي محافظة')
+    to_governorate = models.CharField(
+        max_length=100, choices=IRAQ_GOVERNORATE_CHOICES, blank=True,
+        help_text='فارغ = أي محافظة')
+    package_size = models.CharField(
+        max_length=10, choices=PACKAGE_SIZE_CHOICES, blank=True,
+        help_text='فارغ = أي حجم')
+    fee = models.DecimalField(max_digits=10, decimal_places=2,
+                              validators=[MinValueValidator(0)])
+    is_active = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'تعرفة توصيل'
+        verbose_name_plural = 'تعرفة التوصيل'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['company', 'from_governorate', 'to_governorate', 'package_size'],
+                name='one_rate_per_route_and_size'),
+        ]
+
+    def __str__(self):
+        return '%s → %s (%s): %s' % (self.from_governorate or '*', self.to_governorate or '*',
+                                     self.package_size or '*', self.fee)
+
+    @property
+    def specificity(self):
+        return int(bool(self.from_governorate)) + int(bool(self.to_governorate)) \
+            + int(bool(self.package_size))
+
+
 class DeliveryOrder(models.Model):
     """
     A single leg handed off to the delivery company: either the outbound
@@ -1341,6 +1649,10 @@ class DeliveryOrder(models.Model):
     from_address = models.TextField()
     from_lat = models.DecimalField(max_digits=11, decimal_places=6, null=True, blank=True)
     from_lng = models.DecimalField(max_digits=11, decimal_places=6, null=True, blank=True)
+    # Snapshot of the pickup Location's governorate at creation time — lets
+    # the delivery company filter/sort its queue by where each order starts
+    # without parsing from_address. Blank when there was no Location on file.
+    from_governorate = models.CharField(max_length=100, choices=IRAQ_GOVERNORATE_CHOICES, blank=True)
 
     to_name = models.CharField(max_length=200)
     to_phone = models.CharField(max_length=20)
@@ -1938,11 +2250,12 @@ class LiveSessionBan(models.Model):
 class Reel(models.Model):
     """Short vertical video posted by a store (ريلز) — TikTok/Instagram-Reels
     style shoppable video. Video/thumbnail bytes never touch Django: they're
-    uploaded directly to S3 via presigned URLs (core/aws_utils.py,
-    ReelViewSet.request_upload_url/finalize) and served for playback through
-    a BunnyCDN Pull Zone fronting that bucket. video_key/thumbnail_key store
-    only the S3 object key (never a full URL) so switching the CDN domain
-    later needs no migration — see video_url/thumbnail_url below."""
+    uploaded directly to the Cloudflare R2 bucket via presigned URLs
+    (core/aws_utils.py, ReelViewSet.request_upload_url/finalize) and served
+    for playback from that bucket's custom domain on Cloudflare's CDN.
+    video_key/thumbnail_key store only the object key (never a full URL) so
+    switching storage/CDN needs no migration — the S3 -> R2 move was exactly
+    that: a new REELS_PUBLIC_BASE_URL, same keys. See video_url/thumbnail_url."""
     STATUS_CHOICES = [
         ('pending_upload', 'Pending Upload'),
         ('published', 'Published'),
@@ -2361,3 +2674,94 @@ class LegalAcceptance(models.Model):
 
     def __str__(self):
         return f"{self.user_id} ✓ {self.document}"
+
+class PaymentIntent(models.Model):
+    """One attempt to take money from a customer through a payment gateway.
+
+    Provider-agnostic on purpose: `provider` names which gateway handled it and
+    the two `provider_*` columns hold whatever references that gateway issued.
+    Adding a second gateway adds rows here, not columns.
+
+    `purpose` is what the money is for. Only wallet top-up exists today —
+    reservations are already paid out of the wallet balance — but paying for an
+    order directly is the obvious next one, so the column exists rather than
+    being retrofitted later.
+
+    `applied_at` is the idempotency guard. A successful payment can be reported
+    twice (webhook plus the app polling on return), and crediting a wallet twice
+    is the worst bug this feature could have. Money moves only in the
+    transition to `applied_at IS NOT NULL`, under a row lock.
+    """
+
+    STATE_PENDING = 'pending'
+    STATE_SUCCEEDED = 'succeeded'
+    STATE_FAILED = 'failed'
+    STATE_CANCELLED = 'cancelled'
+    STATE_CHOICES = [
+        (STATE_PENDING, 'Pending'),
+        (STATE_SUCCEEDED, 'Succeeded'),
+        (STATE_FAILED, 'Failed'),
+        (STATE_CANCELLED, 'Cancelled'),
+    ]
+
+    PURPOSE_WALLET_TOPUP = 'wallet_topup'
+    PURPOSE_CHOICES = [
+        (PURPOSE_WALLET_TOPUP, 'شحن المحفظة'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name='payment_intents'
+    )
+    provider = models.CharField(max_length=32, db_index=True)
+    purpose = models.CharField(
+        max_length=32, choices=PURPOSE_CHOICES, default=PURPOSE_WALLET_TOPUP
+    )
+
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=8, default='IQD')
+    description = models.CharField(max_length=255, blank=True)
+
+    # Our own id for this payment, sent to the gateway as its order reference
+    # and the only thing we trust out of a webhook body.
+    reference = models.CharField(max_length=64, unique=True, db_index=True)
+
+    state = models.CharField(
+        max_length=16, choices=STATE_CHOICES, default=STATE_PENDING, db_index=True
+    )
+    provider_payment_id = models.CharField(max_length=128, blank=True, db_index=True)
+    provider_token = models.CharField(max_length=255, blank=True)
+    checkout_url = models.URLField(max_length=500, blank=True)
+
+    # Last authenticated read from the gateway. Kept for support and disputes;
+    # never the basis of a decision on its own.
+    last_provider_response = models.JSONField(null=True, blank=True)
+    failure_reason = models.CharField(max_length=255, blank=True)
+
+    deposit = models.OneToOneField(
+        'DepositRequest', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='payment_intent'
+    )
+    applied_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'عملية دفع'
+        verbose_name_plural = 'عمليات الدفع'
+        indexes = [
+            models.Index(fields=['user', '-created_at']),
+            models.Index(fields=['provider', 'state']),
+        ]
+
+    def __str__(self):
+        return "Payment %s %s %s via %s [%s]" % (
+            self.reference, self.amount, self.currency, self.provider, self.state
+        )
+
+    @property
+    def is_final(self):
+        return self.state in (self.STATE_SUCCEEDED, self.STATE_FAILED,
+                              self.STATE_CANCELLED)

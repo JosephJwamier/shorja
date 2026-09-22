@@ -19,12 +19,44 @@ from decimal import Decimal
 
 from django.utils import timezone
 
-from .models import Location, Reservation
+from .models import Bid, Location, Reservation
 
 # How long a winner has to actively choose full-payment vs deposit+delivery
 # before tasks.auto_complete_unclaimed_auction_reservations resolves it for
 # them (deposit already paid stands, remainder collected in cash).
 WINNER_RESPONSE_WINDOW_HOURS = 48
+
+
+def refund_losing_deposits(auction, winning_bid):
+    """Gives every losing *bidder* their one bid deposit back.
+
+    The deposit is charged once per bidder on their first bid (see
+    AuctionViewSet.place_bid) but every later bid row also carries
+    deposit_paid=True. Refunding per row therefore paid a bidder once per
+    bid — and paid the winner for each of their outbid rows too. So this
+    works per bidder: one credit each, then every row of theirs is marked
+    refunded so no later sweep can pay them again. The winner's rows are
+    marked without a credit; their deposit stays committed to the sale.
+
+    Must be called inside transaction.atomic(), with the auction row locked
+    by the caller. Returns the number of bidders refunded.
+    """
+    from django.contrib.auth import get_user_model
+    from .wallet_utils import credit_earnings
+
+    deposit = auction.bid_deposit or Decimal('0')
+    bidder_ids = set(
+        auction.bids.filter(deposit_paid=True, deposit_refunded=False)
+        .values_list('bidder_id', flat=True)
+    )
+    refunded = 0
+    for bidder in get_user_model().objects.filter(id__in=bidder_ids):
+        if bidder.id != winning_bid.bidder_id and deposit > 0:
+            credit_earnings(user=bidder, amount=deposit, transaction_type='refund',
+                            auction=auction)
+            refunded += 1
+        Bid.objects.filter(auction=auction, bidder=bidder).update(deposit_refunded=True)
+    return refunded
 
 
 def create_winner_reservation(auction, winning_bid):
@@ -46,6 +78,8 @@ def create_winner_reservation(auction, winning_bid):
         .first()
     )
 
+    from .services.commission import commission_for
+    platform_percent, platform_amount = commission_for(auction.item, winning_bid.amount)
     reservation = Reservation.objects.create(
         item=auction.item,
         buyer=winner,
@@ -55,6 +89,8 @@ def create_winner_reservation(auction, winning_bid):
         expires_at=timezone.now() + timedelta(hours=WINNER_RESPONSE_WINDOW_HOURS),
         delivery_location=delivery_location,
         auction=auction,
+        platform_commission_percent=platform_percent,
+        platform_commission_amount=platform_amount,
     )
 
     auction.winner = winner

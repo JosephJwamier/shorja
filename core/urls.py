@@ -61,8 +61,24 @@ router.register(r'reels', ReelViewSet, basename='reel')
 router.register(r'delivery-orders', DeliveryOrderViewSet, basename='delivery-order')
 router.register(r'legal/documents', LegalDocumentViewSet, basename='legal-document')
 
+from . import payment_views
+
 urlpatterns = [
 
     path('', include(router.urls)),
+
+    # Payments. Not a ViewSet: the webhook and the browser-return endpoint are
+    # unauthenticated and have nothing to do with a resource's CRUD surface,
+    # and routing them by provider name keeps adding a gateway to a settings
+    # entry rather than a new URL block.
+    path('payments/methods/', payment_views.payment_methods, name='payment-methods'),
+    path('payments/create/', payment_views.create_payment, name='payment-create'),
+    path('payments/return/', payment_views.payment_return, name='payment-return'),
+    path('payments/sync-pending/', payment_views.sync_pending_payments,
+         name='payment-sync-pending'),
+    path('payments/webhook/<str:provider_name>/',
+         payment_views.PaymentWebhookView.as_view(), name='payment-webhook'),
+    path('payments/<str:reference>/', payment_views.payment_detail,
+         name='payment-detail'),
 
 ]

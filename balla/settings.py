@@ -59,6 +59,48 @@ if not DEBUG:
             'ALLOWED_HOSTS must not contain "*" when DEBUG=False — set it to your real domain(s).'
         )
 
+
+def _check_reels_storage_config():
+    """Fail-closed check for the reel storage settings below (R2 endpoint,
+    bucket, public base URL). Called once at import time when DEBUG=False,
+    after those settings are defined — see the call site near
+    REELS_PUBLIC_BASE_URL. Raise ImproperlyConfigured with a message that
+    names the offending variable; return None when everything is sane.
+
+    Settings-only — no network call at boot. An empty S3_ENDPOINT_URL is
+    deliberately allowed: it means plain AWS S3, which is a valid (if no
+    longer preferred) backend, not a half-migrated one."""
+    from urllib.parse import urlparse
+
+    if not AWS_STORAGE_BUCKET_NAME:
+        raise ImproperlyConfigured(
+            'AWS_STORAGE_BUCKET_NAME must be set when DEBUG=False — reels have nowhere to upload.'
+        )
+    if not REELS_PUBLIC_BASE_URL:
+        raise ImproperlyConfigured(
+            'REELS_PUBLIC_BASE_URL must be set when DEBUG=False — every reel would be served '
+            'with an empty video_url. Connect a custom domain to the R2 bucket and put it here.'
+        )
+    public = urlparse(REELS_PUBLIC_BASE_URL)
+    if public.scheme != 'https':
+        # Android 9+ and iOS refuse cleartext media, so an http:// base
+        # fails on the device, not in the server logs.
+        raise ImproperlyConfigured(
+            f'REELS_PUBLIC_BASE_URL must start with https:// (got {REELS_PUBLIC_BASE_URL!r}).'
+        )
+    if public.hostname and public.hostname.endswith('.r2.dev'):
+        # The r2.dev subdomain is rate-limited and bypasses the cache —
+        # fine for a manual check, not for serving video to users.
+        raise ImproperlyConfigured(
+            'REELS_PUBLIC_BASE_URL points at an r2.dev subdomain — connect a custom domain '
+            'to the bucket (R2 > Settings > Custom Domains) and use that instead.'
+        )
+    if S3_ENDPOINT_URL and urlparse(S3_ENDPOINT_URL).scheme != 'https':
+        raise ImproperlyConfigured(
+            f'S3_ENDPOINT_URL must be an https:// URL (got {S3_ENDPOINT_URL!r}).'
+        )
+    return None
+
 # Admin panel is served at a non-default path so it isn't the first thing a
 # scanner tries. Must end with '/'. Override per environment via .env.
 ADMIN_URL_PATH = os.environ.get('ADMIN_URL_PATH', 'admin/')
@@ -118,6 +160,7 @@ INSTALLED_APPS = [
 
     # Your apps
     'core',
+    'ledger',
 
 ]
 
@@ -238,11 +281,11 @@ CELERY_BEAT_SCHEDULE = {
     # Auction Management
     'activate-upcoming-auctions': {
         'task': 'core.tasks.activate_upcoming_auctions',
-        'schedule': crontab(minute='*/1'),  # Every 5 minutes
+        'schedule': crontab(minute='*/1'),  # Every minute
     },
     'process-ended-auctions': {
         'task': 'core.tasks.process_ended_auctions',
-        'schedule': crontab(minute='*/1'),  # Every 5 minutes
+        'schedule': crontab(minute='*/1'),  # Every minute
     },
     'auto-complete-unclaimed-auction-reservations': {
         'task': 'core.tasks.auto_complete_unclaimed_auction_reservations',
@@ -308,7 +351,9 @@ USE_TZ = True
 # Static files
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
-STATICFILES_DIRS = [BASE_DIR / 'static']
+# Project-level static dir is optional (the admin theme ships its own);
+# listing a missing path is a permanent staticfiles.W004 on every command.
+STATICFILES_DIRS = [d for d in [BASE_DIR / 'static'] if d.exists()]
 
 # Media files
 MEDIA_URL = 'media/'
@@ -335,20 +380,34 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 20,
+    # The browsable HTML API is a dev convenience only: it is the surface
+    # behind DRF's CVE-2024-21520 (XSS) and it leaks endpoint shapes, so
+    # production answers JSON and nothing else.
     'DEFAULT_RENDERER_CLASSES': [
         'rest_framework.renderers.JSONRenderer',
-        'rest_framework.renderers.BrowsableAPIRenderer',
-    ],
+    ] + (['rest_framework.renderers.BrowsableAPIRenderer'] if DEBUG else []),
+    # No global throttle: the app is IsAuthenticated by default and Iraqi
+    # carriers CGNAT thousands of users behind one IP, so a blanket per-IP
+    # limit would hit real users first. Only the auth endpoints are
+    # throttled (core/throttling.py, core/auth_views.py) — per IP *and* per
+    # target account, since the second is what actually stops credential
+    # stuffing and reset-code guessing when the first must stay generous.
+    'DEFAULT_THROTTLE_RATES': {
+        'auth_login': '60/min',           # per IP: login/, token/, social-login/
+        'auth_login_account': '5/min',    # per submitted username
+        'auth_register': '30/hour',       # per IP
+        'auth_reset': '30/hour',          # per IP: reset-password[-confirm]/
+        'auth_reset_email': '5/hour',     # per email — a 6-digit code needs this
+    },
 }
 
 # JWT Settings
-# NOTE: 2 hours is an interim value, down from 60 (!) — a leaked access token
-# can no longer be replayed for 2.5 days. The Flutter app does not yet call
-# the refresh endpoint on 401, so dropping this further (e.g. to the more
-# typical 15-60 min) should happen together with wiring up that refresh flow,
-# or users will start seeing "session expired" mid-session.
+# 30 minutes: the app's ApiClient silently refreshes on 401 (one in-flight
+# refresh, then the original request is replayed), so a short access token
+# costs users nothing and bounds how long a leaked one is replayable.
+# Refresh tokens rotate and the old one is blacklisted on every use.
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(hours=2),
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
@@ -545,22 +604,57 @@ AGORA_APP_ID = os.environ.get('AGORA_APP_ID', '')
 AGORA_APP_CERTIFICATE = os.environ.get('AGORA_APP_CERTIFICATE', '')
 AGORA_TOKEN_TTL_SECONDS = int(os.environ.get('AGORA_TOKEN_TTL_SECONDS', '3600'))
 
+# =============================================================================
+# Live media provider. 'agora' is what runs today. The SRS stack for the
+# Hetzner box is prepared under infra/live/ and core/services/live_media/;
+# flipping to it is a settings change plus the steps in
+# core/services/live_media/__init__.py — nothing below is read while 'agora'.
+# =============================================================================
+LIVE_MEDIA_PROVIDER = os.environ.get('LIVE_MEDIA_PROVIDER', 'agora')
+SRS_PUBLIC_BASE_URL = os.environ.get('SRS_PUBLIC_BASE_URL', '')      # https://live.example.com
+SRS_APP = os.environ.get('SRS_APP', 'live')
+SRS_HOOK_SECRET = os.environ.get('SRS_HOOK_SECRET', '')              # same value as infra/live/.env
+LIVE_TOKEN_SECRET = os.environ.get('LIVE_TOKEN_SECRET', '')          # signs publish/play tokens
+LIVE_TOKEN_TTL_SECONDS = int(os.environ.get('LIVE_TOKEN_TTL_SECONDS', '3600'))
+TURN_HOST = os.environ.get('TURN_HOST', '')                          # live.example.com
+TURN_PORT = int(os.environ.get('TURN_PORT', '443'))
+TURN_SECRET = os.environ.get('TURN_SECRET', '')                      # same value as infra/live/.env
+
 # Live Shopping
 LIVE_SESSION_MAX_DURATION_HOURS = int(os.environ.get('LIVE_SESSION_MAX_DURATION_HOURS', '6'))
 
-# AWS S3 + BunnyCDN (Reels — short vertical video)
+# Reels (short vertical video) — Cloudflare R2 object storage.
 # Video/thumbnail bytes never pass through Django: the app PUTs directly to
-# S3 via presigned URLs (core/aws_utils.py), and playback is served through
-# a BunnyCDN Pull Zone whose origin is the S3 bucket. Django only makes
-# control-plane boto3 calls (presign/head_object/copy_object/delete_object).
+# the bucket via presigned URLs (core/aws_utils.py), and playback is served
+# from the bucket's custom domain on Cloudflare's CDN — zero egress fees,
+# which is what made R2 win over S3 + BunnyCDN for an all-Iraq audience
+# (BunnyCDN bills the Middle East at $0.06/GB, CloudFront at $0.11/GB).
+# Django only makes control-plane boto3 calls (presign/head_object/
+# copy_object/delete_object).
+#
+# R2 speaks the S3 API, so the credential names stay boto3's own. Leaving
+# S3_ENDPOINT_URL empty falls back to plain AWS S3 (region-based endpoint).
 AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', '')
 AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY', '')
-AWS_S3_REGION_NAME = os.environ.get('AWS_S3_REGION_NAME', '')
+# R2 ignores the region but boto3 insists on one; 'auto' is what Cloudflare documents.
+AWS_S3_REGION_NAME = os.environ.get('AWS_S3_REGION_NAME', 'auto')
 AWS_STORAGE_BUCKET_NAME = os.environ.get('AWS_STORAGE_BUCKET_NAME', '')
-BUNNYCDN_PULL_ZONE_BASE_URL = os.environ.get('BUNNYCDN_PULL_ZONE_BASE_URL', '')
+# https://<ACCOUNT_ID>.r2.cloudflarestorage.com — from R2 > Manage API Tokens.
+S3_ENDPOINT_URL = os.environ.get('S3_ENDPOINT_URL', '')
+# Public playback base, no trailing slash: the R2 bucket's custom domain
+# (e.g. https://media.example.com). Never the r2.dev subdomain in
+# production — it is rate-limited and bypasses the cache. Falls back to the
+# old BunnyCDN variable so a not-yet-migrated .env keeps serving.
+REELS_PUBLIC_BASE_URL = (
+    os.environ.get('REELS_PUBLIC_BASE_URL')
+    or os.environ.get('BUNNYCDN_PULL_ZONE_BASE_URL', '')
+)
 REEL_PRESIGNED_URL_TTL_SECONDS = int(os.environ.get('REEL_PRESIGNED_URL_TTL_SECONDS', '900'))
 REEL_MAX_VIDEO_SIZE_BYTES = int(os.environ.get('REEL_MAX_VIDEO_SIZE_BYTES', str(200 * 1024 * 1024)))  # 200 MB
 REEL_PENDING_UPLOAD_CLEANUP_HOURS = int(os.environ.get('REEL_PENDING_UPLOAD_CLEANUP_HOURS', '2'))
+
+if not DEBUG:
+    _check_reels_storage_config()
 
 # Firebase Configuration
 # Download your service account key from:
@@ -644,8 +738,12 @@ LOGGING = {
     'handlers': {
         'file': {
             'level': 'INFO',
-            'class': 'logging.FileHandler',
+            # 10 MB x 5 — a plain FileHandler had grown past 100k lines in
+            # dev alone; in production it would eventually fill the disk.
+            'class': 'logging.handlers.RotatingFileHandler',
             'filename': BASE_DIR / 'logs' / 'django.log',
+            'maxBytes': 10 * 1024 * 1024,
+            'backupCount': 5,
             'formatter': 'verbose',
         },
         'console': {
@@ -671,3 +769,69 @@ LOGGING = {
         },
     },
 }
+
+# =============================================================================
+# Error monitoring (Sentry). Silent no-op until SENTRY_DSN is set, so dev
+# and tests never ship events. Django + Celery integrations cover both the
+# request path and the beat/worker tasks (auctions, payouts, cleanups),
+# which is where a silent failure would otherwise cost real money.
+# =============================================================================
+SENTRY_DSN = os.environ.get('SENTRY_DSN', '')
+if SENTRY_DSN:
+    import sentry_sdk
+    from sentry_sdk.integrations.celery import CeleryIntegration
+    from sentry_sdk.integrations.django import DjangoIntegration
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[DjangoIntegration(), CeleryIntegration()],
+        environment=os.environ.get('SENTRY_ENVIRONMENT', 'development' if DEBUG else 'production'),
+        release=os.environ.get('SENTRY_RELEASE', ''),
+        # Performance tracing is opt-in — errors are the point at launch.
+        traces_sample_rate=float(os.environ.get('SENTRY_TRACES_SAMPLE_RATE', '0')),
+        # Never attach usernames/emails/IPs to events by default.
+        send_default_pii=False,
+    )
+
+# =============================================================================
+# بوابات الدفع
+# -----------------------------------------------------------------------------
+# كل مزوّد مدخل واحد هنا؛ إضافة بوابة جديدة = صنف في core/services/payments/
+# وسطر في هذا القاموس. المزوّد بلا بيانات اعتماد لا يظهر للمستخدم أصلاً
+# (enabled_providers)، فلا تُعرض طريقة دفع تفشل عند الضغط عليها.
+#
+# الأسرار من البيئة فقط. القيم الافتراضية هنا هي بيانات الاختبار المنشورة
+# علناً في وثائق القاصة، وتصلح للـ sandbox لا غير.
+# =============================================================================
+PAYMENT_PROVIDERS = {
+    'alqaseh': {
+        'BASE_URL': os.environ.get('ALQASEH_BASE_URL', 'https://api-test.alqaseh.com/v1'),
+        'CHECKOUT_BASE_URL': os.environ.get('ALQASEH_CHECKOUT_BASE_URL',
+                                            'https://pay-test.alqaseh.com'),
+        'CLIENT_ID': os.environ.get('ALQASEH_CLIENT_ID', ''),
+        'CLIENT_SECRET': os.environ.get('ALQASEH_CLIENT_SECRET', ''),
+        'TIMEOUT': int(os.environ.get('ALQASEH_TIMEOUT', '30')),
+        'TOKEN_EXPIRY_HOURS': int(os.environ.get('ALQASEH_TOKEN_EXPIRY_HOURS', '2')),
+    },
+}
+
+# مخطّط الرابط العميق الذي يعيد المتصفّح إلى التطبيق بعد الدفع.
+APP_DEEP_LINK_SCHEME = os.environ.get('APP_DEEP_LINK_SCHEME', 'balla')
+
+# =============================================================================
+# Platform commission (taken from the seller at payment release).
+# Per-category rates live on Category.commission_percent; this is the
+# fallback for categories that set none. 0 = no commission until you decide.
+# =============================================================================
+PLATFORM_COMMISSION_PERCENT = os.environ.get('PLATFORM_COMMISSION_PERCENT', '0')
+PLATFORM_ACCOUNT_USERNAME = os.environ.get('PLATFORM_ACCOUNT_USERNAME', 'platform')
+
+# العنوان العام الذي تصل إليه البوابة (بلا شرطة أخيرة).
+#
+# ضروري لأن الـ webhook يأتي من خوادم البوابة لا من التطبيق: العنوان الذي
+# يستعمله التطبيق في التطوير هو 10.0.2.2:8000 وهو اسم داخلي للمحاكي، ولو
+# أرسلناه للبوابة لأطلقت النداء في العدم. في التطوير يوضع هنا رابط النفق
+# (ngrok/cloudflared)، وفي الإنتاج نطاق الـ API الحقيقي.
+#
+# إن تُرك فارغاً يُشتقّ العنوان من الطلب — يصحّ فقط لخادم معنوَن عاماً أصلاً.
+PAYMENT_PUBLIC_BASE_URL = os.environ.get('PAYMENT_PUBLIC_BASE_URL', '')

@@ -1,0 +1,64 @@
+# Live-streaming stack for the Hetzner box: SRS (WebRTC/WHIP/WHEP/HLS),
+# coturn (NAT traversal for CGNAT mobile networks), Caddy (TLS + routing).
+#
+# Ports (open these in ufw, see bootstrap.sh):
+#   443/tcp   Caddy  -> WHIP/WHEP/HLS/API over HTTPS
+#   80/tcp    Caddy  -> ACME challenge + redirect
+#   8000/udp  SRS    -> WebRTC media (direct path)
+#   8000/tcp  SRS    -> WebRTC media over TCP (when UDP is filtered)
+#   3478/udp+tcp, 5349/tcp, 49160-49200/udp  coturn
+#
+# Secrets come from ./.env (copy .env.example). Never commit .env.
+services:
+  srs:
+    image: ossrs/srs:5
+    container_name: srs
+    restart: unless-stopped
+    network_mode: host            # WebRTC needs the real host ports/IP
+    environment:
+      - CANDIDATE=${PUBLIC_IP}    # advertised ICE candidate
+      - DJANGO_HOOK_BASE=${DJANGO_HOOK_BASE}
+      - SRS_HOOK_SECRET=${SRS_HOOK_SECRET}
+    volumes:
+      - ./srs.conf:/usr/local/srs/conf/docker.conf:ro
+      - srs-dvr:/usr/local/srs/objs/nginx/html/dvr
+    command: ["./objs/srs", "-c", "conf/docker.conf"]
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://127.0.0.1:1985/api/v1/versions >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  coturn:
+    image: coturn/coturn:4.6
+    container_name: coturn
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - caddy-data:/certs:ro     # reuse Caddy's certificate for turns:
+    environment:
+      - TURN_SECRET=${TURN_SECRET}
+      - PUBLIC_IP=${PUBLIC_IP}
+      - LIVE_DOMAIN=${LIVE_DOMAIN}
+    command: >
+      sh -c "sed -e 's|__TURN_SECRET__|'\"$$TURN_SECRET\"'|' -e 's|__PUBLIC_IP__|'\"$$PUBLIC_IP\"'|' -e 's|__LIVE_DOMAIN__|'\"$$LIVE_DOMAIN\"'|'
+      /etc/coturn/turnserver.conf > /tmp/turnserver.conf && turnserver -c /tmp/turnserver.conf"
+
+  caddy:
+    image: caddy:2
+    container_name: caddy
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - LIVE_DOMAIN=${LIVE_DOMAIN}
+      - ACME_EMAIL=${ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  srs-dvr:
+  caddy-data:
+  caddy-config:

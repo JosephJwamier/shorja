@@ -35,9 +35,11 @@ class Command(BaseCommand):
             (every_5_min, 'process-ended-auctions', 'core.tasks.process_ended_auctions'),
             (daily_1am, 'auto-close-resolved-disputes', 'core.tasks.auto_close_resolved_disputes'),
             (daily_2am, 'calculate-trust-scores', 'core.tasks.calculate_user_trust_scores'),
+            (daily_2am, 'recompute-store-levels', 'core.tasks.recompute_store_levels'),
             (sunday_3am, 'cleanup-old-messages', 'core.tasks.cleanup_old_messages'),
             (every_15_min, 'auto-end-stale-live-sessions', 'core.tasks.auto_end_stale_live_sessions'),
             (sunday_3am, 'purge-archived-items', 'core.tasks.purge_archived_items'),
+            (sunday_3am, 'decay-category-affinities', 'core.tasks.decay_category_affinities'),
         ]
 
         for schedule, name, task in tasks:

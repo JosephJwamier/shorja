@@ -11,7 +11,9 @@ from decimal import Decimal
 
 from django.utils import timezone
 
-from .models import DeliveryBatch, DeliveryCompany, DeliveryOrder, Item, Location, Transaction
+from .models import (
+    DeliveryBatch, DeliveryCompany, DeliveryOrder, DeliveryRate, Item, Location, Transaction,
+)
 from .notifications import (
     notify_delivery_assigned,
     notify_return_pickup_assigned,
@@ -50,7 +52,31 @@ def compute_delivery_fee(reservation):
 
     seller = reservation.item.current_holder or reservation.item.owner
     seller_location = _party_location(seller)
-    if seller_location and seller_location.state == reservation.delivery_location.state:
+    from_gov = seller_location.state if seller_location else ''
+    to_gov = reservation.delivery_location.state
+    return quote_delivery_fee(company, from_gov, to_gov, reservation.item.package_size)
+
+
+def quote_delivery_fee(company, from_governorate, to_governorate, package_size):
+    """The company's price for one route and size.
+
+    Most specific active DeliveryRate row wins; a blank field on a row is a
+    wildcard. Fallback order is therefore: exact (from, to, size) → (from,
+    to, *) → (*, to, size) … → (*, *, *) → the company's two flat fees,
+    which keep working for a company that never filled the table. An
+    unknown seller governorate matches only wildcard rows and, at the very
+    end, the conservative inter-governorate flat fee.
+    """
+    candidates = [
+        r for r in company.rates.filter(is_active=True)
+        if (not r.from_governorate or r.from_governorate == from_governorate)
+        and (not r.to_governorate or r.to_governorate == to_governorate)
+        and (not r.package_size or r.package_size == package_size)
+    ]
+    if candidates:
+        best = max(candidates, key=lambda r: (r.specificity, -float(r.fee)))
+        return best.fee
+    if from_governorate and from_governorate == to_governorate:
         return company.intra_governorate_fee
     return company.inter_governorate_fee
 
@@ -81,6 +107,7 @@ def create_outbound_delivery_order(reservation):
         from_address=(pickup.get_full_address() if pickup else ''),
         from_lat=(pickup.latitude if pickup else None),
         from_lng=(pickup.longitude if pickup else None),
+        from_governorate=(pickup.state if pickup else ''),
         to_name=(dropoff.contact_person if dropoff else reservation.buyer.username),
         to_phone=(dropoff.contact_phone if dropoff else reservation.buyer.phone),
         to_address=(dropoff.get_full_address() if dropoff else ''),
@@ -196,6 +223,7 @@ def create_return_delivery_order(reservation, dispute=None):
         from_address=(pickup.get_full_address() if pickup else ''),
         from_lat=(pickup.latitude if pickup else None),
         from_lng=(pickup.longitude if pickup else None),
+        from_governorate=(pickup.state if pickup else ''),
         to_name=(dropoff.contact_person if dropoff else seller.username),
         to_phone=(dropoff.contact_phone if dropoff else seller.phone),
         to_address=(dropoff.get_full_address() if dropoff else ''),
@@ -306,13 +334,19 @@ def execute_return_refund(delivery_order):
         reservation.save(update_fields=['payment_released_to_seller', 'payment_released_at'])
 
     if amount_charged > 0:
+        from .models import ItemVariant
+        stock_variant = reservation.stock_variant
+        if stock_variant is not None:
+            stock_variant = ItemVariant.objects.select_for_update().get(pk=stock_variant.pk)
+            stock_variant.return_stock(reservation.quantity)
+        from ledger.services import void_app_sale
+        void_app_sale(reservation, 'أُعيد الطلب')
         item = Item.objects.select_for_update().get(id=reservation.item_id)
-        item.quantity += reservation.quantity
         # An auction's listing already ended when it was won — release the
         # item back to draft rather than 'active' (there's no live listing
         # selling it anymore, unlike a fixed-price/live-session item).
         item.status = 'draft' if reservation.auction_id else 'active'
-        item.save(update_fields=['quantity', 'status'])
+        item.save(update_fields=['status'])
 
     reservation.status = 'refunded'
     reservation.save(update_fields=['status'])

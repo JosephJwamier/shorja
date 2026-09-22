@@ -115,11 +115,15 @@ def resolve_dispute(dispute, *, resolution_action, resolution='', admin_notes=''
 
                     # Stock was taken when the reservation was
                     # confirmed/completed — restore it now.
-                    from ..models import Item
-                    item = Item.objects.select_for_update().get(id=reservation.item_id)
-                    item.quantity += reservation.quantity
-                    item.status = 'active'
-                    item.save(update_fields=['quantity', 'status'])
+                    from ..models import ItemVariant
+                    stock_variant = reservation.stock_variant
+                    if stock_variant is not None:
+                        stock_variant = ItemVariant.objects.select_for_update().get(
+                            pk=stock_variant.pk
+                        )
+                        stock_variant.return_stock(reservation.quantity)
+                    from ledger.services import void_app_sale
+                    void_app_sale(reservation, 'استرداد بعد نزاع')
 
                 reservation.status = 'refunded'
                 reservation.save(update_fields=['status'])

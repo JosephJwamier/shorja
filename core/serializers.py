@@ -7,7 +7,7 @@ from decimal import Decimal
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from .models import (
-    Item, ItemImage, FixedPriceListing, AuctionListing,
+    Item, ItemImage, ItemVariant, FixedPriceListing, AuctionListing,
     Bid, Reservation, Representative, ItemTransfer, Category,
     UserStore, Rating, Transaction, Chat, Message, Dispute, Report,
     Location, ItemLocationHistory, StorageFeePayment, Notification,
@@ -21,18 +21,35 @@ from .services.support import SUPPORT_USERNAME
 User = get_user_model()
 
 
+def store_badges_of(user):
+    """Badge kinds of the user's store, [] when they have none. Used wherever
+    a seller is shown next to something they sell."""
+    store = getattr(user, 'store', None) if user is not None else None
+    if store is None:
+        return []
+    return store.badge_kinds()
+
+
 class UserSerializer(serializers.ModelSerializer):
     """User serializer"""
     avatar_url = serializers.SerializerMethodField()
+    store_badges = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = ['id', 'username', 'first_name', 'last_name', 'email', 'phone', 'trust_score',
                   'total_sales', 'total_purchases', 'email_verified',
                   'phone_verified', 'identity_verified', 'date_joined',
-                  'avatar', 'avatar_url', 'bio', 'date_of_birth']
+                  'avatar', 'avatar_url', 'bio', 'date_of_birth', 'store_badges']
         read_only_fields = ['trust_score', 'total_sales', 'total_purchases',
-                            'email_verified', 'phone_verified', 'identity_verified']
+                            'email_verified', 'phone_verified', 'identity_verified',
+                            'store_badges']
+
+    def get_store_badges(self, obj):
+        try:
+            return store_badges_of(obj)
+        except Exception:  # the store relation can be missing on stubs/fakes
+            return []
 
     def get_avatar_url(self, obj):
         """Get full URL for avatar"""
@@ -124,12 +141,13 @@ class ItemLocationHistorySerializer(serializers.ModelSerializer):
 class CategorySerializer(serializers.ModelSerializer):
     """Category serializer"""
     image_url = serializers.SerializerMethodField()
+    has_products = serializers.SerializerMethodField()
 
     class Meta:
         model = Category
         fields = [
             'id', 'name', 'name_ar', 'slug', 'parent', 'icon',
-            'image', 'image_url', 'order', 'is_active',
+            'image', 'image_url', 'order', 'is_active', 'has_products',
         ]
         extra_kwargs = {'image': {'write_only': True}}
 
@@ -141,6 +159,20 @@ class CategorySerializer(serializers.ModelSerializer):
             return obj.image.url
         return None
 
+    def get_has_products(self, obj):
+        # يعتمد على `active_category_ids`/`children_map` اللذين يحقنهما
+        # CategoryViewSet.get_serializer_context دفعة واحدة للقائمة كاملة
+        # (بدل استعلام لكل تصنيف). عند غياب السياق — مثل تضمين هذا الـ
+        # serializer داخل category التابعة لعنصر (Item) — نرجّع None بدل
+        # تنفيذ استعلام إضافي لكل عنصر.
+        active_ids = self.context.get('active_category_ids')
+        if active_ids is None:
+            return None
+        if obj.id in active_ids:
+            return True
+        children_map = self.context.get('children_map') or {}
+        return any(child_id in active_ids for child_id in children_map.get(obj.id, []))
+
 
 class ItemImageSerializer(serializers.ModelSerializer):
     """Item image serializer"""
@@ -148,6 +180,139 @@ class ItemImageSerializer(serializers.ModelSerializer):
     class Meta:
         model = ItemImage
         fields = ['id', 'image', 'order', 'created_at']
+
+
+class ItemVariantSerializer(serializers.ModelSerializer):
+    """One sellable combination. `effective_price` resolves the override so
+    the app never has to know the fallback rule."""
+    effective_price = serializers.SerializerMethodField()
+    image_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ItemVariant
+        fields = ['id', 'attributes', 'sku', 'quantity', 'price', 'cost_price',
+                  'effective_price', 'image', 'image_url', 'is_active']
+        read_only_fields = ['id', 'effective_price', 'image_url']
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # Cost is the seller's business: strip it for anyone who isn't the
+        # owner (this serializer also feeds the public product page).
+        request = self.context.get('request')
+        user_id = getattr(getattr(request, 'user', None), 'id', None)
+        if user_id is None or instance.item.owner_id != user_id:
+            data.pop('cost_price', None)
+        return data
+
+    def get_effective_price(self, obj):
+        return obj.effective_price
+
+    def get_image_url(self, obj):
+        if not obj.image_id or not obj.image.image:
+            return None
+        request = self.context.get('request')
+        url = obj.image.image.url
+        return request.build_absolute_uri(url) if request else url
+
+
+def validate_options_and_variants(options, variants):
+    """Shared by create and update.
+
+    Guarantees the invariant the stock code relies on: every variant's
+    attributes name exactly the option axes, with values the option actually
+    offers. A variant for a colour the seller never declared would be
+    unreachable from the picker and its stock silently unsellable."""
+    options = options or []
+    names = []
+    for opt in options:
+        if not isinstance(opt, dict) or not str(opt.get('name', '')).strip():
+            raise serializers.ValidationError({'options': 'كل خيار يحتاج اسماً'})
+        values = [str(v).strip() for v in opt.get('values', []) if str(v).strip()]
+        if not values:
+            raise serializers.ValidationError(
+                {'options': 'الخيار "%s" بلا قيم' % opt['name']})
+        if len(set(values)) != len(values):
+            raise serializers.ValidationError(
+                {'options': 'قيم مكرّرة في الخيار "%s"' % opt['name']})
+        opt['name'] = str(opt['name']).strip()
+        opt['values'] = values
+        names.append(opt['name'])
+    if len(set(names)) != len(names):
+        raise serializers.ValidationError({'options': 'أسماء خيارات مكرّرة'})
+
+    allowed = {o['name']: set(o['values']) for o in options}
+    seen = set()
+    for v in variants or []:
+        attrs = v.get('attributes') or {}
+        if set(attrs.keys()) != set(allowed.keys()):
+            msg = ('كل متغيّر يجب أن يحدّد قيمة لكل خيار: ' + '، '.join(allowed)
+                   if allowed else 'المنتج بلا خيارات فلا يقبل صفات')
+            raise serializers.ValidationError({'variants': msg})
+        for k, val in attrs.items():
+            if str(val) not in allowed[k]:
+                raise serializers.ValidationError(
+                    {'variants': 'القيمة "%s" ليست من قيم الخيار "%s"' % (val, k)})
+        key = tuple(sorted((k, str(val)) for k, val in attrs.items()))
+        if key in seen:
+            raise serializers.ValidationError({'variants': 'متغيّر مكرّر: %s' % dict(attrs)})
+        seen.add(key)
+    return options
+
+
+def decode_json_form_fields(data, keys=('options', 'variants')):
+    """Multipart can only carry strings, so a form-based client sends the
+    nested structures JSON-encoded. Decode before field validation runs."""
+    import json
+    if hasattr(data, 'dict'):
+        data = data.dict()
+    else:
+        data = dict(data)
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            try:
+                data[key] = json.loads(value)
+            except ValueError:
+                raise serializers.ValidationError({key: 'JSON غير صالح'})
+    return data
+
+
+def _variant_key(attrs):
+    return tuple(sorted((k, str(v)) for k, v in (attrs or {}).items()))
+
+
+def apply_variant_set(item, variants):
+    """Makes the item's variants match `variants` (the seller's full table).
+
+    Rows are matched by attributes, not id, so an edit screen can resend the
+    whole grid. A combination that disappears is deleted when nothing refers
+    to it and deactivated otherwise — reservations and transfers PROTECT the
+    row, and a sold combination must stay readable in order history. A
+    deactivated row that comes back is simply reactivated."""
+    existing = {_variant_key(v.attributes): v for v in item.variants.all()}
+    keep = set()
+    for data in variants:
+        key = _variant_key(data.get('attributes'))
+        keep.add(key)
+        current = existing.get(key)
+        if current is None:
+            ItemVariant.objects.create(item=item, **data)
+            continue
+        for field in ('quantity', 'price', 'cost_price', 'sku', 'image'):
+            if field in data:
+                setattr(current, field, data[field])
+        current.is_active = data.get('is_active', True)
+        current.save()
+    for key, current in existing.items():
+        if key in keep:
+            continue
+        if current.reservations.exists() or current.transfers.exists():
+            current.is_active = False
+            current.quantity = 0
+            current.save(update_fields=['is_active', 'quantity'])
+        else:
+            current.delete()
+    item.sync_stock_from_variants()
 
 
 class ItemListSerializer(serializers.ModelSerializer):
@@ -158,13 +323,18 @@ class ItemListSerializer(serializers.ModelSerializer):
     original_price = serializers.SerializerMethodField()
     discount_percentage = serializers.SerializerMethodField()
     currency = serializers.SerializerMethodField()
+    has_options = serializers.SerializerMethodField()
 
     class Meta:
         model = Item
         fields = [
             'id', 'name', 'image', 'price', 'original_price', 'discount_percentage',
-            'sold_count', 'rating', 'currency',
+            'sold_count', 'rating', 'currency', 'has_options',
         ]
+
+    def get_has_options(self, obj):
+        # Lets the card say 'يبدأ من' when price varies by combination.
+        return bool(obj.options)
 
     def get_image(self, obj):
         first_image = obj.images.order_by('order').first()
@@ -214,21 +384,69 @@ class ItemSerializer(serializers.ModelSerializer):
     discount_percentage = serializers.SerializerMethodField()
     total_reviews = serializers.SerializerMethodField()
     representative_info = serializers.SerializerMethodField()
+    is_favorited = serializers.SerializerMethodField()
+    variants = ItemVariantSerializer(many=True, required=False)
 
     class Meta:
         model = Item
         fields = [
             'id', 'owner', 'current_holder', 'title', 'name_ar', 'description',
             'category', 'category_id', 'condition', 'quantity', 'status',
+            'options', 'variants',
             'package_size', 'warranty_days',
             'price', 'original_price', 'discount_percentage',
             'rating', 'sold_count', 'total_reviews',
-            'is_daily_deal',
+            'is_daily_deal', 'is_favorited',
             'current_location', 'location_history', 'images',
             'distance_km', 'created_at', 'updated_at', 'representative_info'
         ]
         read_only_fields = ['owner', 'current_holder', 'status', 'current_location',
                             'rating', 'sold_count']
+
+    def to_internal_value(self, data):
+        return super().to_internal_value(decode_json_form_fields(data))
+
+    def validate(self, attrs):
+        # Options and the variant table travel together: changing the axes
+        # without the rows would leave stock on combinations that no longer
+        # exist, so a request that touches one must carry both.
+        if 'options' in attrs or 'variants' in attrs:
+            options = attrs.get('options') or []
+            variants = attrs.get('variants')
+            if 'options' not in attrs:
+                raise serializers.ValidationError({'options': 'أرسل الخيارات مع المتغيّرات'})
+            if options and not variants:
+                raise serializers.ValidationError(
+                    {'variants': 'منتج بخيارات يحتاج متغيّراً واحداً على الأقل'})
+            attrs['options'] = validate_options_and_variants(options, variants or [])
+            attrs['variants'] = variants or []
+        return attrs
+
+    def update(self, instance, validated_data):
+        """Item.quantity is derived, so a quantity edit is really a stock
+        edit on the item's single default variant — the seller's edit screen
+        has always sent it and must keep working. With options the total
+        comes from the table and a bare `quantity` is ignored."""
+        variants = validated_data.pop('variants', None)
+        options_given = 'options' in validated_data
+        quantity = validated_data.pop('quantity', None)
+        item = super().update(instance, validated_data)
+
+        if options_given:
+            if not item.options:
+                # Back to a plain item: one default row holding the stock.
+                total = quantity if quantity is not None else item.quantity
+                variants = [{'attributes': {}, 'quantity': total}]
+            apply_variant_set(item, variants)
+        elif quantity is not None and not item.options:
+            default = item.default_variant
+            if default is None:
+                ItemVariant.objects.create(item=item, attributes={}, quantity=quantity)
+            else:
+                default.quantity = quantity
+                default.save(update_fields=['quantity'])
+            item.sync_stock_from_variants()
+        return item
 
     def get_representative_info(self, obj):
         """
@@ -272,15 +490,40 @@ class ItemSerializer(serializers.ModelSerializer):
     def get_distance_km(self, obj):
         return getattr(obj, 'distance_km', None)
 
+    def get_is_favorited(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        return obj.favorited_by.filter(user=request.user).exists()
+
 
 class ItemCreateSerializer(serializers.ModelSerializer):
-    """Serializer for creating items"""
+    """Serializer for creating items.
+
+    `options` + `variants` are optional. Omit both and the item gets a single
+    default variant carrying `quantity`, exactly like every item did before
+    variants existed — so the existing add-item flow keeps working untouched."""
     current_location_id = serializers.IntegerField(required=False, allow_null=True)
+    options = serializers.JSONField(required=False)
+    variants = ItemVariantSerializer(many=True, required=False)
 
     class Meta:
         model = Item
         fields = ['title', 'description', 'category', 'condition', 'quantity',
-                  'package_size', 'warranty_days', 'current_location_id']
+                  'package_size', 'warranty_days', 'current_location_id',
+                  'options', 'variants']
+
+    def to_internal_value(self, data):
+        return super().to_internal_value(decode_json_form_fields(data))
+
+    def validate(self, attrs):
+        options = attrs.get('options') or []
+        variants = attrs.get('variants') or []
+        if options and not variants:
+            raise serializers.ValidationError(
+                {'variants': 'منتج بخيارات يحتاج متغيّراً واحداً على الأقل'})
+        attrs['options'] = validate_options_and_variants(options, variants)
+        return attrs
 
     def validate_current_location_id(self, value):
         if value:
@@ -294,11 +537,22 @@ class ItemCreateSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         current_location_id = validated_data.pop('current_location_id', None)
+        variants = validated_data.pop('variants', None)
         item = super().create(validated_data)
         if current_location_id:
             location = Location.objects.get(id=current_location_id)
             item.current_location = location
             item.save(update_fields=['current_location'])
+
+        # The post_save signal already gave the item a default variant (see
+        # signals.py). With real options supplied, that placeholder is replaced
+        # by the combinations the seller defined; without them it is exactly
+        # the single variant a plain item should have.
+        if variants:
+            item.variants.all().delete()
+            for v in variants:
+                ItemVariant.objects.create(item=item, **v)
+        item.sync_stock_from_variants()
         return item
 
 
@@ -325,6 +579,7 @@ class FixedPriceListingCardSerializer(serializers.ModelSerializer):
     name_ar = serializers.CharField(source='item.name_ar')
     image = serializers.SerializerMethodField()
     discount_percentage = serializers.SerializerMethodField()
+    store_badges = serializers.SerializerMethodField()
     sold_count = serializers.IntegerField(source='item.sold_count')
     rating = serializers.DecimalField(source='item.rating', max_digits=3, decimal_places=2)
     condition = serializers.CharField(source='item.condition')
@@ -338,7 +593,11 @@ class FixedPriceListingCardSerializer(serializers.ModelSerializer):
             'price', 'original_price', 'discount_percentage',
             'sold_count', 'rating', 'condition',
             'deposit_percentage', 'category', 'currency', 'created_at',
+            'store_badges',
         ]
+
+    def get_store_badges(self, obj):
+        return store_badges_of(obj.item.owner)
 
     def get_image(self, obj):
         first = obj.item.images.order_by('order').first()
@@ -637,6 +896,7 @@ class ReservationSerializer(serializers.ModelSerializer):
     live_session = serializers.PrimaryKeyRelatedField(read_only=True)
     live_session_item = serializers.PrimaryKeyRelatedField(read_only=True)
     auction = serializers.PrimaryKeyRelatedField(read_only=True)
+    seller_net = serializers.SerializerMethodField()
     proof_screenshot = serializers.SerializerMethodField()
     delivery_order = serializers.SerializerMethodField()
     can_send_to_delivery = serializers.SerializerMethodField()
@@ -654,6 +914,7 @@ class ReservationSerializer(serializers.ModelSerializer):
             'commission_paid', 'commission_paid_at',
             'is_transfer_resale', 'related_transfer', 'original_owner_commission',
             'delivery_location', 'delivery_fee', 'warranty_days',
+            'platform_commission_percent', 'platform_commission_amount', 'seller_net',
             'coupon_discount', 'coupon_code', 'is_negotiated_price',
             'live_session', 'live_session_item', 'auction', 'proof_screenshot',
             'time_remaining', 'has_dispute', 'dispute_status',
@@ -672,7 +933,17 @@ class ReservationSerializer(serializers.ModelSerializer):
             'commission_paid', 'commission_paid_at',
             'is_transfer_resale', 'original_owner_commission',
             'coupon_discount', 'delivery_fee', 'warranty_days',
+            'platform_commission_percent', 'platform_commission_amount', 'seller_net',
         ]
+
+    def get_seller_net(self, obj):
+        """What the seller will receive: price minus the platform's cut and
+        the representative's commission. The buyer's payload carries it too;
+        it is not a secret, the seller sees it as a line in their ledger."""
+        net = obj.total_price - obj.platform_commission_amount
+        if obj.representative_id and obj.commission_amount:
+            net -= obj.commission_amount
+        return str(max(net, Decimal('0')).quantize(Decimal('0.01')))
 
     def get_coupon_code(self, obj):
         if obj.applied_coupon_id:
@@ -869,6 +1140,11 @@ class ReservationSerializer(serializers.ModelSerializer):
 class CreateReservationSerializer(serializers.Serializer):
     """Serializer for creating a reservation"""
     item_id = serializers.IntegerField()
+    # Required when the item has options; resolved to the default variant
+    # otherwise. Older clients that never send it keep working for plain
+    # items and get a clear error — not silently the wrong colour — for
+    # items that do have options.
+    variant_id = serializers.IntegerField(required=False, allow_null=True)
     quantity = serializers.IntegerField(default=1, min_value=1)
     delivery_location_id = serializers.IntegerField(required=False, allow_null=True)
     coupon_collection_id = serializers.IntegerField(required=False, allow_null=True)
@@ -940,6 +1216,7 @@ class DeliveryOrderSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'reservation', 'batch', 'direction', 'status',
             'from_name', 'from_phone', 'from_address', 'from_lat', 'from_lng', 'from_maps_url',
+            'from_governorate',
             'to_name', 'to_phone', 'to_address', 'to_lat', 'to_lng', 'to_maps_url',
             'item_summary', 'quantity', 'special_notes', 'cash_to_collect',
             'cash_collected', 'cash_collected_at', 'delivery_fee',
@@ -1902,6 +2179,7 @@ class UserStoreSerializer(serializers.ModelSerializer):
     communication_rating = serializers.SerializerMethodField()
     total_sold = serializers.SerializerMethodField()
     live_session_id = serializers.SerializerMethodField()
+    badges = serializers.SerializerMethodField()
 
     class Meta:
         model = UserStore
@@ -1913,9 +2191,14 @@ class UserStoreSerializer(serializers.ModelSerializer):
             'rating', 'total_reviews',
             'is_following', 'followers_count', 'positive_review_percent',
             'communication_rating', 'total_sold', 'live_session_id',
-            'phone_number', 'whatsapp_number',
+            'phone_number', 'whatsapp_number', 'level', 'badges',
         ]
-        read_only_fields = ['user', 'created_at', 'rating']
+        read_only_fields = ['user', 'created_at', 'rating', 'level', 'badges']
+
+    def get_badges(self, obj):
+        # Granted badges then the performance level, in display order —
+        # the app maps each kind to its SVG (assets/badges/<kind>.svg).
+        return obj.badge_kinds()
 
     def get_cover_image_url(self, obj):
         if obj.cover_image:

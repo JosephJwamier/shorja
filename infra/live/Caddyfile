@@ -1,0 +1,44 @@
+# TLS termination + routing for the live box. Caddy fetches and renews the
+# certificate itself (Let's Encrypt) — the only prerequisite is that
+# {$LIVE_DOMAIN} resolves to this server before the first start.
+{
+    email {$ACME_EMAIL}
+}
+
+{$LIVE_DOMAIN} {
+    encode gzip
+
+    # WebRTC signalling (WHIP publish / WHEP play). SRS answers with the SDP;
+    # the media itself then flows directly on udp/tcp 8000, not through Caddy.
+    handle_path /rtc/* {
+        reverse_proxy 127.0.0.1:1985
+    }
+
+    # HLS playlists/segments — fallback playback and the only path a plain
+    # video player needs.
+    handle /live/* {
+        header Cache-Control "no-cache"
+        header Access-Control-Allow-Origin "*"
+        reverse_proxy 127.0.0.1:8080
+    }
+
+    # Read-only stats for the admin/dashboard (never the full SRS API).
+    handle /api/v1/streams* {
+        reverse_proxy 127.0.0.1:1985
+    }
+    handle /api/v1/clients* {
+        reverse_proxy 127.0.0.1:1985
+    }
+
+    # Everything else on this host is nobody's business.
+    handle {
+        respond "live" 200
+    }
+
+    log {
+        output file /data/access.log {
+            roll_size 50mb
+            roll_keep 5
+        }
+    }
+}

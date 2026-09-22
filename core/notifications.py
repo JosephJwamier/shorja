@@ -185,8 +185,8 @@ def notify_reservation_created(reservation):
 
     تفاصيل الحجز:
     - المنتج: {item_title}
-    - العربون: ${reservation.deposit_amount}
-    - السعر الإجمالي: ${reservation.total_price}
+    - العربون: {reservation.deposit_amount} IQD
+    - السعر الإجمالي: {reservation.total_price} IQD
     - ينتهي في: {reservation.expires_at.strftime('%Y-%m-%d %H:%M')}
 
     يرجى تجهيز المنتج للمشتري.
@@ -207,8 +207,8 @@ def notify_reservation_created(reservation):
     تم تأكيد حجزك لمنتج "{item_title}"!
 
     تفاصيل الحجز:
-    - العربون المدفوع: ${reservation.deposit_amount}
-    - المتبقي: ${reservation.total_price - reservation.deposit_amount}
+    - العربون المدفوع: {reservation.deposit_amount} IQD
+    - المتبقي: {reservation.total_price - reservation.deposit_amount} IQD
     - ينتهي في: {reservation.expires_at.strftime('%Y-%m-%d %H:%M')}
 
     يرجى إتمام الدفع قبل انتهاء المهلة.
@@ -235,7 +235,7 @@ def notify_reservation_cancelled_by_seller(reservation):
 
     تفاصيل الحجز:
     - المنتج: {item_title}
-    - السعر: ${reservation.total_price}
+    - السعر: {reservation.total_price} IQD
 
     سيتم استرداد المبلغ المدفوع إن وجد.
 
@@ -270,7 +270,7 @@ def notify_reservation_cancelled_by_buyer(reservation):
 
     تفاصيل الحجز:
     - المنتج: {item_title}
-    - السعر: ${reservation.total_price}
+    - السعر: {reservation.total_price} IQD
 
     أصبح منتجك متاحاً للمشترين الآخرين.
 
@@ -297,9 +297,9 @@ def notify_reservation_expiring(reservation, hours_remaining):
 
     حجزك لمنتج "{item_title}" سينتهي خلال {hours_remaining} ساعة!
 
-    يرجى إتمام عملية الشراء لتجنب خسارة العربون البالغ ${reservation.deposit_amount}.
+    يرجى إتمام عملية الشراء لتجنب خسارة العربون البالغ {reservation.deposit_amount} IQD.
 
-    المبلغ المتبقي: ${reservation.total_price - reservation.deposit_amount}
+    المبلغ المتبقي: {reservation.total_price - reservation.deposit_amount} IQD
     ينتهي في: {reservation.expires_at.strftime('%Y-%m-%d %H:%M')}
 
     أكمل الشراء من هنا: {settings.FRONTEND_URL}/reservations/{reservation.id}
@@ -330,7 +330,7 @@ def notify_reservation_completed(reservation):
     تم اكمال الحجز وشراء منتجك "{item_title}" بواسطة {buyer.username}.
 
     تفاصيل البيع:
-    - السعر النهائي: ${reservation.total_price}
+    - السعر النهائي: {reservation.total_price} IQD
     - المشتري: {buyer.username}
     - وقت الاكمال: {reservation.completed_at.strftime('%Y-%m-%d %H:%M')}
 
@@ -342,7 +342,7 @@ def notify_reservation_completed(reservation):
     notify_push(
         seller,
         seller_subject,
-        f'أكمل {bidi_isolate(buyer.username)} شراء منتجك "{item_title}" بمبلغ ${reservation.total_price}.',
+        f'أكمل {bidi_isolate(buyer.username)} شراء منتجك "{item_title}" بمبلغ {reservation.total_price} IQD.',
         data={'type': 'reservation_completed', 'reservation_id': str(reservation.id)},
     )
 
@@ -354,7 +354,7 @@ def notify_reservation_completed(reservation):
     تم تأكيد عملية الشراء بنجاح لمنتج "{item_title}".
 
     تفاصيل الشراء:
-    - المبلغ المدفوع: ${reservation.total_price}
+    - المبلغ المدفوع: {reservation.total_price} IQD
     - البائع: {seller.username}
     - وقت الاكمال: {reservation.completed_at.strftime('%Y-%m-%d %H:%M')}
 
@@ -366,7 +366,7 @@ def notify_reservation_completed(reservation):
     notify_push(
         buyer,
         buyer_subject,
-        f'تم تأكيد شرائك لـ "{item_title}" بمبلغ ${reservation.total_price}.',
+        f'تم تأكيد شرائك لـ "{item_title}" بمبلغ {reservation.total_price} IQD.',
         data={'type': 'reservation_completed', 'reservation_id': str(reservation.id)},
     )
 
@@ -384,8 +384,8 @@ def notify_new_bid(auction, bid):
 
     تفاصيل المزايدة:
     - المزايد: {bid.bidder.username}
-    - المبلغ: ${bid.amount}
-    - السعر السابق: ${auction.current_price}
+    - المبلغ: {bid.amount} IQD
+    - السعر السابق: {auction.current_price} IQD
 
     شاهد المزاد: {settings.FRONTEND_URL}/auctions/{auction.id}
 
@@ -393,7 +393,7 @@ def notify_new_bid(auction, bid):
     """
 
     NotificationService.send_email(seller.email, subject, message)
-    notify_push(seller, subject, f'{bidi_isolate(bid.bidder.username)} زايد بمبلغ ${bid.amount} على "{item_title}"',
+    notify_push(seller, subject, f'{bidi_isolate(bid.bidder.username)} زايد بمبلغ {bid.amount} IQD على "{item_title}"',
                 data={'type': 'new_bid', 'auction_id': str(auction.id), 'bid_amount': str(bid.amount)})
 
     # Notify previous highest bidder they've been outbid
@@ -408,15 +408,15 @@ def notify_new_bid(auction, bid):
 
         تم تجاوز مزايدتك على "{item_title}".
 
-        مزايدتك: ${prev_bid.amount}
-        أعلى مزايدة حالياً: ${bid.amount}
+        مزايدتك: {prev_bid.amount} IQD
+        أعلى مزايدة حالياً: {bid.amount} IQD
 
         قدّم مزايدة أعلى: {settings.FRONTEND_URL}/auctions/{auction.id}
 
         فريق سوقي
         """
         NotificationService.send_email(prev_bid.bidder.email, outbid_subject, outbid_message)
-        notify_push(prev_bid.bidder, outbid_subject, f'تم تجاوز مزايدتك على "{item_title}". الأعلى الآن: ${bid.amount}',
+        notify_push(prev_bid.bidder, outbid_subject, f'تم تجاوز مزايدتك على "{item_title}". الأعلى الآن: {bid.amount} IQD',
                     data={'type': 'outbid', 'auction_id': str(auction.id)})
 
 
@@ -438,8 +438,8 @@ def notify_auction_ending_soon(auction, minutes_remaining):
 
             سينتهي المزاد على "{item_title}" خلال {minutes_remaining} دقيقة!
 
-            السعر الحالي: ${auction.current_price}
-            أقل زيادة مسموحة: ${auction.minimum_increment}
+            السعر الحالي: {auction.current_price} IQD
+            أقل زيادة مسموحة: {auction.minimum_increment} IQD
 
             قدّم مزايدتك الأخيرة: {settings.FRONTEND_URL}/auctions/{auction.id}
 
@@ -467,11 +467,11 @@ def notify_auction_won(auction, reservation):
     message = f"""
     مرحباً {winner.username}،
 
-    مبروك! فزت بمزاد "{item_title}" بمبلغ ${reservation.total_price}.
+    مبروك! فزت بمزاد "{item_title}" بمبلغ {reservation.total_price} IQD.
 
-    لقد دفعت عربون مزايدة قدره ${reservation.deposit_amount}. اختر طريقة دفع الباقي:
-    1. ادفع المتبقي ${remaining} الآن، ثم رتّب التوصيل
-    2. أبقِ عربونك كما هو وادفع المتبقي ${remaining} نقداً عند التوصيل
+    لقد دفعت عربون مزايدة قدره {reservation.deposit_amount} IQD. اختر طريقة دفع الباقي:
+    1. ادفع المتبقي {remaining} IQD الآن، ثم رتّب التوصيل
+    2. أبقِ عربونك كما هو وادفع المتبقي {remaining} IQD نقداً عند التوصيل
 
     يرجى الاختيار خلال 48 ساعة — وإلا سنعتمد الخيار الثاني تلقائياً.
 
@@ -483,7 +483,7 @@ def notify_auction_won(auction, reservation):
     NotificationService.send_email(winner.email, subject, message)
     notify_push(
         winner, subject,
-        f'فزت بمزاد "{item_title}" بمبلغ ${reservation.total_price}! أكمل حجزك لاختيار طريقة الدفع.',
+        f'فزت بمزاد "{item_title}" بمبلغ {reservation.total_price} IQD! أكمل حجزك لاختيار طريقة الدفع.',
         data={
             'type': 'auction_won',
             'auction_id': str(auction.id),
@@ -492,7 +492,7 @@ def notify_auction_won(auction, reservation):
     )
 
     if winner.phone_verified and winner.phone:
-        sms_message = f"مبروك! فزت بمزاد '{item_title}' بمبلغ ${reservation.total_price}. أكمل حجزك الآن!"
+        sms_message = f"مبروك! فزت بمزاد '{item_title}' بمبلغ {reservation.total_price} IQD. أكمل حجزك الآن!"
         NotificationService.send_sms(winner.phone, sms_message)
 
     # Notify seller
@@ -504,7 +504,7 @@ def notify_auction_won(auction, reservation):
     انتهى مزادك على "{item_title}"!
 
     الفائز: {winner.username}
-    السعر النهائي: ${reservation.total_price}
+    السعر النهائي: {reservation.total_price} IQD
 
     سيكمل المشتري حجزه قريباً (إما بدفع كامل المبلغ الآن، أو الباقي نقداً عند
     التوصيل). يرجى تجهيز المنتج للتوصيل.
@@ -811,7 +811,7 @@ def notify_payment_successful(transaction):
     message = f"""
     مرحباً {transaction.user.username}،
 
-    تمت معالجة دفعتك بمبلغ ${transaction.amount} بنجاح.
+    تمت معالجة دفعتك بمبلغ {transaction.amount} IQD بنجاح.
 
     نوع العملية: {_transaction_type_label(transaction)}
     المنتج: {item_title}
@@ -830,7 +830,7 @@ def notify_payment_failed(transaction):
     message = f"""
     مرحباً {transaction.user.username}،
 
-    فشلت عملية دفعك بمبلغ ${transaction.amount}.
+    فشلت عملية دفعك بمبلغ {transaction.amount} IQD.
 
     يرجى تحديث طريقة الدفع والمحاولة مرة أخرى.
 
@@ -849,7 +849,7 @@ def notify_refund_processed(transaction):
     message = f"""
     مرحباً {transaction.user.username}،
 
-    تم استرداد مبلغ ${transaction.amount} إلى حسابك.
+    تم استرداد مبلغ {transaction.amount} IQD إلى حسابك.
 
     نوع العملية: {_transaction_type_label(transaction)}
     المنتج: {item_title}

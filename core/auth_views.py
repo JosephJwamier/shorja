@@ -8,10 +8,13 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
+from rest_framework.throttling import ScopedRateThrottle
+from .throttling import LoginUsernameThrottle, PasswordResetEmailThrottle
 from django.contrib.auth import authenticate, get_user_model
 from django.db import transaction  # NEW
 from django.utils import timezone
 import logging
+import re
 
 from .serializers import (
     UserRegistrationSerializer,
@@ -32,6 +35,8 @@ class RegisterView(generics.CreateAPIView):
     """User registration endpoint"""
     serializer_class = UserRegistrationSerializer
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth_register'
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -82,6 +87,9 @@ class LoginView(generics.GenericAPIView):
     """User login endpoint"""
     permission_classes = [AllowAny]
     serializer_class = UserLoginSerializer
+    # Per-IP (scope) AND per-username: see core/throttling.py for why both.
+    throttle_classes = [ScopedRateThrottle, LoginUsernameThrottle]
+    throttle_scope = 'auth_login'
 
     def post(self, request):
         serializer = self.get_serializer(data=request.data)
@@ -211,18 +219,52 @@ class VerifyEmailView(generics.GenericAPIView):
         }, status=status.HTTP_400_BAD_REQUEST)
 
 
+def normalize_phone_suffix(value):
+    """The comparable part of an Iraqi mobile number: its last 9 digits.
+
+    Firebase always hands back E.164 ('+9647701234567') while User.phone is
+    whatever the user typed — usually local ('07701234567'), sometimes already
+    international. The national significant number without the leading zero is
+    the part both forms share, so comparing on it matches them without having
+    to guess which format a given row happens to hold.
+
+    Returns '' for anything too short to be a real number, which never
+    compares equal (the caller must reject empties rather than treat two
+    blanks as a match).
+    """
+    digits = re.sub(r'\D', '', value or '')
+    return digits[-9:] if len(digits) >= 9 else ''
+
+
 class VerifyPhoneView(APIView):
-    """Phone verification endpoint"""
+    """Phone verification.
+
+    Two accepted proofs, in order of preference:
+
+    - `id_token` — a Firebase ID token carrying a verified `phone_number`
+      claim. This is what the app sends. Firebase Phone Auth generates and
+      delivers the SMS itself, from the device, so there is no server-side
+      code to compare against; our job is to verify the token and confirm the
+      phone in it belongs to this account. Same verification path as
+      SocialLoginView.
+    - `code` — the legacy 6-digit code this view used to generate and send
+      over Twilio. Kept working so an older build in the wild doesn't break;
+      the current app no longer uses it, and neither does the GET below.
+    """
     permission_classes = [IsAuthenticated]
     swagger_schema = None
 
     def post(self, request):
         user = request.user
-        code = request.data.get('code', '')
 
         if user.phone_verified:
             return Response({'message': 'Phone already verified'})
 
+        id_token = request.data.get('id_token')
+        if id_token:
+            return self._verify_with_firebase(user, id_token)
+
+        code = request.data.get('code', '')
         if user.check_verification_code('phone', code):
             user.phone_verified = True
             user.save(update_fields=['phone_verified'])
@@ -233,8 +275,66 @@ class VerifyPhoneView(APIView):
             'error': 'Invalid or expired verification code'
         }, status=status.HTTP_400_BAD_REQUEST)
 
+    def _verify_with_firebase(self, user, id_token):
+        from .firebase import get_firebase_app, FIREBASE_AVAILABLE
+
+        if not FIREBASE_AVAILABLE or get_firebase_app() is None:
+            return Response({
+                'error': 'Firebase is not configured on the server'
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        from firebase_admin import auth as firebase_auth
+
+        try:
+            decoded = firebase_auth.verify_id_token(id_token)
+        except Exception as e:
+            logger.warning(f"Phone verification token check failed: {e}")
+            return Response({
+                'error': 'Invalid or expired token'
+            }, status=status.HTTP_401_UNAUTHORIZED)
+
+        token_phone = normalize_phone_suffix(decoded.get('phone_number'))
+        if not token_phone:
+            return Response({
+                'error': 'This sign-in carries no verified phone number'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        account_phone = normalize_phone_suffix(user.phone)
+        if not account_phone:
+            return Response({
+                'error': 'Phone number not set'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # The token proves someone owns *that* phone — not that it's the phone
+        # on this account. Without this check any verified number would mark
+        # any account's number verified.
+        if token_phone != account_phone:
+            return Response({
+                'error': 'The verified number does not match this account'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # One phone, one verified account: otherwise several accounts could
+        # each claim the same number and each be treated as reachable at it.
+        taken = User.objects.filter(
+            phone_verified=True, phone__endswith=account_phone
+        ).exclude(pk=user.pk).exists()
+        if taken:
+            return Response({
+                'error': 'This number is already verified on another account'
+            }, status=status.HTTP_409_CONFLICT)
+
+        user.phone_verified = True
+        user.save(update_fields=['phone_verified'])
+        user.clear_verification_code()
+        # firebase_uid is deliberately left alone: it identifies the user's
+        # Google/Facebook identity for SocialLoginView, and overwriting it with
+        # a phone-only Firebase UID would break that lookup (and collide on its
+        # unique constraint).
+        return Response({'message': 'Phone verified successfully'})
+
     def get(self, request):
-        """Send verification code"""
+        """Legacy: generate a code and send it over Twilio. The app now uses
+        Firebase Phone Auth (see the class docstring) and never calls this."""
         user = request.user
 
         if not user.phone:
@@ -301,6 +401,8 @@ class ChangePasswordView(APIView):
 class ResetPasswordView(APIView):
     """Request password reset — emails a 6-digit code (no web link needed)"""
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle, PasswordResetEmailThrottle]
+    throttle_scope = 'auth_reset'
 
     def post(self, request):
         email = request.data.get('email')
@@ -337,6 +439,10 @@ class ResetPasswordView(APIView):
 class ResetPasswordConfirmView(APIView):
     """Confirm password reset with the emailed code"""
     permission_classes = [AllowAny]
+    # Same per-email bucket as the request step: 6-digit code, so the
+    # confirm endpoint is the one an attacker would actually brute-force.
+    throttle_classes = [ScopedRateThrottle, PasswordResetEmailThrottle]
+    throttle_scope = 'auth_reset'
 
     def post(self, request):
         serializer = ResetPasswordSerializer(data=request.data)
@@ -391,6 +497,8 @@ class SocialLoginView(APIView):
     firebase-token bridge above) instead of talking to Google/Facebook directly.
     """
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth_login'
 
     def post(self, request):
         from .firebase import get_firebase_app, FIREBASE_AVAILABLE
