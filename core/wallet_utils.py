@@ -178,22 +178,52 @@ def release_reservation_payment(reservation, amount=None):
     reservation.payment_released_at = timezone.now()
     charged = amount if amount is not None else reservation.amount_charged
 
-    # Pay the delivery company its fee off the top — it earned this once the
-    # sale reached release, independent of the seller/representative split
-    # below. Always comes off reservation.delivery_fee specifically (not the
-    # `amount` override), so partial-refund math never touches it.
+    # Settle the delivery fee off the top — earned once the sale reached
+    # release, independent of the seller/representative split below. Always
+    # comes off reservation.delivery_fee specifically (not the `amount`
+    # override), so partial-refund math never touches it.
+    #
+    # Two ways the fee reaches the company, and they must not both run:
+    #
+    #   prepaid  the buyer paid the fee in-app, so the platform is holding
+    #            it: credit the company its share here.
+    #   COD      the company already took its share out of the cash it
+    #            collected from the buyer and handed the platform the rest
+    #            (DeliveryOrder.cash_due_to_platform). Crediting it again
+    #            here would pay the company twice.
+    #
+    # Either way the platform's cut is credited from here: on COD it
+    # physically arrived inside the cash settlement.
     if reservation.delivery_fee > 0:
         outbound = reservation.delivery_orders.filter(direction='outbound').first()
         company_account = outbound.company.account if outbound and outbound.company else None
-        if company_account:
+        delivery_commission = outbound.platform_commission_amount if outbound else Decimal('0.00')
+        company_share = reservation.delivery_fee - delivery_commission
+        fee_already_taken_in_cash = bool(outbound and outbound.cash_collected
+                                         and outbound.cash_to_collect > 0)
+
+        if company_account and company_share > 0 and not fee_already_taken_in_cash:
             credit_earnings(
                 user=company_account,
-                amount=reservation.delivery_fee,
+                amount=company_share,
                 transaction_type='delivery_fee',
                 item=reservation.item,
                 reservation=reservation,
             )
-        charged -= reservation.delivery_fee
+        if delivery_commission > 0:
+            from .services.commission import platform_account
+            credit_earnings(
+                user=platform_account(),
+                amount=delivery_commission,
+                transaction_type='commission',
+                item=reservation.item,
+                reservation=reservation,
+            )
+        # The whole gross fee leaves the sale pot either way: on COD the
+        # company's share never entered it (amount_charged counts
+        # cash_due_to_platform), on prepaid it was just paid out.
+        charged -= (delivery_commission if fee_already_taken_in_cash
+                    else reservation.delivery_fee)
 
     # Platform commission comes off the seller's side, never the buyer's,
     # the courier's or the representative's. Frozen at creation
@@ -202,7 +232,13 @@ def release_reservation_payment(reservation, amount=None):
     # keeps a share of money that went back to the buyer.
     platform_cut = Decimal('0.00')
     if reservation.platform_commission_amount > 0 and charged > 0:
-        base_total = reservation.amount_charged - reservation.delivery_fee
+        # Mirror of the subtraction above: on COD only the platform's cut of
+        # the fee was ever part of amount_charged.
+        outbound_for_base = reservation.delivery_orders.filter(direction='outbound').first()
+        fee_in_pot = reservation.delivery_fee
+        if outbound_for_base and outbound_for_base.cash_collected and outbound_for_base.cash_to_collect > 0:
+            fee_in_pot = outbound_for_base.platform_commission_amount
+        base_total = reservation.amount_charged - fee_in_pot
         if amount is not None and base_total > 0:
             platform_cut = (reservation.platform_commission_amount * charged / base_total
                             ).quantize(Decimal('0.01'))

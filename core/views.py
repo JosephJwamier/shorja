@@ -426,6 +426,21 @@ class ItemViewSet(viewsets.ModelViewSet):
         # request.data is a QueryDict for multipart and a dict for JSON;
         # copy without flattening so nested variants survive intact.
         form_data = {k: v for k, v in request.data.items() if k != 'images'}
+
+        # An item with nowhere to be collected from produces a delivery
+        # order with an empty from_address — the driver is dispatched to
+        # nothing, and compute_delivery_fee silently falls back to the
+        # inter-governorate rate. Refuse at the only moment the seller can
+        # still fix it cheaply, and tell the client exactly what is missing
+        # so it can open the location sheet instead of guessing.
+        from .delivery_utils import _party_location
+        if _party_location(request.user) is None:
+            return Response({
+                'success': False,
+                'code': 'no_pickup_location',
+                'message': 'أضف موقعك الرئيسي أولاً — منه تستلم شركة التوصيل منتجاتك.',
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         try:
             serializer = self.get_serializer(data=form_data)
 
@@ -3437,7 +3452,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         """What delivery will cost for `item_id` to `location_id` — so the
         reservation sheet can show the fee before the buyer commits. Same
         rule as the charge itself (delivery_utils.quote_delivery_fee)."""
-        from .delivery_utils import get_active_delivery_company, quote_delivery_fee, _party_location
+        from .delivery_utils import get_active_delivery_company, quote_delivery_fee, resolve_pickup
         try:
             item = Item.objects.select_related('owner', 'current_holder').get(
                 id=int(request.query_params.get('item_id', 0)))
@@ -3449,7 +3464,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         company = get_active_delivery_company()
         if company is None:
             return Response({'success': True, 'data': {'fee': '0.00', 'company': None}})
-        seller_location = _party_location(item.current_holder or item.owner)
+        seller_location, _, _ = resolve_pickup(item)
         fee = quote_delivery_fee(company, seller_location.state if seller_location else '',
                                  location.state, item.package_size)
         return Response({'success': True, 'data': {
@@ -7646,7 +7661,13 @@ class LocationViewSet(viewsets.ModelViewSet):
                 'message': 'بيانات غير صالحة',
                 'errors': serializer.errors,
             }, status=status.HTTP_400_BAD_REQUEST)
-        location = serializer.save(user=request.user)
+        # The first location a user saves becomes their primary one unless
+        # they said otherwise: "primary" is what every pickup/delivery
+        # lookup falls back to, and a sole location that is not primary is
+        # never what anyone meant.
+        is_first = not Location.objects.filter(user=request.user, is_active=True).exists()
+        location = serializer.save(user=request.user,
+                                   **({'is_primary': True} if is_first else {}))
         return Response({
             'success': True,
             'message': 'تم إضافة الموقع بنجاح',

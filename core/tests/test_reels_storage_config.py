@@ -196,3 +196,68 @@ class TestProductionGuard:
         module = self._load_settings({**self.BASE_ENV, 'DEBUG': 'True',
                                       'REELS_PUBLIC_BASE_URL': ''})
         assert module.DEBUG is True
+
+
+class TestProductionSecurityConfig:
+    """Settings that only take effect at DEBUG=False, and whose absence
+    breaks production in ways development never shows."""
+
+    @staticmethod
+    def _load(env):
+        import importlib.util, os, sys
+        from pathlib import Path
+        path = Path(__file__).resolve().parents[2] / 'balla' / 'settings.py'
+        base = {
+            'DEBUG': 'False',
+            'DJANGO_SECRET_KEY': 'unit-test-secret-not-the-placeholder',
+            'ALLOWED_HOSTS': 'api.shorjeh.com',
+            'AWS_STORAGE_BUCKET_NAME': 'shorjeh-reels',
+            'REELS_PUBLIC_BASE_URL': 'https://media.shorjeh.com',
+            'S3_ENDPOINT_URL': 'https://abc.r2.cloudflarestorage.com',
+            'BUNNYCDN_PULL_ZONE_BASE_URL': '',
+        }
+        with patch.dict(os.environ, {**base, **env}, clear=True):
+            spec = importlib.util.spec_from_file_location('_prod_settings', path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            try:
+                spec.loader.exec_module(module)
+            finally:
+                sys.modules.pop(spec.name, None)
+            return module
+
+    def test_proxy_ssl_header_is_set_so_https_redirects_do_not_loop(self):
+        # Caddy terminates TLS and forwards plain HTTP to daphne. Without
+        # this header Django sees an insecure request, redirects to HTTPS,
+        # and the proxy forwards it back — an infinite loop that only
+        # appears in production.
+        module = self._load({})
+        assert module.SECURE_PROXY_SSL_HEADER == ('HTTP_X_FORWARDED_PROTO', 'https')
+        assert module.SECURE_SSL_REDIRECT is True
+
+    def test_csrf_trusted_origins_come_from_the_environment(self):
+        module = self._load({'CSRF_TRUSTED_ORIGINS': 'https://api.shorjeh.com'})
+        assert module.CSRF_TRUSTED_ORIGINS == ['https://api.shorjeh.com']
+
+    def test_extra_cors_origins_are_appended_not_replacing_local_ones(self):
+        module = self._load({'CORS_EXTRA_ORIGINS': 'https://shorjeh.com, https://delivery.shorjeh.com'})
+        assert 'https://shorjeh.com' in module.CORS_ALLOWED_ORIGINS
+        assert 'https://delivery.shorjeh.com' in module.CORS_ALLOWED_ORIGINS
+        assert 'http://localhost:3000' in module.CORS_ALLOWED_ORIGINS
+
+    def test_empty_cors_env_adds_nothing(self):
+        module = self._load({'CORS_EXTRA_ORIGINS': ''})
+        assert all(o.startswith('http://localhost') or o.startswith('http://127.')
+                   for o in module.CORS_ALLOWED_ORIGINS)
+
+    def test_whitenoise_sits_directly_after_security_middleware(self):
+        module = self._load({})
+        mw = module.MIDDLEWARE
+        assert mw[0] == 'django.middleware.security.SecurityMiddleware'
+        assert mw[1] == 'whitenoise.middleware.WhiteNoiseMiddleware'
+
+    def test_hsts_and_secure_cookies_are_on(self):
+        module = self._load({})
+        assert module.SESSION_COOKIE_SECURE is True
+        assert module.CSRF_COOKIE_SECURE is True
+        assert module.SECURE_HSTS_SECONDS == 31536000

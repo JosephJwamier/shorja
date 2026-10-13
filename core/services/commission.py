@@ -16,6 +16,12 @@ Rules, in one place:
             escrow — and credited to the platform account so it is a real,
             auditable balance and not money that vanished.
   who pays  The seller. The buyer sees and pays the listed price.
+
+A second, independent commission is taken from the DELIVERY COMPANY out of
+its delivery fee — see delivery_commission_for below. The two never
+interact: the courier's fee is removed from the pot before the seller's
+side is computed (wallet_utils.release_reservation_payment), so raising one
+rate cannot move the other's money.
 """
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -69,4 +75,23 @@ def freeze_on_reservation(reservation):
     percent, amount = commission_for(reservation.item, reservation.total_price)
     reservation.platform_commission_percent = percent
     reservation.platform_commission_amount = amount
+    return percent, amount
+
+
+def delivery_commission_for(company, delivery_fee):
+    """(percent, amount) الشورجة keeps out of a delivery company's fee.
+
+    Negotiated per company (DeliveryCompany.platform_commission_percent);
+    there is deliberately no platform-wide fallback, so a company whose
+    terms were never set keeps its whole fee instead of being charged a
+    rate nobody agreed with it.
+
+    Unlike the seller's commission there is no badge multiplier: badges are
+    a seller-loyalty device and have nothing to do with couriers.
+    """
+    fee = Decimal(delivery_fee or 0)
+    if company is None or fee <= 0:
+        return Decimal('0.00'), Decimal('0.00')
+    percent = Decimal(company.platform_commission_percent or 0).quantize(TWO_PLACES, ROUND_HALF_UP)
+    amount = (fee * percent / Decimal('100')).quantize(TWO_PLACES, ROUND_HALF_UP)
     return percent, amount

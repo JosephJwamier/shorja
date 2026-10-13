@@ -1224,7 +1224,12 @@ class Reservation(models.Model):
         charged = self.deposit_amount
         outbound = self.delivery_orders.filter(direction='outbound', cash_collected=True).first()
         if outbound:
-            charged += outbound.cash_to_collect
+            # cash_due_to_platform, not cash_to_collect: the company kept its
+            # own share of the fee out of the cash, so that part never
+            # reaches the platform and cannot be released to anyone. The
+            # platform's cut of the fee DID arrive (inside the settlement)
+            # and is paid out in release_reservation_payment.
+            charged += outbound.cash_due_to_platform
         return charged
 
     def can_buyer_cancel(self):
@@ -1468,6 +1473,15 @@ class DeliveryCompany(models.Model):
         max_digits=10, decimal_places=2, default=Decimal('0.00'),
         help_text='رسم التوصيل إلى محافظة مختلفة عن محافظة البائع'
     )
+    # What الشورجة keeps out of this company's delivery fee. Negotiated per
+    # company (each signs its own terms), so there is no platform-wide
+    # default: a company nobody negotiated with keeps 100%, exactly as
+    # before this field existed.
+    platform_commission_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal('0.00'),
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text='نسبة عمولة المنصّة من رسم التوصيل لهذه الشركة (%)',
+    )
     # Cap on combined Item.package_units a single delivery trip can carry —
     # see delivery_utils.pack_into_delivery_groups. A seller's reservations
     # that exceed this ship as more than one trip instead of being blocked.
@@ -1484,11 +1498,16 @@ class DeliveryCompany(models.Model):
         return self.name
 
     def outstanding_cash_liability(self):
-        """Cash the company has confirmed collecting from buyers (COD) but
-        hasn't yet handed over to the platform — see CashSettlement."""
+        """Cash the company has confirmed collecting from buyers (COD) and
+        still owes the platform — see CashSettlement.
+
+        Sums cash_due_to_platform, not cash_to_collect: the company keeps
+        its own delivery earnings out of the collected cash and hands over
+        the remainder, so the gross figure would overstate the debt by the
+        company's share forever."""
         total = self.delivery_orders.filter(
             cash_collected=True, cash_settlement__isnull=True
-        ).aggregate(total=models.Sum('cash_to_collect'))['total']
+        ).aggregate(total=models.Sum('cash_due_to_platform'))['total']
         return total or Decimal('0.00')
 
 
@@ -1680,9 +1699,27 @@ class DeliveryOrder(models.Model):
         CashSettlement, on_delete=models.SET_NULL, null=True, blank=True, related_name='delivery_orders'
     )
     # Snapshot of Reservation.delivery_fee at the moment this outbound leg
-    # was created — what the platform owes the company once the sale
-    # settles (paid out alongside the seller in release_reservation_payment).
+    # was created — the gross fee for this trip, before the platform's cut.
     delivery_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    # The platform's cut of delivery_fee, frozen from
+    # DeliveryCompany.platform_commission_percent when this leg was created —
+    # same rule as the seller's commission: a later renegotiation never
+    # changes a trip already dispatched.
+    platform_commission_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal('0.00'))
+    platform_commission_amount = models.DecimalField(
+        max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    # What the company must actually hand over out of the cash it collected.
+    #
+    # The company nets its own earnings out of the cash on the spot — it
+    # keeps (delivery_fee - platform_commission_amount) and hands the
+    # platform the rest — so the platform never physically receives the
+    # company's share and must not book it as owed. cash_to_collect stays
+    # the GROSS figure the buyer pays; this is the net the books chase.
+    # See DeliveryCompany.outstanding_cash_liability and
+    # DeliveryOrderAdmin.settle_cash_action, which both use this field.
+    cash_due_to_platform = models.DecimalField(
+        max_digits=10, decimal_places=2, default=Decimal('0.00'))
 
     failure_reason = models.TextField(blank=True)
 

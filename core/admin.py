@@ -1112,7 +1112,8 @@ class DeliveryCompanyAdmin(ModelAdmin):
     inlines = [DeliveryRateInline]
     list_display = (
         'name', 'account', 'primary_contact_phone',
-        'intra_governorate_fee', 'inter_governorate_fee', 'outstanding_liability_badge', 'is_active', 'created_at',
+        'intra_governorate_fee', 'inter_governorate_fee', 'platform_commission_percent',
+        'outstanding_liability_badge', 'is_active', 'created_at',
     )
     list_filter = ('is_active',)
     search_fields = ('name', 'account__username', 'primary_contact_phone')
@@ -1159,8 +1160,8 @@ class DeliveryOrderAdmin(ModelAdmin):
     """
     list_display = (
         'id', 'reservation', 'direction', 'status', 'company',
-        'to_name', 'cash_to_collect', 'cash_collected', 'cash_settlement',
-        'delivery_fee', 'assigned_at',
+        'to_name', 'cash_to_collect', 'cash_due_to_platform', 'cash_collected',
+        'cash_settlement', 'delivery_fee', 'platform_commission_amount', 'assigned_at',
     )
     list_filter = ('direction', 'status', 'company', 'cash_collected')
     search_fields = ('reservation__id', 'item_summary', 'to_name', 'from_name')
@@ -1171,7 +1172,8 @@ class DeliveryOrderAdmin(ModelAdmin):
 
     @admin.action(description='تسجيل تسوية نقدية للمبالغ المُحصَّلة', permissions=['change'])
     def settle_cash_action(self, request, queryset):
-        eligible = queryset.filter(cash_collected=True, cash_settlement__isnull=True, cash_to_collect__gt=0)
+        eligible = queryset.filter(cash_collected=True, cash_settlement__isnull=True,
+                                   cash_due_to_platform__gt=0)
 
         if not eligible.exists():
             self.message_user(
@@ -1194,7 +1196,10 @@ class DeliveryOrderAdmin(ModelAdmin):
             return None
 
         company = DeliveryCompany.objects.get(pk=company_ids[0])
-        total = eligible.aggregate(total=Sum('cash_to_collect'))['total'] or Decimal('0.00')
+        # The net the company owes, not the gross it collected: it keeps its
+        # own delivery earnings out of the cash on the spot (see
+        # DeliveryOrder.cash_due_to_platform).
+        total = eligible.aggregate(total=Sum('cash_due_to_platform'))['total'] or Decimal('0.00')
 
         if 'apply' in request.POST:
             notes = request.POST.get('notes', '').strip()

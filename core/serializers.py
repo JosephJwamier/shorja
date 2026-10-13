@@ -1220,10 +1220,24 @@ class DeliveryOrderSerializer(serializers.ModelSerializer):
             'to_name', 'to_phone', 'to_address', 'to_lat', 'to_lng', 'to_maps_url',
             'item_summary', 'quantity', 'special_notes', 'cash_to_collect',
             'cash_collected', 'cash_collected_at', 'delivery_fee',
+            # What the company actually keeps and what it must hand over:
+            # it nets its own share out of the collected cash, so showing
+            # only the gross cash_to_collect would misstate both.
+            'platform_commission_amount', 'company_fee_share', 'cash_due_to_platform',
             'failure_reason',
             'assigned_at', 'picked_up_at', 'delivered_at', 'confirmed_at', 'refused_at',
         ]
         read_only_fields = fields
+
+    company_fee_share = serializers.SerializerMethodField()
+
+    @staticmethod
+    def get_company_fee_share(obj):
+        """The company's own earnings for this trip: the gross fee minus
+        الشورجة's frozen cut. On COD this is what it keeps out of the cash
+        on the spot; on a prepaid order it is credited to its wallet when
+        the sale is released."""
+        return str(obj.delivery_fee - obj.platform_commission_amount)
 
     @staticmethod
     def _maps_url(lat, lng, address):

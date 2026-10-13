@@ -273,3 +273,122 @@ def test_quote_endpoint_refuses_someone_elses_address(client):
     client.force_authenticate(user=buyer)
     assert client.get('/api/reservations/delivery-quote/',
                       {'item_id': item.id, 'location_id': dest.id}).status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Auctions. Same rate, same seller-pays rule — but a different code path
+# (auction_utils.create_winner_reservation, not the reservation endpoint),
+# and a different base: the winning bid, not a listed price.
+# ---------------------------------------------------------------------------
+
+def make_auction(seller, category, starting='100000.00', deposit='10000.00'):
+    from core.models import AuctionListing
+    item = Item.objects.create(owner=seller, title='a', description='d', category=category,
+                               condition='new', quantity=1, status='active')
+    return AuctionListing.objects.create(
+        item=item, starting_price=Decimal(starting), current_price=Decimal(starting),
+        minimum_increment=Decimal('1000.00'), bid_deposit=Decimal(deposit),
+        start_time=timezone.now() - timedelta(minutes=5),
+        end_time=timezone.now() + timedelta(minutes=5), status='active',
+    )
+
+
+def settle(auction):
+    """Run the real ending path rather than calling create_winner_reservation
+    directly, so the test covers what the scheduled task actually does."""
+    from core.models import AuctionListing
+    from core.tasks import process_ended_auctions
+    AuctionListing.objects.filter(pk=auction.pk).update(
+        end_time=timezone.now() - timedelta(seconds=1))
+    process_ended_auctions()
+    return Reservation.objects.get(auction=auction)
+
+
+def test_winning_bid_not_the_starting_price_is_the_commission_base(client):
+    _, child, _, _ = make_categories()                      # 8% inherited
+    seller = make_user('au_s')
+    winner = make_user('au_w', balance='500000')
+    auction = make_auction(seller, child, starting='100000')
+
+    client.force_authenticate(user=winner)
+    response = client.post(f'/api/auctions/{auction.id}/place_bid/',
+                           {'amount': '150000'}, format='json')
+    assert response.status_code in (200, 201), response.data
+
+    reservation = settle(auction)
+    assert reservation.total_price == Decimal('150000.00')
+    assert reservation.platform_commission_percent == Decimal('8.00')
+    # 8% of the winning bid, not of the 100000 starting price.
+    assert reservation.platform_commission_amount == Decimal('12000.00')
+
+
+def test_auction_seller_receives_the_bid_minus_commission_at_release():
+    _, child, _, _ = make_categories()
+    seller = make_user('ar_s')
+    winner = make_user('ar_w', balance='500000')
+    auction = make_auction(seller, child, starting='100000', deposit='0')
+    reservation = Reservation.objects.create(
+        item=auction.item, buyer=winner, quantity=1, auction=auction,
+        deposit_amount=Decimal('0'), total_price=Decimal('150000'), status='pending',
+        expires_at=timezone.now() + timedelta(days=1), delivery_location=make_location(winner),
+        platform_commission_percent=Decimal('8'), platform_commission_amount=Decimal('12000'),
+    )
+
+    complete_reservation(reservation, 'full')
+    assert balance(winner) == Decimal('350000'), 'winner pays their bid, nothing more'
+    release_reservation_payment(reservation)
+    assert balance(seller) == Decimal('138000')
+    assert balance(platform_account()) == Decimal('12000')
+
+
+def test_auction_commission_is_frozen_against_a_later_rate_change():
+    root, child, _, _ = make_categories()
+    seller = make_user('af_s')
+    winner = make_user('af_w', balance='500000')
+    auction = make_auction(seller, child, starting='100000')
+    APIClient().force_authenticate(user=winner)
+    client = APIClient()
+    client.force_authenticate(user=winner)
+    client.post(f'/api/auctions/{auction.id}/place_bid/', {'amount': '120000'}, format='json')
+
+    reservation = settle(auction)
+    frozen = reservation.platform_commission_amount
+
+    root.commission_percent = Decimal('25')
+    root.save()
+    reservation.refresh_from_db()
+    assert reservation.platform_commission_amount == frozen
+
+
+def test_founder_badge_waives_the_auction_commission_too():
+    _, child, _, _ = make_categories()
+    seller = make_user('ab_s')
+    winner = make_user('ab_w', balance='500000')
+    admin = User.objects.create_superuser('ab_root', 'ab@x.io', 'x')
+    store = UserStore.objects.create(user=seller, name='s')
+    grant_badge(store, StoreBadge.KIND_FOUNDER, by=admin)
+    auction = make_auction(seller, child, starting='100000')
+
+    client = APIClient()
+    client.force_authenticate(user=winner)
+    client.post(f'/api/auctions/{auction.id}/place_bid/', {'amount': '150000'}, format='json')
+
+    reservation = settle(auction)
+    assert reservation.platform_commission_percent == Decimal('0.00')
+    assert reservation.platform_commission_amount == Decimal('0.00')
+
+
+def test_platform_default_applies_to_an_auction_in_an_unrated_category(settings):
+    settings.PLATFORM_COMMISSION_PERCENT = '3'
+    _, _, _, other = make_categories()                      # no own rate
+    seller = make_user('ad_s')
+    winner = make_user('ad_w', balance='500000')
+    auction = make_auction(seller, other, starting='100000')
+
+    client = APIClient()
+    client.force_authenticate(user=winner)
+    client.post(f'/api/auctions/{auction.id}/place_bid/', {'amount': '200000'}, format='json')
+
+    reservation = settle(auction)
+    assert reservation.platform_commission_percent == Decimal('3.00')
+    assert reservation.platform_commission_amount == Decimal('6000.00')

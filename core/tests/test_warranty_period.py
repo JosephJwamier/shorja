@@ -22,7 +22,7 @@ import pytest
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from core.models import Category, DeliveryOrder, Dispute, Item, Reservation, User, get_or_create_wallet
+from core.models import Location, Category, DeliveryOrder, Dispute, Item, Reservation, User, get_or_create_wallet
 from core.wallet_utils import complete_reservation
 from core import tasks as core_tasks
 
@@ -243,6 +243,11 @@ def test_get_payment_status_days_remaining_uses_item_warranty():
 def test_create_item_rejects_non_positive_warranty_days():
     owner = make_user('owner9')
     category, _ = Category.objects.get_or_create(name='cat', slug='cat')
+    # A pickup address, so the 400 under test is the warranty validation
+    # and not the earlier no_pickup_location gate.
+    Location.objects.create(user=owner, name='home', address_line1='x', city='c',
+                            state='بغداد', country='Iraq', contact_person='p',
+                            contact_phone='1')
     client = APIClient()
     client.force_authenticate(user=owner)
 

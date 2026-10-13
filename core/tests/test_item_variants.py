@@ -113,6 +113,7 @@ def test_take_stock_refuses_to_overdraw():
 
 def test_api_create_without_options_keeps_the_old_behaviour(client):
     owner = make_user('api1')
+    make_location(owner)   # listing requires a pickup address
     client.force_authenticate(user=owner)
     response = client.post('/api/items/', {
         'title': 't', 'description': 'd', 'category': make_category().id,
@@ -127,6 +128,7 @@ def test_api_create_without_options_keeps_the_old_behaviour(client):
 
 def test_api_create_with_options_builds_the_variants(client):
     owner = make_user('api2')
+    make_location(owner)   # listing requires a pickup address
     client.force_authenticate(user=owner)
     response = client.post('/api/items/', {
         'title': 't', 'description': 'd', 'category': make_category().id,
@@ -151,6 +153,7 @@ def test_api_create_accepts_json_strings_in_multipart(client):
     serializer must decode them — this pins that wire shape, including a
     numeric price sent as a float."""
     owner = make_user('api2m')
+    make_location(owner)   # listing requires a pickup address
     client.force_authenticate(user=owner)
     response = client.post('/api/items/', {
         'title': 't', 'description': 'd', 'category': make_category().id,
@@ -172,6 +175,7 @@ def test_api_create_accepts_json_strings_in_multipart(client):
 
 def test_api_rejects_a_variant_for_an_undeclared_value(client):
     owner = make_user('api3')
+    make_location(owner)   # listing requires a pickup address
     client.force_authenticate(user=owner)
     response = client.post('/api/items/', {
         'title': 't', 'description': 'd', 'category': make_category().id,
@@ -185,6 +189,7 @@ def test_api_rejects_a_variant_for_an_undeclared_value(client):
 
 def test_api_rejects_duplicate_variants(client):
     owner = make_user('api4')
+    make_location(owner)   # listing requires a pickup address
     client.force_authenticate(user=owner)
     response = client.post('/api/items/', {
         'title': 't', 'description': 'd', 'category': make_category().id,

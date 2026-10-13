@@ -347,6 +347,11 @@ def test_cost_price_round_trips_through_item_create(merchant):
     user, _ = merchant
     c = APIClient(); c.force_authenticate(user=user)
     category, _ = Category.objects.get_or_create(name='cat', slug='cat')
+    # Listing requires a pickup address the courier can collect from.
+    from core.models import Location
+    Location.objects.create(user=user, name='home', address_line1='x', city='c',
+                            state='بغداد', country='Iraq', contact_person='p',
+                            contact_phone='1')
     r = c.post('/api/items/', {
         'title': 't', 'description': 'd', 'category': category.id,
         'condition': 'new', 'quantity': 0,

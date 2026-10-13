@@ -27,11 +27,60 @@ def get_active_delivery_company():
 
 
 def _party_location(user):
+    """Where this user ships from: their store's declared location if they
+    set one, else their primary personal address."""
+    store_location = getattr(getattr(user, 'store', None), 'default_location', None)
+    if store_location is not None and store_location.is_active:
+        return store_location
     return (
         Location.objects.filter(user=user, is_active=True)
         .order_by('-is_primary', '-created_at')
         .first()
     )
+
+
+def resolve_pickup(item):
+    """(location, custodian, contact) for collecting `item`.
+
+    Ownership and custody are different questions, and delivery needs both.
+    A wholesale transfer moves ownership with a click while the goods stay
+    in the original seller's warehouse (see ItemTransfer: "The stock
+    physically stays in the owner's warehouse"). Asking only "who owns
+    this?" — as every caller here used to — sends the driver to the
+    reseller's own address while the goods sit in another governorate, and
+    prices the trip from the wrong city too.
+
+    While a transfer is still running, the goods are at the original
+    seller's store and that seller is the custodian (الخازن); the reseller
+    remains the party the platform and the driver deal with. Once the term
+    ends, custody follows ownership and the reseller's own address applies —
+    which is also what happens for an item that was never transferred.
+
+    `custodian` is None whenever the owner is holding their own goods.
+    """
+    contact = item.current_holder or item.owner
+    transfer = (
+        item.acquired_via_transfer
+        .filter(status='active')
+        .select_related('from_user')
+        .order_by('-approved_at')
+        .first()
+    )
+    if transfer is not None and not transfer.term_has_ended():
+        custodian = transfer.from_user
+        location = _party_location(custodian)
+        if location is not None:
+            return location, custodian, contact
+        # A custodian with no address on file is worse than useless to a
+        # driver — fall through to the owner rather than dispatch to nothing.
+    return _party_location(contact), None, contact
+
+
+def pickup_governorate(item):
+    """The governorate the goods actually ship FROM — what the delivery
+    tariff must be priced against."""
+    location, _, _ = resolve_pickup(item)
+    return location.state if location else ''
 
 
 def compute_delivery_fee(reservation):
@@ -50,9 +99,7 @@ def compute_delivery_fee(reservation):
     if not company or not reservation.delivery_location_id:
         return Decimal('0.00')
 
-    seller = reservation.item.current_holder or reservation.item.owner
-    seller_location = _party_location(seller)
-    from_gov = seller_location.state if seller_location else ''
+    from_gov = pickup_governorate(reservation.item)
     to_gov = reservation.delivery_location.state
     return quote_delivery_fee(company, from_gov, to_gov, reservation.item.package_size)
 
@@ -84,10 +131,9 @@ def quote_delivery_fee(company, from_governorate, to_governorate, package_size):
 def create_outbound_delivery_order(reservation):
     """Hand a paid reservation's fulfilment off to the active delivery company."""
     item = reservation.item
-    seller = item.current_holder or item.owner
+    pickup, custodian, seller = resolve_pickup(item)
     company = get_active_delivery_company()
 
-    pickup = _party_location(seller)
     dropoff = reservation.delivery_location
 
     cash_to_collect = Decimal('0.00')
@@ -96,6 +142,20 @@ def create_outbound_delivery_order(reservation):
         # wallet_utils.complete_reservation, which only charges it in-app
         # for a full payment.
         cash_to_collect = reservation.total_price - reservation.deposit_amount + reservation.delivery_fee
+
+    # The platform's cut of this trip's fee, frozen now so a later
+    # renegotiation with the company never re-prices a dispatched trip.
+    from .services.commission import delivery_commission_for
+    commission_percent, commission_amount = delivery_commission_for(
+        company, reservation.delivery_fee)
+
+    # On COD the company nets its own earnings straight out of the cash it
+    # collects — it keeps (fee - commission) and hands the platform the
+    # rest. cash_to_collect stays the gross the buyer pays; this is what
+    # the platform's books actually chase.
+    cash_due_to_platform = Decimal('0.00')
+    if cash_to_collect > 0:
+        cash_due_to_platform = cash_to_collect - reservation.delivery_fee + commission_amount
 
     order = DeliveryOrder.objects.create(
         reservation=reservation,
@@ -115,8 +175,18 @@ def create_outbound_delivery_order(reservation):
         to_lng=(dropoff.longitude if dropoff else None),
         item_summary=item.title,
         quantity=reservation.quantity,
+        # The driver is going to the custodian's warehouse but the platform's
+        # counterparty is the reseller, so from_name/from_phone stay the
+        # reseller's. Without this line the driver would arrive at a gate
+        # whose keeper is not the person on the order.
+        special_notes=(f'البضاعة مخزّنة لدى: {custodian.username}'
+                       + (f' — {custodian.phone}' if custodian.phone else '')
+                       if custodian else ''),
         cash_to_collect=cash_to_collect,
+        cash_due_to_platform=cash_due_to_platform,
         delivery_fee=reservation.delivery_fee,
+        platform_commission_percent=commission_percent,
+        platform_commission_amount=commission_amount,
     )
     notify_delivery_assigned(order)
     return order
@@ -206,11 +276,12 @@ def create_return_delivery_order(reservation, dispute=None):
     execute_return_refund, called from the return leg's pick-up action.
     """
     item = reservation.item
-    seller = item.current_holder or item.owner
+    # A return goes back to the warehouse the goods came out of — the
+    # custodian's while a transfer is running, the owner's otherwise.
+    dropoff, custodian, seller = resolve_pickup(item)
     company = get_active_delivery_company()
 
     pickup = reservation.delivery_location  # the buyer's address is now the pickup point
-    dropoff = _party_location(seller)
 
     order = DeliveryOrder.objects.create(
         reservation=reservation,
@@ -321,14 +392,31 @@ def execute_return_refund(delivery_order):
                 item=reservation.item,
                 reservation=reservation,
             )
-        if forfeited_fee > 0 and delivery_order.company and delivery_order.company.account:
-            credit_earnings(
-                user=delivery_order.company.account,
-                amount=forfeited_fee,
-                transaction_type='delivery_fee',
-                item=reservation.item,
-                reservation=reservation,
-            )
+        if forfeited_fee > 0 and delivery_order.company:
+            # The trip was made, so the fee is earned and the platform's cut
+            # applies exactly as on a successful delivery. This money comes
+            # out of the buyer's forfeited deposit, never from cash the
+            # company is holding, so both sides are credited here.
+            from .services.commission import delivery_commission_for, platform_account
+            _, forfeited_commission = delivery_commission_for(
+                delivery_order.company, forfeited_fee)
+            company_share = forfeited_fee - forfeited_commission
+            if delivery_order.company.account and company_share > 0:
+                credit_earnings(
+                    user=delivery_order.company.account,
+                    amount=company_share,
+                    transaction_type='delivery_fee',
+                    item=reservation.item,
+                    reservation=reservation,
+                )
+            if forfeited_commission > 0:
+                credit_earnings(
+                    user=platform_account(),
+                    amount=forfeited_commission,
+                    transaction_type='commission',
+                    item=reservation.item,
+                    reservation=reservation,
+                )
         reservation.payment_released_to_seller = True
         reservation.payment_released_at = timezone.now()
         reservation.save(update_fields=['payment_released_to_seller', 'payment_released_at'])

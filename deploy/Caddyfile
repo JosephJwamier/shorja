@@ -1,0 +1,57 @@
+# TLS تلقائي من Let's Encrypt — لا شهادات تُجدَّد يدوياً.
+# يتطلب أن يشير سجل A لـ api.shorjeh.com إلى IP هذا الخادم قبل أول تشغيل.
+
+api.shorjeh.com {
+	encode zstd gzip
+
+	# الوسائط والثابت من القرص مباشرة: urls.py لا يخدمها عند DEBUG=False،
+	# وCaddy أسرع من Django لها بمراتب.
+	handle_path /media/* {
+		root * /srv/media
+		file_server
+	}
+	handle_path /static/* {
+		root * /srv/static
+		file_server
+	}
+
+	# كل ما تبقّى إلى daphne — بما فيه WebSocket (يرقّيه Caddy تلقائياً).
+	handle {
+		reverse_proxy web:8000
+	}
+
+	header {
+		# HSTS يضيفه Django أيضاً عند DEBUG=False؛ وجوده هنا يغطي
+		# الاستجابات التي لا تمر بـ Django (الوسائط والثابت).
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 50mb
+			roll_keep 5
+		}
+	}
+}
+
+# صفحات المشاركة و assetlinks.json. المسارات /p/ /s/ /a/ /l/ هي ما يولّده
+# deep_link_config.dart، ولا بد أن تردّ بصفحة معاينة لمن يفتحها بلا تطبيق.
+# حتى تُبنى تلك الصفحات، الجذر يحوّل إلى الـ API فقط ليصدر assetlinks.
+shorjeh.com, www.shorjeh.com {
+	encode zstd gzip
+
+	# أندرويد يقرأ هذا الملف للتحقق من App Links. لا بد أن يُخدَم من الجذر
+	# بالضبط وبنوع application/json، وإلا فشل autoVerify بصمت.
+	handle /.well-known/* {
+		root * /srv/static/wellknown
+		header Content-Type application/json
+		file_server
+	}
+
+	handle {
+		respond "الشورجة" 200
+	}
+}

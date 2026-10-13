@@ -166,6 +166,10 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # مباشرة بعد SecurityMiddleware كما توثّق whitenoise. Caddy يخدم
+    # /static/ في الإنتاج، لكن هذه تضمن أن لوحة الإدارة تعمل حتى لو شُغّل
+    # الحاوية خلف وكيل آخر أو بلا وكيل أصلاً.
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     # Forces Arabic/RTL for the admin + its login pages only — the API
@@ -359,6 +363,13 @@ USE_TZ = True
 # Static files
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
+# ضغط الملفات الثابتة وتسميتها ببصمة محتواها، فيُخزّنها المتصفح للأبد
+# بأمان ويُبطلها أي تغيير تلقائياً.
+STORAGES = {
+    'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage'},
+}
+
 # Project-level static dir is optional (the admin theme ships its own);
 # listing a missing path is a permanent staticfiles.W004 on every command.
 STATICFILES_DIRS = [d for d in [BASE_DIR / 'static'] if d.exists()]
@@ -585,11 +596,19 @@ UNFOLD = {
 }
 
 # CORS Settings
+# الأصول الإنتاجية تُضاف من البيئة (بوابة التوصيل، صفحات المشاركة) بدل
+# تعديل الكود لكل نطاق جديد. المحلية تبقى للتطوير.
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:63342",  # Your IDE's built-in server
     "http://127.0.0.1:8000",
     "http://localhost:8000",
+] + [o.strip() for o in os.environ.get('CORS_EXTRA_ORIGINS', '').split(',') if o.strip()]
+
+# لوحة الإدارة ونماذج 2FA ترسل طلبات POST عبر HTTPS خلف وكيل؛ بدون هذه
+# يرفض Django الطلب بـ CSRF verification failed.
+CSRF_TRUSTED_ORIGINS = [
+    o.strip() for o in os.environ.get('CSRF_TRUSTED_ORIGINS', '').split(',') if o.strip()
 ]
 
 # Allow all origins in development only (Flutter Web uses random ports).
@@ -696,6 +715,10 @@ AUCTION_MINIMUM_DURATION_HOURS = int(os.environ.get('AUCTION_MINIMUM_DURATION_HO
 
 # Security Settings (Production)
 if not DEBUG:
+    # إلزامي خلف وكيل عكسي (Caddy/nginx): الوكيل ينهي TLS ويمرّر الطلب
+    # إلى daphne عبر HTTP، فيظنّه Django غير آمن ويعيد توجيهه إلى HTTPS
+    # إلى ما لا نهاية. هذه الترويسة هي ما يكسر الحلقة.
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     SECURE_SSL_REDIRECT = True
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
@@ -822,11 +845,20 @@ PAYMENT_PROVIDERS = {
 APP_DEEP_LINK_SCHEME = os.environ.get('APP_DEEP_LINK_SCHEME', 'balla')
 
 # =============================================================================
-# Platform commission (taken from the seller at payment release).
-# Per-category rates live on Category.commission_percent; this is the
-# fallback for categories that set none. 0 = no commission until you decide.
+# Platform commission — what الشورجة keeps from each sale, taken from the
+# SELLER when escrow is released (never added on top of what the buyer pays).
+#
+# One rate covers every sale channel: fixed price, live shopping and
+# auctions alike. The auction path freezes it on the winner's reservation in
+# auction_utils.create_winner_reservation, using the winning bid as the base.
+# There is deliberately no auction-specific rate — auctions and fixed-price
+# listings share a category, so per-category overrides
+# (Category.commission_percent, inherited up the tree) are the only knob.
+#
+# This is the fallback for categories that set no rate of their own.
+# See core/services/commission.py for the full rule set.
 # =============================================================================
-PLATFORM_COMMISSION_PERCENT = os.environ.get('PLATFORM_COMMISSION_PERCENT', '0')
+PLATFORM_COMMISSION_PERCENT = os.environ.get('PLATFORM_COMMISSION_PERCENT', '3')
 PLATFORM_ACCOUNT_USERNAME = os.environ.get('PLATFORM_ACCOUNT_USERNAME', 'platform')
 
 # العنوان العام الذي تصل إليه البوابة (بلا شرطة أخيرة).
