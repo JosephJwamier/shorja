@@ -1,6 +1,8 @@
 # Secrets — never commit
 .env
 .env.*
+# قالب بلا أسرار — كل قيمه فارغة، وهو ما يُستنسخ على الخادم.
+!deploy/.env.production.example
 firebase-credentials.json
 *.pem
 *.key
