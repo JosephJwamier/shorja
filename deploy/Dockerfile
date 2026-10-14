@@ -15,8 +15,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# logs/ ضمن .gitignore فلا يصل مع الكود، وsettings.LOGGING يفتح
+# logs/django.log عند الإقلاع — غيابه يُسقط Django قبل أن يبدأ، فتدور
+# web/worker/beat في حلقة إعادة تشغيل ويردّ الوكيل 502.
+#
 # لا تعمل كـ root: ثغرة في Django تصبح صلاحية كاملة على الحاوية.
-RUN useradd -m -u 1000 app && mkdir -p /app/media /app/staticfiles     && chown -R app:app /app
+RUN useradd -m -u 1000 app && mkdir -p /app/media /app/staticfiles /app/logs     && chown -R app:app /app
 USER app
 
 EXPOSE 8000
