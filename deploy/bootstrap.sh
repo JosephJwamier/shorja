@@ -18,7 +18,7 @@ apt-get upgrade -y -qq
 
 echo "==> 2/5 أدوات أساسية + دوكر"
 apt-get install -y -qq \
-    docker.io docker-compose-plugin \
+    docker.io docker-compose-v2 \
     git curl ufw fail2ban unattended-upgrades
 systemctl enable --now docker
 systemctl enable --now fail2ban
