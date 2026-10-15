@@ -1,0 +1,14 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.balla.balla",
+      "sha256_cert_fingerprints": [
+        "35:C4:3F:43:A5:12:6E:15:22:33:1E:13:35:0E:F1:03:17:A3:FC:67:A3:38:62:3F:09:D4:2B:E3:61:E7:F6:0B"
+      ]
+    }
+  }
+]

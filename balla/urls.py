@@ -18,6 +18,7 @@ from drf_yasg import openapi
 from rest_framework import permissions
 from two_factor.urls import urlpatterns as tf_urls
 from core.legal_views import legal_document_page
+from core import share_views
 from core.throttling import LoginUsernameThrottle
 from rest_framework.throttling import ScopedRateThrottle
 
@@ -70,6 +71,17 @@ urlpatterns = [
     path('api/auth/token/verify/', TokenVerifyView.as_view(), name='token_verify'),
 
     # Public legal pages — علنية (رابط لمتاجر التطبيقات والإعلانات المدفوعة)
+    # صفحات المشاركة على shorjeh.com. المسارات قصيرة عمداً: الرابط يُلصق
+    # في واتساب ويُقرأ بالعين، و/p/123 أقصر من /share/product/123.
+    #
+    # تُخدم من نفس تطبيق Django لأن Caddy يوجّه النطاقين إلى web:8000؛
+    # وهي عامة بلا مصادقة، فجالب واتساب لا يملك حساباً ولا يستطيع تسجيل
+    # الدخول ليرسم بطاقة.
+    path('p/<int:listing_id>', share_views.product, name='share-product'),
+    path('s/<int:store_id>', share_views.store, name='share-store'),
+    path('a/<int:auction_id>', share_views.auction, name='share-auction'),
+    path('l/<int:session_id>', share_views.live, name='share-live'),
+
     path('legal/privacy/', legal_document_page, {'doc_type': 'privacy'}, name='legal-privacy'),
     path('legal/terms/', legal_document_page, {'doc_type': 'terms'}, name='legal-terms'),
 

@@ -1,0 +1,100 @@
+{% load static %}<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }} — الشورجة</title>
+
+{# واتساب وتيليغرام وفيسبوك يقرؤون هذه الوسوم وحدها لرسم البطاقة. لا
+   جافاسكربت ينتظرونه ولا تنسيق يهمّهم — فتأتي قبل كل شيء في <head>. #}
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="الشورجة">
+<meta property="og:locale" content="ar_IQ">
+<meta property="og:title" content="{{ title }}">
+<meta property="og:description" content="{{ description }}">
+<meta property="og:image" content="{{ image }}">
+<meta property="og:url" content="{{ canonical }}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="description" content="{{ description }}">
+<link rel="canonical" href="{{ canonical }}">
+
+<style>
+  :root {
+    --bg: #faf8f5;
+    --surface: #ffffff;
+    --ink: #1c1b1f;
+    --muted: #6b6a70;
+    --line: #e5e1dc;
+    --brand: #8c1d18;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141316; --surface: #1f1d21; --ink: #e8e4e6;
+      --muted: #a3a0a6; --line: #332f35; --brand: #f2b8b5;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif;
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100vh; padding: 16px;
+  }
+  .card {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 20px; max-width: 420px; width: 100%; overflow: hidden;
+    box-shadow: 0 2px 20px rgba(0,0,0,.06);
+  }
+  .shot { width: 100%; aspect-ratio: 1/1; object-fit: cover; display: block;
+          background: var(--line); }
+  .body { padding: 20px; }
+  h1 { font-size: 1.25rem; margin: 0 0 8px; line-height: 1.4; }
+  p  { color: var(--muted); font-size: .9rem; line-height: 1.7; margin: 0 0 16px; }
+  dl { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 20px; }
+  dl div {
+    background: var(--bg); border: 1px solid var(--line);
+    border-radius: 999px; padding: 6px 14px; font-size: .85rem;
+  }
+  dt { display: inline; color: var(--muted); }
+  dd { display: inline; margin: 0 4px 0 0; font-weight: 700; }
+  a.cta {
+    display: block; text-align: center; text-decoration: none;
+    padding: 14px; border-radius: 999px; font-weight: 700; font-size: 1rem;
+    background: var(--brand); color: #fff; margin-bottom: 10px;
+  }
+  a.ghost {
+    display: block; text-align: center; text-decoration: none;
+    padding: 12px; border-radius: 999px; font-size: .9rem;
+    color: var(--muted); border: 1px solid var(--line);
+  }
+  footer { text-align: center; color: var(--muted); font-size: .75rem;
+           padding: 0 20px 20px; }
+</style>
+</head>
+<body>
+  <main class="card">
+    {% if image %}<img class="shot" src="{{ image }}" alt="{{ title }}">{% endif %}
+    <div class="body">
+      <h1>{{ title }}</h1>
+      {% if description %}<p>{{ description }}</p>{% endif %}
+
+      {% if meta %}
+      <dl>
+        {% for label, value in meta %}
+        <div><dt>{{ label }}:</dt> <dd>{{ value }}</dd></div>
+        {% endfor %}
+      </dl>
+      {% endif %}
+
+      {# زرّ لا يعمل أسوأ من زرّ غائب: رابط المتجر يُعرض فقط بعد النشر. #}
+      {% if play_store_url %}
+      <a class="cta" href="{{ play_store_url }}">حمّل تطبيق الشورجة</a>
+      <a class="ghost" href="{{ canonical }}">افتح في التطبيق</a>
+      {% else %}
+      <a class="cta" href="{{ canonical }}">افتح في التطبيق</a>
+      {% endif %}
+    </div>
+  </main>
+  <footer>الشورجة — سوق العراق</footer>
+</body>
+</html>

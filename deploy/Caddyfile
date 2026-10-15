@@ -37,21 +37,39 @@ api.shorjeh.com {
 	}
 }
 
-# صفحات المشاركة و assetlinks.json. المسارات /p/ /s/ /a/ /l/ هي ما يولّده
-# deep_link_config.dart، ولا بد أن تردّ بصفحة معاينة لمن يفتحها بلا تطبيق.
-# حتى تُبنى تلك الصفحات، الجذر يحوّل إلى الـ API فقط ليصدر assetlinks.
+# نطاق المشاركة. المسارات /p/ /s/ /a/ /l/ هي ما يولّده
+# deep_link_config.dart، وتردّ بصفحة معاينة لمن يفتحها بلا تطبيق.
 shorjeh.com, www.shorjeh.com {
 	encode zstd gzip
 
 	# أندرويد يقرأ هذا الملف للتحقق من App Links. لا بد أن يُخدَم من الجذر
 	# بالضبط وبنوع application/json، وإلا فشل autoVerify بصمت.
-	handle /.well-known/* {
+	#
+	# handle_path لا handle: الأول يحذف البادئة المطابَقة، والثاني يبقيها —
+	# فـ handle كان يبحث عن /srv/static/wellknown/.well-known/assetlinks.json
+	# ويردّ 404 مهما وُضع الملف في مكانه الصحيح.
+	handle_path /.well-known/* {
 		root * /srv/static/wellknown
 		header Content-Type application/json
 		file_server
 	}
 
+	# صور المنتجات: صفحة المعاينة تشير إليها في og:image، وواتساب يجلبها
+	# من هذا النطاق لا من api، فلا بد أن تُخدَم هنا أيضاً.
+	handle_path /media/* {
+		root * /srv/media
+		file_server
+	}
+
+	# صفحات المعاينة من Django. يتعرّف عليها عبر Host، وتردّ بـ Open Graph
+	# كاملة ليرسم واتساب وتيليغرام بطاقة بدل رابط أزرق أصمّ.
 	handle {
-		respond "الشورجة" 200
+		reverse_proxy web:8000
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		-Server
 	}
 }
