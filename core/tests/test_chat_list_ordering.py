@@ -20,7 +20,7 @@ def make_user(username):
 def make_item_chat(buyer, seller, title):
     category, _ = Category.objects.get_or_create(name='clo-cat', slug='clo-cat')
     item = Item.objects.create(owner=seller, title=title, description='d', category=category,
-                                condition='good', quantity=1, status='active')
+                                condition='used', quantity=1, status='active')
     client = APIClient()
     client.force_authenticate(user=buyer)
     response = client.post('/api/chats/create_or_get/', {'item_id': item.id}, format='json')

@@ -40,7 +40,7 @@ def make_item(owner, warranty_days=None, quantity=3):
     category, _ = Category.objects.get_or_create(name='cat', slug='cat')
     kwargs = dict(
         owner=owner, title='item', description='d', category=category,
-        condition='good', quantity=quantity, status='active',
+        condition='used', quantity=quantity, status='active',
     )
     if warranty_days is not None:
         kwargs['warranty_days'] = warranty_days

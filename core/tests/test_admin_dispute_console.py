@@ -37,7 +37,7 @@ def make_support_staff(username):
 def make_reservation(*, owner, buyer, total_price=Decimal('100.00'), completed=True):
     category, _ = Category.objects.get_or_create(name='cat', slug='cat')
     item = Item.objects.create(owner=owner, title='item', description='d', category=category,
-                                condition='good', quantity=3, status='reserved')
+                                condition='used', quantity=3, status='reserved')
     return Reservation.objects.create(
         item=item, buyer=buyer, quantity=1, deposit_amount=Decimal('10'), total_price=total_price,
         status='disputed', expires_at=timezone.now() + timedelta(days=1),

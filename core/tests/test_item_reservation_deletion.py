@@ -26,7 +26,7 @@ def make_item(owner, item_status='active'):
     category, _ = Category.objects.get_or_create(name='cat', slug='cat')
     return Item.objects.create(
         owner=owner, title='item', description='d', category=category,
-        condition='good', quantity=1, status=item_status,
+        condition='used', quantity=1, status=item_status,
     )
 
 

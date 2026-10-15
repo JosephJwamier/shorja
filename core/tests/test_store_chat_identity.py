@@ -112,7 +112,7 @@ def test_item_based_chat_is_never_flagged_as_own_store():
     buyer = make_user(f'sci_item_buyer_{id(object())}')
     category, _ = Category.objects.get_or_create(name='sci-cat', slug='sci-cat')
     item = Item.objects.create(owner=owner, title='i', description='d', category=category,
-                                condition='good', quantity=1, status='active')
+                                condition='used', quantity=1, status='active')
 
     client = APIClient()
     client.force_authenticate(user=buyer)

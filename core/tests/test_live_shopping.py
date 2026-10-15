@@ -40,7 +40,7 @@ def make_category(name='cat'):
 def make_item(owner, category, quantity=5, status='active'):
     return Item.objects.create(
         owner=owner, title='Test Item', description='desc',
-        category=category, condition='good', quantity=quantity, status=status,
+        category=category, condition='used', quantity=quantity, status=status,
     )
 
 

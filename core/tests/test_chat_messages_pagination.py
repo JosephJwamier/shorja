@@ -26,7 +26,7 @@ def make_chat():
     buyer = make_user(f'pg_buyer_{id(object())}')
     category, _ = Category.objects.get_or_create(name='pg-cat', slug='pg-cat')
     item = Item.objects.create(owner=owner, title='i', description='d', category=category,
-                                condition='good', quantity=1, status='active')
+                                condition='used', quantity=1, status='active')
     return Chat.objects.create(item=item, buyer=buyer, seller=owner)
 
 

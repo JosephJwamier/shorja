@@ -22,7 +22,7 @@ def make_item(owner, **extra):
     category, _ = Category.objects.get_or_create(name='cat', slug='cat')
     defaults = dict(
         title='item', description='d', category=category,
-        condition='good', quantity=1, status='active',
+        condition='used', quantity=1, status='active',
     )
     defaults.update(extra)
     return Item.objects.create(owner=owner, **defaults)

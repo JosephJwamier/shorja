@@ -35,7 +35,7 @@ def _superuser():
 def make_reservation(owner, buyer, total_price=Decimal('40')):
     category, _ = Category.objects.get_or_create(name='cat', slug='cat')
     item = Item.objects.create(owner=owner, title='item', description='d', category=category,
-                                condition='good', quantity=1, status='active')
+                                condition='used', quantity=1, status='active')
     return Reservation.objects.create(
         item=item, buyer=buyer, quantity=1, deposit_amount=Decimal('5'), total_price=total_price,
         status='confirmed', expires_at=timezone.now() + timedelta(days=1),
@@ -78,7 +78,7 @@ def test_dispute_export_resource_shows_readable_parties():
     owner, buyer = make_user('disp_exp_owner'), make_user('disp_exp_buyer')
     category, _ = Category.objects.get_or_create(name='cat2', slug='cat2')
     item = Item.objects.create(owner=owner, title='i', description='d', category=category,
-                                condition='good', quantity=1, status='active')
+                                condition='used', quantity=1, status='active')
     Dispute.objects.create(item=item, complainant=buyer, defendant=owner, title='t', description='d')
 
     dataset = DisputeExportResource().export()
@@ -147,7 +147,7 @@ def test_audit_log_records_dispute_changes_and_is_filterable_by_actor():
     staff = _superuser()
     category, _ = Category.objects.get_or_create(name='cat3', slug='cat3')
     item = Item.objects.create(owner=owner, title='i', description='d', category=category,
-                                condition='good', quantity=1, status='active')
+                                condition='used', quantity=1, status='active')
     dispute = Dispute.objects.create(item=item, complainant=buyer, defendant=owner, title='t', description='d')
     dispute.admin_notes = 'investigating'
     dispute.save(update_fields=['admin_notes'])

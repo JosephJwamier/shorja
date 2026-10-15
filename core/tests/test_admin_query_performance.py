@@ -36,7 +36,7 @@ def make_reservations(n, owner, buyer):
     category, _ = Category.objects.get_or_create(name='perf-cat', slug='perf-cat')
     for i in range(n):
         item = Item.objects.create(owner=owner, title=f'item{i}', description='d', category=category,
-                                    condition='good', quantity=1, status='active')
+                                    condition='used', quantity=1, status='active')
         Reservation.objects.create(
             item=item, buyer=buyer, quantity=1, deposit_amount=Decimal('1'), total_price=Decimal('10'),
             status='confirmed', expires_at=timezone.now() + timedelta(days=1),
@@ -88,7 +88,7 @@ def test_dispute_changelist_query_count_does_not_scale_with_row_count():
     def make_disputes(n):
         for i in range(n):
             item = Item.objects.create(owner=owner, title=f'd-item{i}', description='d', category=category,
-                                        condition='good', quantity=1, status='active')
+                                        condition='used', quantity=1, status='active')
             Dispute.objects.create(item=item, complainant=buyer, defendant=owner, title=f't{i}', description='d')
 
     make_disputes(3)

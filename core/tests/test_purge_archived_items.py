@@ -24,7 +24,7 @@ def make_item(owner, item_status='archived', age_days=400):
     category, _ = Category.objects.get_or_create(name='cat', slug='cat')
     item = Item.objects.create(
         owner=owner, title='item', description='d', category=category,
-        condition='good', quantity=1, status=item_status,
+        condition='used', quantity=1, status=item_status,
     )
     backdated = timezone.now() - timedelta(days=age_days)
     Item.objects.filter(id=item.id).update(updated_at=backdated)

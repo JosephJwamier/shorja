@@ -35,7 +35,7 @@ def make_reservation(*, owner, buyer, delivery_location=None, status='pending'):
     category, _ = Category.objects.get_or_create(name='cat', slug='cat')
     item = Item.objects.create(
         owner=owner, title='item', description='d', category=category,
-        condition='good', quantity=3, status='reserved',
+        condition='used', quantity=3, status='reserved',
     )
     return Reservation.objects.create(
         item=item, buyer=buyer, quantity=1,

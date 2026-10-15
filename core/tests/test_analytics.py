@@ -39,7 +39,7 @@ def make_category():
 def make_reservation(*, owner, buyer, total_price, status, completed_at, category=None, delivery_location=None):
     item = Item.objects.create(
         owner=owner, title='item', description='d', category=category or make_category(),
-        condition='good', quantity=1, status='active',
+        condition='used', quantity=1, status='active',
     )
     return Reservation.objects.create(
         item=item, buyer=buyer, quantity=1, deposit_amount=Decimal('1'), total_price=total_price,
@@ -157,7 +157,7 @@ def test_gmv_counts_only_sold_statuses_within_window():
 def test_dispute_stats_open_count_and_avg_resolution_hours():
     owner, buyer = make_user('disp_owner'), make_user('disp_buyer')
     item = Item.objects.create(owner=owner, title='i', description='d', category=make_category(),
-                                condition='good', quantity=1, status='active')
+                                condition='used', quantity=1, status='active')
     now = timezone.now()
 
     Dispute.objects.create(item=item, complainant=buyer, defendant=owner, title='open1', description='d', status='open')

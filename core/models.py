@@ -173,7 +173,10 @@ class Location(models.Model):
     # governorate is a reliable exact match instead of free-text guessing.
     state = models.CharField(max_length=100, choices=IRAQ_GOVERNORATE_CHOICES)
     postal_code = models.CharField(max_length=20, blank=True)
-    country = models.CharField(max_length=100)
+    # افتراضية: التطبيق عراقي و state مقيّد بقائمة محافظات العراق،
+    # فالحقل كان إجبارياً جوابه معروف سلفاً. بقي عموداً لا ثابتة
+    # لأن التوسّع خارج العراق يغيّر قيمته لا بنيته.
+    country = models.CharField(max_length=100, default='العراق', blank=True)
 
     # GPS coordinates (optional)
     latitude = models.DecimalField(max_digits=11, decimal_places=6, null=True, blank=True)
@@ -425,10 +428,16 @@ class Item(models.Model):
     CONDITION_CHOICES = [
         ('new', 'New'),
         ('like_new', 'Like New'),
-        ('good', 'Good'),
-        ('fair', 'Fair'),
-        ('poor', 'Poor'),
+        ('used', 'Used'),
+        ('unknown', 'Unknown'),
     ]
+    # اختُصرت من خمس درجات (new/like_new/good/fair/poor) إلى أربع. الثلاث
+    # الوسطى كانت تطلب من البائع حكماً على بضاعته بدقة لا يملكها ولا
+    # يملك المشتري وسيلة للتحقق منها — فالفرق بين «جيد» و«مقبول» رأي لا
+    # وصف. و'unknown' يعترف بالحالة الشائعة فعلاً: بضاعة جملة لم يفحصها
+    # بائعها قطعة قطعة.
+    #
+    # لا منطق في الخادم يقرأ القيمة (بحثت: choices فقط)، فالتبديل وصفي.
 
     STATUS_CHOICES = [
         ('draft', 'Draft'),

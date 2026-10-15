@@ -2799,7 +2799,7 @@ class QuickShowItemSerializer(serializers.Serializer):
     deposit_amount = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('0.00'))
     quantity = serializers.IntegerField(default=1, min_value=1)
     category_id = serializers.IntegerField(required=False, allow_null=True)
-    condition = serializers.ChoiceField(choices=Item.CONDITION_CHOICES, required=False, default='good')
+    condition = serializers.ChoiceField(choices=Item.CONDITION_CHOICES, required=False, default='unknown')
     description = serializers.CharField(required=False, allow_blank=True, default='')
 
     def validate_category_id(self, value):
@@ -2826,7 +2826,7 @@ class QuickLiveAuctionSerializer(serializers.Serializer):
     bid_deposit = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('0.00'))
     quantity = serializers.IntegerField(default=1, min_value=1)
     category_id = serializers.IntegerField(required=False, allow_null=True)
-    condition = serializers.ChoiceField(choices=Item.CONDITION_CHOICES, required=False, default='good')
+    condition = serializers.ChoiceField(choices=Item.CONDITION_CHOICES, required=False, default='unknown')
     description = serializers.CharField(required=False, allow_blank=True, default='')
 
     def validate_category_id(self, value):

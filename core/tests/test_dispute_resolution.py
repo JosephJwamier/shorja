@@ -39,7 +39,7 @@ def make_reservation(*, owner, buyer, total_price=Decimal('100.00'), quantity=2,
     category, _ = Category.objects.get_or_create(name='cat', slug='cat')
     item = Item.objects.create(
         owner=owner, title='item', description='d', category=category,
-        condition='good', quantity=item_quantity, status='reserved',
+        condition='used', quantity=item_quantity, status='reserved',
     )
     return Reservation.objects.create(
         item=item, buyer=buyer, quantity=quantity,
@@ -272,7 +272,7 @@ def test_item_only_dispute_resolves_without_touching_money():
     owner, buyer = make_user('owner10'), make_user('buyer10')
     category, _ = Category.objects.get_or_create(name='cat', slug='cat')
     item = Item.objects.create(owner=owner, title='i', description='d', category=category,
-                                condition='good', quantity=1, status='active')
+                                condition='used', quantity=1, status='active')
     dispute = Dispute.objects.create(item=item, reservation=None, complainant=buyer,
                                       defendant=owner, title='t', description='d')
 

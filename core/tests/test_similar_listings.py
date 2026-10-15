@@ -16,7 +16,7 @@ def make_category(name):
     return Category.objects.create(name=name, slug=name)
 
 
-def make_listing(owner, category, price, *, condition='good', status='active',
+def make_listing(owner, category, price, *, condition='used', status='active',
                   rating=Decimal('0.00'), sold_count=0, is_active=True, title=None):
     item = Item.objects.create(
         owner=owner,
@@ -124,7 +124,7 @@ def test_condition_and_popularity_break_price_ties(client, sellers, categories):
     )
     different_condition = make_listing(
         other_seller, category, Decimal('100.00'),
-        condition='fair', rating=Decimal('0.00'), sold_count=0, title='worse-match',
+        condition='used', rating=Decimal('0.00'), sold_count=0, title='worse-match',
     )
 
     response = client.get(similar_url(target.pk))

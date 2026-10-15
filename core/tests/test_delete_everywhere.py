@@ -41,7 +41,7 @@ def make_category(name='cat'):
 def make_item(owner):
     return Item.objects.create(
         owner=owner, title='item', description='d', category=make_category(),
-        condition='good', quantity=1, status='active',
+        condition='used', quantity=1, status='active',
     )
 
 

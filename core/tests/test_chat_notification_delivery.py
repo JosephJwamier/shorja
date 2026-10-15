@@ -38,7 +38,7 @@ def make_item_chat():
     buyer = make_user(f'cnd_buyer_{id(object())}')
     category, _ = Category.objects.get_or_create(name='cnd-cat', slug='cnd-cat')
     item = Item.objects.create(owner=owner, title='i', description='d', category=category,
-                                condition='good', quantity=5, status='active')
+                                condition='used', quantity=5, status='active')
 
     client = APIClient()
     client.force_authenticate(user=buyer)

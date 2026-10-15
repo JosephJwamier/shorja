@@ -42,7 +42,7 @@ def make_dispute():
         User.objects.create_user(username=f'pm_buyer_{id(object())}', password='x')
     category, _ = Category.objects.get_or_create(name='pm-cat', slug='pm-cat')
     item = Item.objects.create(owner=owner, title='i', description='d', category=category,
-                                condition='good', quantity=1, status='active')
+                                condition='used', quantity=1, status='active')
     return Dispute.objects.create(item=item, complainant=buyer, defendant=owner, title='t', description='d')
 
 
@@ -58,7 +58,7 @@ def make_item():
     owner = User.objects.create_user(username=f'pm_item_owner_{id(object())}', password='x')
     category, _ = Category.objects.get_or_create(name='pm-cat2', slug='pm-cat2')
     return Item.objects.create(owner=owner, title='i2', description='d', category=category,
-                                condition='good', quantity=1, status='active')
+                                condition='used', quantity=1, status='active')
 
 
 def make_target_user():
