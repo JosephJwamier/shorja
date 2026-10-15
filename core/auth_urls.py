@@ -19,6 +19,7 @@ from .auth_views import (
     UpdateProfileView,
     FirebaseCustomTokenView,
     SocialLoginView,
+    SocialAttachPhoneView,
 )
 
 urlpatterns = [
@@ -27,6 +28,10 @@ urlpatterns = [
     path('login/', LoginView.as_view(), name='login'),
     path('logout/', LogoutView.as_view(), name='logout'),
     path('social-login/', SocialLoginView.as_view(), name='social-login'),
+    # Second half of a Google sign-in when the account has no verified
+    # phone yet — social-login/ answers 'phone_required' and writes nothing.
+    path('social-login/attach-phone/', SocialAttachPhoneView.as_view(),
+         name='social-attach-phone'),
 
     # Email Verification
     path('verify-email/', VerifyEmailView.as_view(), name='verify-email'),

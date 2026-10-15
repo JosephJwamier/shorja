@@ -544,6 +544,80 @@ class UpdateProfileView(generics.UpdateAPIView):
         return self.request.user
 
 
+def verify_firebase_token(id_token):
+    """(decoded, error_response). Shared by every endpoint that trusts a
+    Firebase ID token, so they all fail the same way."""
+    from .firebase import get_firebase_app, FIREBASE_AVAILABLE
+
+    if not FIREBASE_AVAILABLE or get_firebase_app() is None:
+        return None, Response({'error': 'Firebase is not configured on the server'},
+                              status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    from firebase_admin import auth as firebase_auth
+    try:
+        return firebase_auth.verify_id_token(id_token), None
+    except Exception as e:
+        logger.warning(f"Firebase token verification failed: {e}")
+        return None, Response({'error': 'Invalid or expired token'},
+                              status=status.HTTP_401_UNAUTHORIZED)
+
+
+def resolve_social_user(uid, email):
+    """The account behind a Google identity, or None.
+
+    Matches on firebase_uid first, then on the email — the second case is
+    someone who registered with a password and later signed in with Google
+    on the same address; linking the uid keeps it one account rather than
+    silently starting a second.
+    """
+    user = User.objects.filter(firebase_uid=uid).first()
+    if user is not None:
+        return user
+
+    email = (email or '').strip().lower()
+    if not email:
+        return None
+    user = User.objects.filter(email=email).first()
+    if user is not None:
+        user.firebase_uid = uid
+        user.save(update_fields=['firebase_uid'])
+    return user
+
+
+def unique_username(email, name):
+    """A username derived from the email local-part, falling back to the
+    display name, with a numeric suffix on collision."""
+    base = (email.split('@')[0] if email else name) or 'user'
+    base = re.sub(r'[^a-zA-Z0-9_]', '', base).lower() or 'user'
+    base = base[:25]
+
+    username = base
+    suffix = 1
+    while User.objects.filter(username=username).exists():
+        suffix += 1
+        username = f"{base}{suffix}"
+    return username
+
+
+def issue_session(user, is_new_user):
+    """The one success shape for every sign-in route, so the app has a
+    single branch to handle rather than one per provider."""
+    refresh = RefreshToken.for_user(user)
+    has_locations = Location.objects.filter(user=user).exists()
+    primary_location = Location.objects.filter(user=user, is_primary=True).first()
+
+    return Response({
+        'user': UserSerializer(user).data,
+        'tokens': {
+            'refresh': str(refresh),
+            'access': str(refresh.access_token),
+        },
+        'is_new_user': is_new_user,
+        'has_locations': has_locations,
+        'primary_location_id': primary_location.id if primary_location else None,
+        'needs_location_setup': not has_locations,
+    })
+
+
 class SocialLoginView(APIView):
     """
     Sign in (or register) via Google/Facebook. The client signs in to Firebase
@@ -556,89 +630,126 @@ class SocialLoginView(APIView):
     throttle_scope = 'auth_login'
 
     def post(self, request):
-        from .firebase import get_firebase_app, FIREBASE_AVAILABLE
-
         id_token = request.data.get('id_token')
         if not id_token:
-            return Response({'error': 'id_token is required'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'id_token is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
 
-        if not FIREBASE_AVAILABLE or get_firebase_app() is None:
-            return Response({
-                'error': 'Firebase is not configured on the server'
-            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-
-        from firebase_admin import auth as firebase_auth
-
-        try:
-            decoded = firebase_auth.verify_id_token(id_token)
-        except Exception as e:
-            logger.warning(f"Social login token verification failed: {e}")
-            return Response({'error': 'Invalid or expired token'}, status=status.HTTP_401_UNAUTHORIZED)
+        decoded, error = verify_firebase_token(id_token)
+        if error:
+            return error
 
         uid = decoded['uid']
-        email = decoded.get('email')
         name = decoded.get('name', '')
-        email_verified = decoded.get('email_verified', False)
 
-        user = User.objects.filter(firebase_uid=uid).first()
-        is_new_user = False
+        user = resolve_social_user(uid, decoded.get('email'))
 
-        if user is None and email:
-            user = User.objects.filter(email=email).first()
-            if user is not None:
-                user.firebase_uid = uid
-                user.save(update_fields=['firebase_uid'])
+        # Every account must carry a verified phone, so this endpoint can
+        # only finish for someone who already has one. Google will not tell
+        # us the number — a Google ID token has no phone_number claim, and
+        # reading it from the People API needs a scope the user must have
+        # set up and granted, which usually comes back empty. So the client
+        # collects it instead: enter the number, receive Firebase's SMS, and
+        # come back to SocialAttachPhoneView with both tokens.
+        #
+        # Nothing is written here. Creating the account now and chasing the
+        # phone afterwards would leave unreachable rows behind every
+        # abandoned signup — accounts whose owner can never recover them.
+        if user is None or not user.phone_verified:
+            return Response({
+                'status': 'phone_required',
+                'detail': 'يلزم توثيق رقم الهاتف لإكمال تسجيل الدخول',
+                'email': decoded.get('email') or '',
+                'name': name,
+                'is_new_user': user is None,
+            })
 
-        if user is None:
-            if not email:
-                return Response({
-                    'error': 'Your account did not share an email address — please allow email access and try again'
-                }, status=status.HTTP_400_BAD_REQUEST)
+        return issue_session(user, is_new_user=False)
 
-            username = self._unique_username(email, name)
-            with transaction.atomic():
-                user = User.objects.create(
-                    username=username,
+
+
+class SocialAttachPhoneView(APIView):
+    """Second half of a Google sign-in: attach a verified phone, then finish.
+
+    SocialLoginView answers `phone_required` and writes nothing. The client
+    collects the number, lets Firebase Phone Auth send and check the SMS,
+    and posts both tokens here:
+
+      id_token        the Google token from the first step — still the proof
+                      of *which* Google identity is signing in
+      phone_id_token  a phone token, proof that this device holds the number
+
+    Both are required. The Google token alone would let anyone attach any
+    number; the phone token alone would not say whose account to attach it
+    to. The account is created here, not earlier, so an abandoned signup
+    leaves nothing behind.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth_login'
+
+    def post(self, request):
+        id_token = request.data.get('id_token')
+        phone_id_token = request.data.get('phone_id_token')
+        if not id_token or not phone_id_token:
+            return Response(
+                {'error': 'id_token and phone_id_token are both required'},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        social, error = verify_firebase_token(id_token)
+        if error:
+            return error
+        phone_token, error = verify_firebase_token(phone_id_token)
+        if error:
+            return error
+
+        # Only a phone sign-in carries this claim, so a second Google token
+        # cannot stand in for the SMS step.
+        canonical = to_e164(phone_token.get('phone_number'))
+        if not canonical:
+            return Response({'error': 'This sign-in carries no verified phone number'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        uid = social['uid']
+        email = (social.get('email') or '').strip().lower() or None
+        name = social.get('name', '')
+
+        user = resolve_social_user(uid, email)
+
+        # The number may already belong to an account reached another way —
+        # a password signup, or a different Google identity. Refusing is the
+        # only safe answer: silently moving the number would hand this
+        # caller the other account's recovery route.
+        holder = User.objects.filter(phone=canonical).first()
+        if holder is not None and (user is None or holder.pk != user.pk):
+            return Response({'error': 'هذا الرقم مسجّل في حساب آخر'},
+                            status=status.HTTP_409_CONFLICT)
+
+        is_new_user = user is None
+        with transaction.atomic():
+            if is_new_user:
+                user = User(
+                    username=unique_username(email, name),
                     email=email,
                     first_name=name,
-                    email_verified=email_verified,
+                    email_verified=bool(social.get('email_verified')),
                     firebase_uid=uid,
+                    phone=canonical,
+                    phone_verified=True,
                 )
+                # No password: this account signs in through Google, and an
+                # unusable hash cannot be guessed or brute-forced.
                 user.set_unusable_password()
-                user.save(update_fields=['password'])
-            is_new_user = True
+                user.save()
+            else:
+                user.phone = canonical
+                user.phone_verified = True
+                if not user.firebase_uid:
+                    user.firebase_uid = uid
+                user.save(update_fields=['phone', 'phone_verified', 'firebase_uid'])
 
-        refresh = RefreshToken.for_user(user)
-        has_locations = Location.objects.filter(user=user).exists()
-        primary_location = Location.objects.filter(user=user, is_primary=True).first()
-
-        return Response({
-            'user': UserSerializer(user).data,
-            'tokens': {
-                'refresh': str(refresh),
-                'access': str(refresh.access_token),
-            },
-            'is_new_user': is_new_user,
-            'has_locations': has_locations,
-            'primary_location_id': primary_location.id if primary_location else None,
-            'needs_location_setup': not has_locations,
-        })
-
-    @staticmethod
-    def _unique_username(email, name):
-        """Derive a unique username from the email local-part (falling back to
-        the display name), appending a numeric suffix on collision."""
-        import re
-        base = (email.split('@')[0] if email else name) or 'user'
-        base = re.sub(r'[^a-zA-Z0-9_]', '', base).lower() or 'user'
-        base = base[:25]
-
-        username = base
-        suffix = 1
-        while User.objects.filter(username=username).exists():
-            suffix += 1
-            username = f"{base}{suffix}"
-        return username
+        logger.info(f"Phone attached to social account {user.id} (new={is_new_user})")
+        return issue_session(user, is_new_user=is_new_user)
 
 
 class FirebaseCustomTokenView(APIView):
