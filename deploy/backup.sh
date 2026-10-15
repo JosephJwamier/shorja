@@ -25,8 +25,12 @@ FILE="/tmp/balla-${STAMP}.sql.gz"
 docker compose -f deploy/docker-compose.yml exec -T db     mysqldump -u root -p"${MYSQL_ROOT_PASSWORD}"     --single-transaction --routines --triggers --quick     "${DB_NAME}" | gzip -9 > "${FILE}"
 
 SIZE=$(stat -c%s "${FILE}")
-# نسخة أصغر من 100 كيلوبايت تعني فشلاً صامتاً (قاعدة فارغة أو خطأ مصادقة).
-if [ "${SIZE}" -lt 102400 ]; then
+# الحد الأدنى يميّز "فشل صامت" عن "قاعدة صغيرة". mysqldump قد ينجح شكلياً
+# ويُخرج ملفاً شبه فارغ عند خطأ مصادقة أو قاعدة غير موجودة؛ أما قاعدة
+# حقيقية — ولو بلا معاملات — فمخططها وحده يتجاوز 20 كيلوبايت مضغوطاً
+# (قاعدة الإطلاق الفارغة أنتجت 73 كيلوبايت). 20 كيلوبايت تمسك الفشل
+# الحقيقي بلا رفض بداية مشروعة.
+if [ "${SIZE}" -lt 20480 ]; then
     echo "[backup] FAILED: dump only ${SIZE} bytes" >&2
     rm -f "${FILE}"
     exit 1
