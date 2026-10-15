@@ -6,8 +6,13 @@
 #
 # التركيب على الخادم:
 #   1) ثبّت rclone:  curl https://rclone.org/install.sh | sudo bash
-#   2) rclone config  -> نوع s3، مزوّد Cloudflare، نفس مفاتيح R2 في .env
-#      سمِّ الوجهة r2
+#   2) rclone config  -> نوع s3، مزوّد Cloudflare، سمِّ الوجهة r2.
+#      استعمل توكناً خاصاً بالنسخ الاحتياطي مقيّداً بـ shorjeh-backups —
+#      لا مفتاح الريلز: خادم مخترق يجب ألّا يستطيع حذف نسخك.
+#      ثم ألزِم rclone بعدم محاولة إنشاء الـ bucket:
+#          rclone config update r2 no_check_bucket true
+#      بدونها يستدعي CreateBucket قبل كل رفع ويفشل بـ 403، لأن توكناً
+#      مقيّداً بـ bucket واحد لا يملك صلاحيات إدارية على الحساب.
 #   3) أنشئ bucket اسمه shorjeh-backups في R2
 #   4) crontab -e  وأضف:
 #        15 2 * * * /app/deploy/backup.sh >> /var/log/balla-backup.log 2>&1
