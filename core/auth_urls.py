@@ -14,6 +14,7 @@ from .auth_views import (
     ChangePasswordView,
     ResetPasswordView,
     ResetPasswordConfirmView,
+    ResetPasswordByPhoneView,
     UserProfileView,
     UpdateProfileView,
     FirebaseCustomTokenView,
@@ -38,6 +39,8 @@ urlpatterns = [
     path('change-password/', ChangePasswordView.as_view(), name='change-password'),
     path('reset-password/', ResetPasswordView.as_view(), name='reset-password'),
     path('reset-password-confirm/', ResetPasswordConfirmView.as_view(), name='reset-password-confirm'),
+    # Phone route: the only one available to accounts without an email.
+    path('reset-password-phone/', ResetPasswordByPhoneView.as_view(), name='reset-password-phone'),
 
     # Profile
     path('profile/', UserProfileView.as_view(), name='profile'),

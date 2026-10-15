@@ -25,6 +25,7 @@ from .serializers import (
     LogoutSerializer,
 )
 from .notifications import NotificationService
+from .phone_utils import to_e164
 from .models import Location  # NEW: Import Location
 
 User = get_user_model()
@@ -65,8 +66,10 @@ class RegisterView(generics.CreateAPIView):
                     is_active=True
                 )
 
-        # Send verification email
-        send_email_verification_code(user)
+        # Only when the user gave one: email is optional now, and
+        # send_email_verification_code() on a NULL address would raise.
+        if user.email:
+            send_email_verification_code(user)
 
         # Generate JWT tokens
         refresh = RefreshToken.for_user(user)
@@ -77,7 +80,11 @@ class RegisterView(generics.CreateAPIView):
                 'refresh': str(refresh),
                 'access': str(refresh.access_token),
             },
-            'message': 'Registration successful. Please verify your email.',
+            'message': (
+                'Registration successful. Please verify your email.'
+                if user.email else
+                'Registration successful. Please verify your phone number.'
+            ),
             'has_default_location': default_location is not None,  # NEW
             'location_id': default_location.id if default_location else None  # NEW
         }, status=status.HTTP_201_CREATED)
@@ -95,22 +102,29 @@ class LoginView(generics.GenericAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        username_or_email = serializer.validated_data['username']
+        identifier = (serializer.validated_data['username'] or '').strip()
         password = serializer.validated_data['password']
 
-        # Try to find user by username or email
-        user = None
-        if '@' in username_or_email:
-            try:
-                user = User.objects.get(email=username_or_email)
-                username = user.username
-            except User.DoesNotExist:
-                pass
-        else:
-            username = username_or_email
+        # Resolve whatever was typed down to a username. A real username
+        # always wins, so adding these fallbacks cannot change the meaning
+        # of an existing login; only unmatched input is tried as an email
+        # or a phone.
+        #
+        # (The previous version left `username` unbound when an '@' string
+        # matched no account, raising UnboundLocalError — a 500 on what is
+        # simply a wrong address.)
+        username = identifier
+        if not User.objects.filter(username=identifier).exists():
+            if '@' in identifier:
+                match = User.objects.filter(email=identifier.lower()).first()
+            else:
+                # Any spelling of the number reaches the one stored form.
+                canonical = to_e164(identifier)
+                match = User.objects.filter(phone=canonical).first() if canonical else None
+            if match:
+                username = match.username
 
-        # Authenticate
-        user = authenticate(request, username=username if not user else user.username, password=password)
+        user = authenticate(request, username=username, password=password)
 
         if user is None:
             return Response({
@@ -303,15 +317,11 @@ class VerifyPhoneView(APIView):
                 'error': 'The verified number does not match this account'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # One phone, one verified account: otherwise several accounts could
-        # each claim the same number and each be treated as reachable at it.
-        taken = User.objects.filter(
-            phone_verified=True, phone__endswith=account_phone
-        ).exclude(pk=user.pk).exists()
-        if taken:
-            return Response({
-                'error': 'This number is already verified on another account'
-            }, status=status.HTTP_409_CONFLICT)
+        # One phone, one account — now enforced by the UNIQUE index on
+        # User.phone rather than checked here. The old 409 branch scanned for
+        # another account holding this number; with the constraint in place
+        # no such row can exist, so it was unreachable and has been removed.
+        # If uniqueness is ever relaxed, this is where the check belongs.
 
         user.phone_verified = True
         user.save(update_fields=['phone_verified'])
@@ -374,9 +384,16 @@ class ResetPasswordView(APIView):
     throttle_scope = 'auth_reset'
 
     def post(self, request):
-        email = request.data.get('email')
+        # Normalised and required: email is NULL for most accounts now, and
+        # a blank request must not resolve to one of them. (`.get(email='')`
+        # on the old non-unique column would have matched every phone-only
+        # account at once and raised MultipleObjectsReturned — a 500 on an
+        # empty form field.)
+        email = (request.data.get('email') or '').strip().lower()
 
         try:
+            if not email:
+                raise User.DoesNotExist
             user = User.objects.get(email=email)
             code = user.generate_verification_code('password_reset')
 
@@ -417,10 +434,12 @@ class ResetPasswordConfirmView(APIView):
         serializer = ResetPasswordSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        email = serializer.validated_data['email']
+        email = (serializer.validated_data['email'] or '').strip().lower()
         code = serializer.validated_data['code']
 
         try:
+            if not email:
+                raise User.DoesNotExist
             user = User.objects.get(email=email)
         except User.DoesNotExist:
             return Response({
@@ -438,6 +457,73 @@ class ResetPasswordConfirmView(APIView):
         user.clear_verification_code()
 
         return Response({'message': 'Password reset successful'})
+
+
+class ResetPasswordByPhoneView(APIView):
+    """Reset a password with proof of owning the account's phone.
+
+    Email is optional now, so most accounts have no address to send a code
+    to — the phone is what every account has. There is no code to generate
+    or compare here: Firebase Phone Auth sends the SMS from the device and
+    mints an ID token carrying a verified `phone_number` claim. Possession
+    of that token *is* the proof, verified the same way VerifyPhoneView and
+    SocialLoginView verify theirs.
+
+    Deliberately not revealing whether a number is registered: the response
+    is identical whether the phone matched an account or not, so this cannot
+    be used to enumerate which numbers hold accounts.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth_reset'
+
+    GENERIC_OK = {'message': 'If that number has an account, its password has been reset'}
+
+    def post(self, request):
+        from .firebase import get_firebase_app, FIREBASE_AVAILABLE
+
+        id_token = request.data.get('id_token')
+        new_password = request.data.get('new_password') or ''
+
+        if not id_token:
+            return Response({'error': 'id_token is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if len(new_password) < 8:
+            return Response({'error': 'كلمة المرور يجب أن تكون 8 أحرف على الأقل'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        if not FIREBASE_AVAILABLE or get_firebase_app() is None:
+            return Response({'error': 'Firebase is not configured on the server'},
+                            status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        from firebase_admin import auth as firebase_auth
+        try:
+            decoded = firebase_auth.verify_id_token(id_token)
+        except Exception as e:
+            logger.warning(f"Phone password reset token check failed: {e}")
+            return Response({'error': 'Invalid or expired token'},
+                            status=status.HTTP_401_UNAUTHORIZED)
+
+        # Only a phone sign-in carries this claim; a Google token does not,
+        # so a Google session cannot be replayed here to seize an account.
+        canonical = to_e164(decoded.get('phone_number'))
+        if not canonical:
+            return Response({'error': 'This sign-in carries no verified phone number'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.filter(phone=canonical).first()
+        if user is None:
+            return Response(self.GENERIC_OK)
+
+        user.set_password(new_password)
+        # The SMS proved the number reaches them; recording that saves the
+        # user a second verification immediately after recovering.
+        user.phone_verified = True
+        user.save(update_fields=['password', 'phone_verified'])
+        user.clear_verification_code()
+        logger.info(f"Password reset by phone for user {user.id}")
+
+        return Response(self.GENERIC_OK)
 
 
 class UserProfileView(generics.RetrieveAPIView):

@@ -29,11 +29,14 @@ from core.models import (
     Reservation, User, UserStore, get_or_create_wallet,
 )
 
+from core.tests.phones import next_phone
+
 pytestmark = pytest.mark.django_db
 
 
 def make_user(username):
-    return User.objects.create_user(username=username, password='x', phone='0770' + '0' * 6)
+    return User.objects.create_user(
+        username=username, password='x', phone=next_phone())
 
 
 def make_location(user, state, primary=True):

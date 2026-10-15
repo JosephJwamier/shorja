@@ -6,6 +6,7 @@ from django.utils import timezone
 from decimal import Decimal
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from .phone_utils import to_e164
 from .models import (
     Item, ItemImage, ItemVariant, FixedPriceListing, AuctionListing,
     Bid, Reservation, Representative, ItemTransfer, Category,
@@ -2011,12 +2012,41 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     # for display instead of staying empty until the user visits settings.
     first_name = serializers.CharField(required=True, allow_blank=False, max_length=150)
     last_name = serializers.CharField(required=True, allow_blank=False, max_length=150)
+    # The phone carries identity and recovery, so it is the one contact
+    # detail that must be present. Email is kept for those who want it —
+    # many Iraqi traders have no address they check.
+    phone = serializers.CharField(required=True, allow_blank=False, max_length=20)
+    email = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
     password = serializers.CharField(write_only=True, min_length=8)
     password2 = serializers.CharField(write_only=True, min_length=8)
 
     class Meta:
         model = User
         fields = ['username', 'first_name', 'last_name', 'email', 'phone', 'password', 'password2']
+
+    def validate_phone(self, value):
+        """Reject early and in the caller's own terms. The model would also
+        refuse this, but a serializer error reaches the app as a field
+        message the signup form can show under the phone box."""
+        canonical = to_e164(value)
+        if not canonical:
+            raise serializers.ValidationError(
+                'رقم هاتف عراقي غير صالح — يجب أن يبدأ بـ 075 أو 077 أو 078 أو 079'
+            )
+        # Compare canonically: the number may already exist under another
+        # spelling, and a UNIQUE violation at save() would surface as a 500
+        # rather than a field error.
+        if User.objects.filter(phone=canonical).exists():
+            raise serializers.ValidationError('هذا الرقم مسجّل في حساب آخر')
+        return canonical
+
+    def validate_email(self, value):
+        normalised = (value or '').strip().lower()
+        if not normalised:
+            return None          # stored as NULL, not ''
+        if User.objects.filter(email=normalised).exists():
+            raise serializers.ValidationError('هذا البريد مسجّل في حساب آخر')
+        return normalised
 
     def validate(self, data):
         if data['password'] != data['password2']:

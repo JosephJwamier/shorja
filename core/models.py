@@ -9,12 +9,37 @@ from django.contrib.auth.models import AbstractUser
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
 from decimal import Decimal
+from django.core.exceptions import ValidationError
 from .iraq_governorates import IRAQ_GOVERNORATE_CHOICES
+from .phone_utils import to_e164
+
+
+def validate_iraqi_mobile(value):
+    """Field-level guard so admin forms and serializers both reject a bad
+    number with a readable message instead of it reaching save()."""
+    if value and not to_e164(value):
+        raise ValidationError(
+            'رقم هاتف عراقي غير صالح — يجب أن يبدأ بـ 075 أو 077 أو 078 أو 079'
+        )
 
 
 class User(AbstractUser):
     """Extended user model with trust scoring"""
-    phone = models.CharField(max_length=20, blank=True)
+    # The phone is the account's identity: it is required at signup, it is
+    # how an account is recovered, and no two accounts may share one.
+    #
+    # NULL rather than '' for "no phone": MySQL allows any number of NULLs
+    # in a unique index but only a single '', so blanks stored as '' would
+    # make the second phone-less account (an admin, a fixture) fail to save.
+    phone = models.CharField(
+        max_length=20, blank=True, null=True, unique=True,
+        validators=[validate_iraqi_mobile],
+        help_text="E.164, normalised on save (+9647XXXXXXXXX)",
+    )
+    # Optional now that the phone carries identity, but still a lookup key
+    # for password recovery, so one address cannot belong to two accounts.
+    # AbstractUser declares it blank and non-unique; both are overridden.
+    email = models.EmailField('email address', blank=True, null=True, unique=True)
     phone_verified = models.BooleanField(default=False)
     email_verified = models.BooleanField(default=False)
     identity_verified = models.BooleanField(default=False)
@@ -57,6 +82,32 @@ class User(AbstractUser):
         max_length=20, choices=VERIFICATION_PURPOSE_CHOICES, null=True, blank=True
     )
     verification_code_sent_at = models.DateTimeField(null=True, blank=True)
+
+    def save(self, *args, **kwargs):
+        """Store one canonical spelling of the phone, or nothing.
+
+        A UNIQUE index compares strings, so without this '07701234567' and
+        '+9647701234567' would be accepted as two accounts on one phone —
+        the exact thing the constraint exists to prevent. Normalising here
+        rather than only in the serializer means admin edits, management
+        commands and fixtures obey the invariant too.
+
+        Empty collapses to NULL for both fields (see the field comments).
+        An unparseable non-empty phone raises instead of being silently
+        dropped: validate_iraqi_mobile should already have rejected it, so
+        reaching this means a caller bypassed validation, and losing the
+        number quietly would cost the user their account recovery.
+        """
+        if self.phone:
+            canonical = to_e164(self.phone)
+            if not canonical:
+                raise ValueError(f'Unparseable Iraqi mobile number: {self.phone!r}')
+            self.phone = canonical
+        else:
+            self.phone = None
+
+        self.email = (self.email or '').strip().lower() or None
+        super().save(*args, **kwargs)
 
     def calculate_trust_score(self):
         """Calculate trust score based on ratings and history"""

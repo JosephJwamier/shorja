@@ -16,6 +16,7 @@ import pytest
 from rest_framework.test import APIClient
 
 from core.models import Category, Location, User, UserStore
+from core.tests.phones import next_phone
 
 pytestmark = pytest.mark.django_db
 
@@ -26,7 +27,8 @@ def client():
 
 
 def make_seller(username='sel'):
-    return User.objects.create_user(username=username, password='x', phone='07700000000')
+    return User.objects.create_user(
+        username=username, password='x', phone=next_phone())
 
 
 def location_payload(name='home', primary=None):

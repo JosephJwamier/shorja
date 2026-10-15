@@ -127,16 +127,17 @@ def test_account_without_a_phone_is_rejected(client):
     assert user.phone_verified is False
 
 
-def test_number_already_verified_on_another_account_is_rejected(client):
+def test_one_phone_cannot_reach_two_accounts_at_all():
+    """This used to be a 409 from VerifyPhoneView, which scanned for another
+    account already verified on the number. User.phone is UNIQUE now, so the
+    second account cannot be created in the first place — a stronger
+    guarantee, enforced one layer down, and it holds for every write path
+    (admin, fixtures, management commands) not just this endpoint."""
+    from django.db import IntegrityError
+
     make_user('ph_first', phone='07701234567', phone_verified=True)
-    second = make_user('ph_second', phone='07701234567')
-    client.force_authenticate(user=second)
-
-    response = post_token(client, '+9647701234567')
-
-    assert response.status_code == 409
-    second.refresh_from_db()
-    assert second.phone_verified is False
+    with pytest.raises(IntegrityError):
+        make_user('ph_second', phone='07701234567')
 
 
 def test_invalid_token_is_rejected(client):

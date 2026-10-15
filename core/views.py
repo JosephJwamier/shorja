@@ -333,6 +333,12 @@ class ItemViewSet(viewsets.ModelViewSet):
         return ItemSerializer
 
     def get_permissions(self):
+        # Browsing is open: a visitor must be able to see what is for sale
+        # before deciding whether the app is worth an account. Everything
+        # that writes, reserves, bids or reveals another user's data stays
+        # behind IsAuthenticated — only these two read actions are opened.
+        if self.action in ('list', 'retrieve'):
+            return [AllowAny()]
         # Base update/delete have no manual owner check (unlike the custom
         # actions below, which each enforce their own owner/holder rules) —
         # restrict them here so only the item's owner can edit or remove it.
@@ -1199,6 +1205,14 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
     search_fields = ['item__title', 'item__name_ar', 'item__description']
     ordering_fields = ['created_at', 'end_time', 'current_price', 'item__sold_count']
     pagination_class = ItemStandardPagination
+
+    def get_permissions(self):
+        # Same reasoning as ItemViewSet: a live auction is the strongest
+        # reason to sign up, so a guest has to be able to watch one.
+        # my_auctions and place_bid both read request.user and stay closed.
+        if self.action in ('list', 'retrieve'):
+            return [AllowAny()]
+        return super().get_permissions()
 
     def get_queryset(self):
         queryset = super().get_queryset()
