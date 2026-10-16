@@ -3851,8 +3851,11 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             }, status=status.HTTP_200_OK)
 
         except ValueError as e:
+            # رمز ثابت يقرأه التطبيق ليحوّل المشتري إلى شحن محفظته.
+            # مطابقة نصّ الرسالة كانت ستنكسر عند أول إعادة صياغة أو ترجمة.
             return Response({
                 'success': False,
+                'code': 'insufficient_balance',
                 'message': 'Insufficient balance to complete this reservation',
                 'errors': str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
