@@ -12,249 +12,363 @@
 <meta property="og:description" content="بِع واشترِ وزايد. توصيل لكل المحافظات الثماني عشرة، ودفع نقداً عند الاستلام.">
 <meta property="og:url" content="{{ canonical }}">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#5e120f">
 <meta name="description" content="سوق العراق للبيع والشراء والمزادات والبث المباشر. توصيل لكل المحافظات، ودفع نقداً عند الاستلام.">
 <link rel="canonical" href="{{ canonical }}">
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Kufi+Arabic:wght@500;700;900&family=IBM+Plex+Sans+Arabic:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Kufi+Arabic:wght@600;800&family=Rubik:wght@400;500;600;700&display=swap" rel="stylesheet">
 
 <style>
-  /* لوحة لافتة المحلّ: أرضية حمراء وحروف عظميّة، والنحاسي من موازين
-     السوق النحاسية — لا ذهبي زخرفي. */
-  :root {
-    --red:        #8c1d18;
-    --red-deep:   #5e120f;
-    --red-ink:    #3d0b09;
-    --bone:       #f2ece3;
-    --bone-dim:   #cdbfae;
-    --ink:        #1a1512;
-    --ink-soft:   #6a5c51;
-    --brass:      #c9962f;
-    --paper:      #fffdfa;
-    --line:       #e3d9cc;
+/* ══ الرموز ══════════════════════════════════════════════════════════
+   لوحة لافتة المحلّ: أرضية حمراء، حروف عظميّة، ونحاسي من موازين السوق.
+   كل لون رمز، ولا سداسيّ خام داخل المكوّنات. */
+:root {
+  --red:       #8c1d18;
+  --red-deep:  #5e120f;
+  --red-dark:  #3d0b09;
+  --bone:      #f6f1e8;
+  --bone-dim:  #d6c8b6;
+  --ink:       #191310;
+  --ink-2:     #675850;
+  --brass:     #d4a23c;
+  --paper:     #fffdf9;
+  --surface:   #fbf7f1;
+  --line:      #e6dccd;
 
-    --display: "Noto Kufi Arabic", system-ui, sans-serif;
-    --body: "IBM Plex Sans Arabic", system-ui, sans-serif;
-  }
+  --display: "Noto Kufi Arabic", system-ui, sans-serif;
+  --body: "Rubik", "Noto Kufi Arabic", system-ui, sans-serif;
 
-  * { box-sizing: border-box; }
-  html { scroll-behavior: smooth; }
-  @media (prefers-reduced-motion: reduce) {
-    html { scroll-behavior: auto; }
-    * { animation: none !important; transition: none !important; }
-  }
+  --s1: 8px;  --s2: 16px; --s3: 24px;
+  --s4: 32px; --s5: 48px; --s6: 72px;
 
-  body {
-    margin: 0;
-    background: var(--paper);
-    color: var(--ink);
-    font-family: var(--body);
-    font-size: 16px;
-    line-height: 1.75;
-    -webkit-font-smoothing: antialiased;
-  }
+  --r: 14px;
+  --ease: cubic-bezier(.4, 0, .2, 1);
+}
 
-  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 20px; }
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
 
-  h1, h2, h3 { font-family: var(--display); line-height: 1.3; margin: 0; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 16px;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
 
-  /* عنوان القسم: شريحة صغيرة فوقه تسمّيه، كلافتة فوق باب محلّ. */
-  .eyebrow {
-    font-family: var(--display);
-    font-size: .72rem;
-    font-weight: 700;
-    letter-spacing: .14em;
-    color: var(--brass);
-    margin: 0 0 10px;
-  }
+h1, h2, h3 { font-family: var(--display); line-height: 1.35; margin: 0; }
+p { margin: 0; }
 
-  /* ── الواجهة ─────────────────────────────────────────────────────── */
-  .hero {
-    background: var(--red-deep);
-    color: var(--bone);
-    padding: 76px 0 64px;
-    position: relative;
-    overflow: hidden;
-  }
-  /* خطوط الأزقّة: فواصل رأسية خفيفة توحي بصفّ محلّات، لا نقش. */
-  .hero::after {
-    content: "";
-    position: absolute; inset: 0;
-    background: repeating-linear-gradient(
-      90deg, rgba(242,236,227,.05) 0 1px, transparent 1px 72px);
-    pointer-events: none;
-  }
-  .hero > * { position: relative; z-index: 1; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 var(--s3); }
 
-  .brandline {
-    display: flex; align-items: center; gap: 12px;
-    margin-bottom: 44px;
-  }
-  .mark {
-    width: 40px; height: 40px; flex: none;
-    display: grid; place-items: center;
-    background: var(--bone); color: var(--red-deep);
-    font-family: var(--display); font-weight: 900; font-size: 1.25rem;
-  }
-  .brandname {
-    font-family: var(--display); font-weight: 700;
-    font-size: 1.05rem; letter-spacing: .02em;
-  }
+/* الحركة تخدم المعنى؛ من يطلب تقليلها لا يُفرض عليه شيء. */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
 
-  .hero h1 {
-    font-size: clamp(2.2rem, 7vw, 4rem);
-    font-weight: 900;
-    max-width: 16ch;
-    margin-bottom: 20px;
-  }
-  .hero h1 em { font-style: normal; color: var(--brass); }
+:focus-visible { outline: 3px solid var(--brass); outline-offset: 3px; border-radius: 4px; }
 
-  .hero p {
-    font-size: clamp(1rem, 2.4vw, 1.18rem);
-    color: var(--bone-dim);
-    max-width: 46ch;
-    margin: 0 0 32px;
-  }
+/* ══ الأزرار ═════════════════════════════════════════════════════════ */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: var(--s1);
+  font-family: var(--display); font-weight: 600; font-size: .95rem;
+  /* 48px ارتفاعاً: أعلى من حدّ اللمس 44px. */
+  min-height: 48px; padding: 0 28px;
+  border: 2px solid transparent; border-radius: var(--r);
+  text-decoration: none; cursor: pointer;
+  transition: background-color .2s var(--ease), color .2s var(--ease),
+              border-color .2s var(--ease), transform .2s var(--ease);
+}
+.btn:active { transform: translateY(1px); }
+.btn--primary { background: var(--brass); color: var(--red-dark); }
+.btn--primary:hover { background: var(--bone); }
+.btn--ghost { color: var(--bone); border-color: rgba(246,241,232,.45); }
+.btn--ghost:hover { background: rgba(246,241,232,.12); border-color: var(--bone); }
 
-  .actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.pending {
+  display: inline-flex; align-items: center; gap: var(--s1);
+  min-height: 48px; padding: 0 24px;
+  font-family: var(--display); font-size: .9rem; font-weight: 600;
+  color: var(--bone-dim);
+  border: 2px dashed rgba(246,241,232,.4); border-radius: var(--r);
+}
 
-  .btn {
-    display: inline-block;
-    font-family: var(--display); font-weight: 700; font-size: .95rem;
-    padding: 14px 30px;
-    text-decoration: none;
-    border: 2px solid var(--bone);
-  }
-  .btn-solid { background: var(--bone); color: var(--red-deep); }
-  .btn-solid:hover { background: var(--brass); border-color: var(--brass); color: var(--red-ink); }
-  .btn-ghost { color: var(--bone); }
-  .btn-ghost:hover { background: rgba(242,236,227,.12); }
+.eyebrow {
+  font-family: var(--display); font-size: .72rem; font-weight: 600;
+  letter-spacing: .16em; color: var(--brass);
+  margin-bottom: var(--s1);
+}
 
-  .pending {
-    display: inline-block;
-    font-family: var(--display); font-size: .9rem; font-weight: 500;
-    padding: 13px 26px;
-    border: 2px dashed rgba(242,236,227,.45);
-    color: var(--bone-dim);
-  }
+/* ══ الواجهة ═════════════════════════════════════════════════════════ */
+.hero {
+  background: var(--red-deep);
+  color: var(--bone);
+  padding: var(--s4) 0 var(--s6);
+  position: relative; overflow: hidden;
+}
+/* أعمدة خافتة توحي بصفّ محلّات — من عالم السوق لا زخرفة عامة. */
+.hero::before {
+  content: ""; position: absolute; inset: 0;
+  background: repeating-linear-gradient(90deg,
+    rgba(246,241,232,.05) 0 1px, transparent 1px 80px);
+  pointer-events: none;
+}
+.hero > * { position: relative; z-index: 1; }
 
-  /* ── أقسام ───────────────────────────────────────────────────────── */
-  section { padding: 72px 0; }
-  .section-head { max-width: 52ch; margin-bottom: 40px; }
-  .section-head h2 { font-size: clamp(1.5rem, 4vw, 2.1rem); font-weight: 700; }
-  .section-head p { color: var(--ink-soft); margin: 12px 0 0; }
+.nav { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s6); }
+.mark {
+  width: 38px; height: 38px; flex: none; border-radius: 10px;
+  display: grid; place-items: center;
+  background: var(--bone); color: var(--red-deep);
+  font-family: var(--display); font-weight: 800; font-size: 1.15rem;
+}
+.nav b { font-family: var(--display); font-weight: 600; font-size: 1.05rem; }
 
-  /* ── الخطوات: تسلسل حقيقي، فالترقيم يحمل معنى ──────────────────── */
-  .steps { display: grid; gap: 0; border: 1px solid var(--line); }
-  @media (min-width: 760px) { .steps { grid-template-columns: repeat(3, 1fr); } }
-  .step { padding: 30px 26px; border-bottom: 1px solid var(--line); }
-  .step:last-child { border-bottom: none; }
-  @media (min-width: 760px) {
-    .step { border-bottom: none; border-left: 1px solid var(--line); }
-    .step:last-child { border-left: none; }
-  }
-  .step-n {
-    font-family: var(--display); font-weight: 900;
-    font-size: 2.4rem; color: var(--line);
-    line-height: 1; margin-bottom: 14px;
-  }
-  .step h3 { font-size: 1.05rem; font-weight: 700; margin-bottom: 6px; }
-  .step p { margin: 0; color: var(--ink-soft); font-size: .93rem; }
+.hero-grid { display: grid; gap: var(--s5); align-items: center; }
+@media (min-width: 900px) { .hero-grid { grid-template-columns: 1.15fr .85fr; } }
 
-  /* ── التوقيع: كتلة المحافظات. الادّعاء يُبرهَن بالسرد لا بالوصف. ── */
-  .reach { background: var(--ink); color: var(--bone); }
-  .reach .section-head h2 { color: var(--bone); }
-  .reach .section-head p { color: var(--bone-dim); }
-  .govs {
-    display: grid; gap: 1px;
-    background: rgba(242,236,227,.16);
-    border: 1px solid rgba(242,236,227,.16);
-    grid-template-columns: repeat(2, 1fr);
-  }
-  @media (min-width: 560px) { .govs { grid-template-columns: repeat(3, 1fr); } }
-  @media (min-width: 860px) { .govs { grid-template-columns: repeat(6, 1fr); } }
-  .gov {
-    background: var(--ink);
-    padding: 16px 12px;
-    font-family: var(--display); font-weight: 500; font-size: .88rem;
-    text-align: center;
-  }
-  .reach-note {
-    margin-top: 20px; color: var(--bone-dim);
-    font-size: .88rem; text-align: center;
-  }
+.hero h1 {
+  font-family: var(--display); font-weight: 800;
+  font-size: clamp(2.1rem, 6.5vw, 3.6rem);
+  max-width: 15ch; margin-bottom: var(--s2);
+}
+.hero h1 span { color: var(--brass); }
+.hero-lede {
+  font-size: clamp(1rem, 2.2vw, 1.15rem);
+  color: var(--bone-dim); max-width: 44ch; margin-bottom: var(--s4);
+}
+.hero-actions { display: flex; flex-wrap: wrap; gap: var(--s2); }
 
-  /* ── الميزات: شبكة محلّات، كلّ خلية واجهة ───────────────────────── */
-  .stalls {
-    display: grid; gap: 1px; background: var(--line);
-    border: 1px solid var(--line);
-    grid-template-columns: 1fr;
-  }
-  @media (min-width: 700px) { .stalls { grid-template-columns: repeat(2, 1fr); } }
-  .stall { background: var(--paper); padding: 28px 26px; }
-  .stall h3 {
-    font-size: 1.05rem; font-weight: 700; margin-bottom: 8px;
-    padding-bottom: 8px; border-bottom: 2px solid var(--red);
-    display: inline-block;
-  }
-  .stall p { margin: 0; color: var(--ink-soft); font-size: .93rem; }
+/* ── الهاتف: رسم توضيحي، لا لقطة. يُعلَن ذلك في النصّ تحته. ───────── */
+.phone {
+  width: 258px; margin: 0 auto;
+  background: var(--ink); border-radius: 34px; padding: 10px;
+  box-shadow: 0 26px 60px rgba(0,0,0,.42);
+}
+.phone-screen {
+  background: var(--surface); border-radius: 26px;
+  padding: var(--s2); overflow: hidden;
+}
+.notch {
+  width: 86px; height: 5px; border-radius: 99px;
+  background: rgba(246,241,232,.25); margin: 0 auto 10px;
+}
+.shot-head {
+  display: flex; justify-content: space-between; align-items: center;
+  font-family: var(--display); font-size: .7rem; font-weight: 600;
+  color: var(--ink-2); margin-bottom: 10px;
+}
+.shot-img {
+  height: 94px; border-radius: 10px; margin-bottom: 10px;
+  background:
+    linear-gradient(135deg, rgba(212,162,60,.22), transparent 60%),
+    var(--line);
+}
+.shot-title { font-family: var(--display); font-size: .82rem; font-weight: 600; }
+.shot-store { font-size: .68rem; color: var(--ink-2); margin-bottom: 8px; }
+.shot-price {
+  font-family: var(--display); font-weight: 800; font-size: 1.05rem;
+  color: var(--red); margin-bottom: 8px;
+}
+.shot-badge {
+  display: inline-block; font-size: .64rem; font-weight: 500;
+  background: rgba(140,29,24,.09); color: var(--red);
+  padding: 4px 9px; border-radius: 99px; margin-bottom: 10px;
+}
+.shot-cta {
+  background: var(--red); color: var(--bone);
+  font-family: var(--display); font-size: .78rem; font-weight: 600;
+  text-align: center; padding: 9px; border-radius: 9px;
+}
+.phone-note {
+  text-align: center; font-size: .72rem; color: var(--bone-dim);
+  margin-top: var(--s2);
+}
 
-  /* ── للتجّار ─────────────────────────────────────────────────────── */
-  .sellers { background: var(--red); color: var(--bone); }
-  .sellers .section-head h2 { color: var(--bone); }
-  .sellers .section-head p { color: rgba(242,236,227,.78); }
-  .perks { display: grid; gap: 18px; }
-  @media (min-width: 700px) { .perks { grid-template-columns: repeat(2, 1fr); } }
-  .perk { border-top: 2px solid var(--brass); padding-top: 14px; }
-  .perk h3 { font-size: .98rem; font-weight: 700; margin-bottom: 4px; }
-  .perk p { margin: 0; font-size: .9rem; color: rgba(242,236,227,.78); }
+/* ══ شريط الثقة ══════════════════════════════════════════════════════ */
+.trust { background: var(--red-dark); color: var(--bone); padding: var(--s3) 0; }
+.trust-row { display: grid; gap: var(--s3); text-align: center; }
+@media (min-width: 700px) { .trust-row { grid-template-columns: repeat(3, 1fr); } }
+.trust-item { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.trust-item svg { width: 26px; height: 26px; stroke: var(--brass); }
+.trust-item b { font-family: var(--display); font-size: .95rem; font-weight: 600; }
+.trust-item span { font-size: .82rem; color: var(--bone-dim); }
 
-  /* ── التذييل ─────────────────────────────────────────────────────── */
-  footer {
-    background: var(--ink); color: var(--bone-dim);
-    padding: 44px 0; font-size: .88rem;
-  }
-  .foot-row {
-    display: flex; flex-wrap: wrap; gap: 14px 26px;
-    align-items: center; justify-content: space-between;
-  }
-  footer a { color: var(--bone); text-decoration: none; }
-  footer a:hover { color: var(--brass); text-decoration: underline; }
-  .foot-links { display: flex; flex-wrap: wrap; gap: 20px; }
+/* ══ الأقسام ═════════════════════════════════════════════════════════ */
+.band { padding: var(--s6) 0; }
+.band--tint { background: var(--surface); }
+.band--ink { background: var(--ink); color: var(--bone); }
+.band--red { background: var(--red); color: var(--bone); }
 
-  :focus-visible { outline: 3px solid var(--brass); outline-offset: 3px; }
+.head { max-width: 54ch; margin-bottom: var(--s5); }
+.head h2 { font-size: clamp(1.55rem, 4vw, 2.2rem); font-weight: 800; }
+.head p { color: var(--ink-2); margin-top: var(--s1); }
+.band--ink .head p, .band--red .head p { color: var(--bone-dim); }
+
+/* ── الخطوات: تسلسل حقيقي، فالأرقام تحمل معنى ──────────────────────── */
+.steps { display: grid; gap: var(--s2); counter-reset: step; }
+@media (min-width: 760px) { .steps { grid-template-columns: repeat(3, 1fr); } }
+.step {
+  background: var(--paper); border: 1px solid var(--line);
+  border-radius: var(--r); padding: var(--s3);
+  transition: border-color .2s var(--ease), transform .2s var(--ease);
+}
+.step:hover { border-color: var(--brass); transform: translateY(-2px); }
+.step-n {
+  width: 34px; height: 34px; border-radius: 9px;
+  display: grid; place-items: center; margin-bottom: var(--s2);
+  background: var(--red); color: var(--bone);
+  font-family: var(--display); font-weight: 800; font-size: .95rem;
+}
+.step h3 { font-size: 1.02rem; font-weight: 600; margin-bottom: 4px; }
+.step p { color: var(--ink-2); font-size: .92rem; }
+
+/* ── التوقيع: المحافظات الثمانية عشر ───────────────────────────────── */
+.govs {
+  display: grid; gap: 1px;
+  background: rgba(246,241,232,.14);
+  border: 1px solid rgba(246,241,232,.14);
+  border-radius: var(--r); overflow: hidden;
+  grid-template-columns: repeat(2, 1fr);
+}
+@media (min-width: 560px) { .govs { grid-template-columns: repeat(3, 1fr); } }
+@media (min-width: 900px) { .govs { grid-template-columns: repeat(6, 1fr); } }
+.gov {
+  background: var(--ink); padding: 15px 10px; text-align: center;
+  font-family: var(--display); font-weight: 600; font-size: .85rem;
+  transition: background-color .2s var(--ease);
+}
+.gov:hover { background: var(--red-dark); }
+.govs-note { margin-top: var(--s3); text-align: center; font-size: .85rem; color: var(--bone-dim); }
+
+/* ── الميزات ───────────────────────────────────────────────────────── */
+.cards { display: grid; gap: var(--s2); }
+@media (min-width: 640px) { .cards { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 980px) { .cards { grid-template-columns: repeat(3, 1fr); } }
+.card {
+  background: var(--paper); border: 1px solid var(--line);
+  border-radius: var(--r); padding: var(--s3);
+  transition: border-color .2s var(--ease), box-shadow .2s var(--ease);
+}
+.card:hover { border-color: var(--brass); box-shadow: 0 8px 24px rgba(25,19,16,.07); }
+.card-ico {
+  width: 40px; height: 40px; border-radius: 10px; margin-bottom: var(--s2);
+  display: grid; place-items: center; background: rgba(140,29,24,.08);
+}
+.card-ico svg { width: 21px; height: 21px; stroke: var(--red); }
+.card h3 { font-size: 1rem; font-weight: 600; margin-bottom: 4px; }
+.card p { color: var(--ink-2); font-size: .91rem; }
+
+/* ── التجّار ────────────────────────────────────────────────────────── */
+.perks { display: grid; gap: var(--s3); }
+@media (min-width: 700px) { .perks { grid-template-columns: repeat(2, 1fr); } }
+.perk { border-top: 2px solid var(--brass); padding-top: var(--s2); }
+.perk h3 { font-size: .98rem; font-weight: 600; margin-bottom: 4px; }
+.perk p { font-size: .9rem; color: rgba(246,241,232,.76); }
+
+/* ── التذييل ───────────────────────────────────────────────────────── */
+footer { background: var(--ink); color: var(--bone-dim); padding: var(--s5) 0; font-size: .88rem; }
+.foot {
+  display: flex; flex-wrap: wrap; gap: var(--s2) var(--s4);
+  align-items: center; justify-content: space-between;
+}
+/* 44px ارتفاعاً: رابطا التذييل كانا 24px — أصغر من حدّ اللمس،
+   ومتجاوران فيصعب إصابة المقصود منهما بالإبهام. */
+.foot a {
+  color: var(--bone); text-decoration: none;
+  display: inline-flex; align-items: center; min-height: 44px;
+  transition: color .2s var(--ease);
+}
+.foot a:hover { color: var(--brass); text-decoration: underline; }
+.foot nav { display: flex; flex-wrap: wrap; gap: var(--s3); }
+
+/* ── نداء ثابت على الهاتف: أقرب زرّ إلى الإبهام ───────────────────── */
+.sticky {
+  position: fixed; inset-inline: 0; bottom: 0; z-index: 20;
+  background: var(--red-deep);
+  border-top: 1px solid rgba(246,241,232,.16);
+  padding: 10px var(--s3) calc(10px + env(safe-area-inset-bottom));
+  display: flex; justify-content: center;
+}
+.sticky .btn, .sticky .pending { width: 100%; max-width: 420px; }
+@media (min-width: 760px) { .sticky { display: none; } }
+@media (max-width: 759px) { footer { padding-bottom: calc(var(--s5) + 76px); } }
 </style>
 </head>
 <body>
 
 <header class="hero">
   <div class="wrap">
-    <div class="brandline">
+    <div class="nav">
       <span class="mark">ش</span>
-      <span class="brandname">الشورجة</span>
+      <b>الشورجة</b>
     </div>
 
-    <h1>سوق العراق، <em>في جيبك</em>.</h1>
-    <p>
-      بِع بضاعتك واشترِ ما تريد وزايد على ما يعجبك.
-      التوصيل يصل كل محافظة، والدفع نقداً عند الباب.
-    </p>
+    <div class="hero-grid">
+      <div>
+        <h1>سوق العراق، <span>في جيبك</span>.</h1>
+        <p class="hero-lede">
+          بِع بضاعتك واشترِ ما تريد وزايد على ما يعجبك.
+          التوصيل يصل كل محافظة، والدفع نقداً عند الباب.
+        </p>
+        <div class="hero-actions">
+          {% if play_store_url %}
+            <a class="btn btn--primary" href="{{ play_store_url }}">حمّل التطبيق</a>
+          {% else %}
+            <span class="pending">قادم قريباً إلى Google Play</span>
+          {% endif %}
+          <a class="btn btn--ghost" href="#how">كيف يعمل</a>
+        </div>
+      </div>
 
-    <div class="actions">
-      {% if play_store_url %}
-        <a class="btn btn-solid" href="{{ play_store_url }}">حمّل التطبيق</a>
-      {% else %}
-        <span class="pending">التطبيق قادم قريباً إلى Google Play</span>
-      {% endif %}
-      <a class="btn btn-ghost" href="#how">كيف يعمل</a>
+      <div>
+        <div class="phone">
+          <div class="phone-screen">
+            <div class="notch"></div>
+            <div class="shot-head"><span>بغداد</span><span>الشورجة</span></div>
+            <div class="shot-img"></div>
+            <div class="shot-title">طقم أواني ستانلس</div>
+            <div class="shot-store">متجر الأمانة · الكرادة</div>
+            <div class="shot-price">٨٥٬٠٠٠ د.ع</div>
+            <div class="shot-badge">دفع عند الاستلام</div>
+            <div class="shot-cta">احجز الآن</div>
+          </div>
+        </div>
+        <p class="phone-note">رسم توضيحي لواجهة التطبيق</p>
+      </div>
     </div>
   </div>
 </header>
 
-<section id="how">
+<div class="trust">
+  <div class="wrap trust-row">
+    <div class="trust-item">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10h18M6 14h4"/><rect x="2" y="5" width="20" height="14" rx="2"/></svg>
+      <b>ادفع عند الباب</b>
+      <span>تفحص البضاعة قبل أن تدفع</span>
+    </div>
+    <div class="trust-item">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 9l4-5h10l4 5M3 9h18v10a1 1 0 01-1 1H4a1 1 0 01-1-1z"/><path d="M9 13h6"/></svg>
+      <b>١٨ محافظة</b>
+      <span>الأجرة محسوبة قبل التأكيد</span>
+    </div>
+    <div class="trust-item">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.2 7.8-8 9-4.8-1.2-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg>
+      <b>مهلة فحص</b>
+      <span>لا يُحرَّر المبلغ للبائع فوراً</span>
+    </div>
+  </div>
+</div>
+
+<section class="band" id="how">
   <div class="wrap">
-    <div class="section-head">
+    <div class="head">
       <p class="eyebrow">من التصفّح إلى الباب</p>
       <h2>ثلاث خطوات، ولا دفعة قبل أوانها</h2>
       <p>لا تحتاج حساباً لتتصفّح. الحساب يلزم حين تحجز.</p>
@@ -280,67 +394,61 @@
   </div>
 </section>
 
-<section class="reach">
+<section class="band band--ink">
   <div class="wrap">
-    <div class="section-head">
+    <div class="head">
       <p class="eyebrow">التغطية</p>
       <h2>ثماني عشرة محافظة</h2>
       <p>أجرة التوصيل تُحسب من محافظة البائع إلى محافظتك قبل أن تؤكّد الحجز — لا مفاجآت عند الباب.</p>
     </div>
 
     <div class="govs">
-      <div class="gov">بغداد</div>
-      <div class="gov">البصرة</div>
-      <div class="gov">نينوى</div>
-      <div class="gov">أربيل</div>
-      <div class="gov">النجف</div>
-      <div class="gov">كربلاء</div>
-      <div class="gov">كركوك</div>
-      <div class="gov">الأنبار</div>
-      <div class="gov">بابل</div>
-      <div class="gov">ذي قار</div>
-      <div class="gov">ديالى</div>
-      <div class="gov">واسط</div>
-      <div class="gov">ميسان</div>
-      <div class="gov">المثنى</div>
-      <div class="gov">القادسية</div>
-      <div class="gov">صلاح الدين</div>
-      <div class="gov">دهوك</div>
-      <div class="gov">السليمانية</div>
+      <div class="gov">بغداد</div><div class="gov">البصرة</div><div class="gov">نينوى</div>
+      <div class="gov">أربيل</div><div class="gov">النجف</div><div class="gov">كربلاء</div>
+      <div class="gov">كركوك</div><div class="gov">الأنبار</div><div class="gov">بابل</div>
+      <div class="gov">ذي قار</div><div class="gov">ديالى</div><div class="gov">واسط</div>
+      <div class="gov">ميسان</div><div class="gov">المثنى</div><div class="gov">القادسية</div>
+      <div class="gov">صلاح الدين</div><div class="gov">دهوك</div><div class="gov">السليمانية</div>
     </div>
-    <p class="reach-note">كل محافظة في العراق، بلا استثناء.</p>
+    <p class="govs-note">كل محافظة في العراق، بلا استثناء.</p>
   </div>
 </section>
 
-<section>
+<section class="band band--tint">
   <div class="wrap">
-    <div class="section-head">
+    <div class="head">
       <p class="eyebrow">ما الذي يجري هنا</p>
       <h2>سوق كامل، لا قائمة إعلانات</h2>
     </div>
 
-    <div class="stalls">
-      <div class="stall">
+    <div class="cards">
+      <div class="card">
+        <div class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3l7 7-4 4-7-7z"/><path d="M10 7L3 14v7h7l7-7"/></svg></div>
         <h3>مزادات بوقت حقيقي</h3>
         <p>تنتهي بموعدها لا بمزاج أحد، والمزايدة تُحتسب في حينها. الفائز يُخطَر فوراً.</p>
       </div>
-      <div class="stall">
+      <div class="card">
+        <div class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="M16 10l6-3v10l-6-3z"/></svg></div>
         <h3>بثّ مباشر</h3>
         <p>يعرض التاجر بضاعته أمام الكاميرا، ويحجز المشاهد فور ظهور القطعة.</p>
       </div>
-      <div class="stall">
+      <div class="card">
+        <div class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="2" width="16" height="20" rx="3"/><path d="M10 9l5 3-5 3z"/></svg></div>
         <h3>ريلز للبضاعة</h3>
         <p>مقاطع قصيرة تُظهر المنتج كما هو — والسؤال في التعليقات يصل صاحبه فوراً.</p>
       </div>
-      <div class="stall">
+      <div class="card">
+        <div class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a8 8 0 01-11.6 7.1L3 21l1.9-6.4A8 8 0 1121 12z"/></svg></div>
         <h3>محادثة مع البائع</h3>
         <p>اسأل عن المقاس أو اللون أو السعر قبل أن تحجز، داخل التطبيق.</p>
       </div>
-      <div class="stall">
+      <div class="card">
+        <div class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
         <h3>مهلة قبل تحرير المبلغ</h3>
         <p>لا يصل المال إلى البائع فور التسليم. هناك مهلة تفحص فيها ما استلمت.</p>
       </div>
-      <div class="stall">
+      <div class="card">
+        <div class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h18M3 12h18M3 17h10"/></svg></div>
         <h3>خيارات المنتج</h3>
         <p>لون ومقاس وسعة، لكلٍّ كميته وسعره — يختار المشتري قبل الحجز.</p>
       </div>
@@ -348,9 +456,9 @@
   </div>
 </section>
 
-<section class="sellers">
+<section class="band band--red">
   <div class="wrap">
-    <div class="section-head">
+    <div class="head">
       <p class="eyebrow">للتجّار</p>
       <h2>افتح متجرك، واترك التوصيل علينا</h2>
       <p>متجر باسمك داخل التطبيق، وشركات توصيل تستلم من مخزنك وتسلّم إلى الزبون.</p>
@@ -378,14 +486,22 @@
 </section>
 
 <footer>
-  <div class="wrap foot-row">
+  <div class="wrap foot">
     <div>الشورجة — سوق العراق</div>
-    <nav class="foot-links">
+    <nav>
       <a href="/legal/privacy/">سياسة الخصوصية</a>
       <a href="/legal/terms/">شروط الاستخدام</a>
     </nav>
   </div>
 </footer>
+
+<div class="sticky">
+  {% if play_store_url %}
+    <a class="btn btn--primary" href="{{ play_store_url }}">حمّل التطبيق</a>
+  {% else %}
+    <span class="pending">قادم قريباً إلى Google Play</span>
+  {% endif %}
+</div>
 
 </body>
 </html>
