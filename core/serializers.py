@@ -6,6 +6,8 @@ from django.utils import timezone
 from decimal import Decimal
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+import re
+
 from .phone_utils import to_e164
 from .models import (
     Item, ItemImage, ItemVariant, FixedPriceListing, AuctionListing,
@@ -2019,6 +2021,14 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     email = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
     password = serializers.CharField(write_only=True, min_length=8)
     password2 = serializers.CharField(write_only=True, min_length=8)
+    # لم يعد يُطلب من المستخدم: الاسم الأول والأخير يُعرّفانه، والرقم
+    # يُدخله للحساب. كان حقلاً إضافياً يُجبر التاجر على ابتكار معرّف
+    # إنجليزي فريد ثم تذكّره — وأشهر سبب للتعثّر عند أول خطوة.
+    #
+    # يبقى عموداً في قاعدة البيانات: USERNAME_FIELD في جانغو، وتعتمد
+    # عليه لوحة الإدارة والبحث فيها في ٢٧٠ موضعاً. يُولَّد صامتاً هنا
+    # ولا يظهر في أي شاشة — كـ id تماماً.
+    username = serializers.CharField(required=False, allow_blank=True)
 
     class Meta:
         model = User
@@ -2055,8 +2065,27 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         validated_data.pop('password2')
+        if not validated_data.get('username'):
+            # مشتقّ من الرقم: فريد بحكم أن الرقم فريد، ومستقرّ (لا يتغيّر
+            # بتغيّر الاسم)، وقابل للقراءة في لوحة الإدارة — أفضل من
+            # UUID لمن يبحث عن حساب وهو يمسك شكوى فيها رقم هاتف.
+            validated_data['username'] = username_from_phone(validated_data['phone'])
         user = User.objects.create_user(**validated_data)
         return user
+
+
+def username_from_phone(phone):
+    """'u9647701234567'، مع لاحقة رقمية عند التصادم.
+
+    البادئة تمنع تصادم معرّف كلّه أرقام مع أي منطق يعامل المعرّفات كأرقام،
+    وتُبقيه صالحاً كـ username في جانغو.
+    """
+    base = 'u' + re.sub(r'\D', '', phone or '')
+    username, suffix = base, 1
+    while User.objects.filter(username=username).exists():
+        suffix += 1
+        username = f'{base}_{suffix}'
+    return username
 
 
 class UserLoginSerializer(serializers.Serializer):
