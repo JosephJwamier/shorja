@@ -123,3 +123,32 @@ class TestCaching:
         auction_age = client.get(f'/a/{auction.id}')['Cache-Control']
         assert 'max-age=300' in product_age
         assert 'max-age=60' in auction_age
+
+
+class TestHomePage:
+    """الجذر كان مسجَّلاً في share_views ومفقوداً من urls.py، فردّ 404 على
+    أول من فتح shorjeh.com. دالة موجودة بلا مسار لا يكشفها شيء — لا
+    المحلّل ولا `manage.py check` — فيحرسها اختبار."""
+
+    def test_the_site_root_answers(self, client):
+        assert client.get('/').status_code == 200
+
+    def test_it_says_what_the_place_is(self, client):
+        html = client.get('/').content.decode()
+        assert 'الشورجة' in html
+        assert 'مزادات' in html or 'زايد' in html
+
+    def test_it_carries_a_card_for_sharing(self, client):
+        html = client.get('/').content.decode()
+        assert 'property="og:title"' in html
+        assert 'property="og:description"' in html
+
+    def test_it_links_the_legal_pages_the_stores_require(self, client):
+        html = client.get('/').content.decode()
+        assert '/legal/privacy/' in html
+        assert '/legal/terms/' in html
+
+    def test_no_dead_download_button_before_the_store_link_exists(self, client):
+        # زرّ يقود إلى 404 أسوأ من زرّ غائب.
+        html = client.get('/').content.decode()
+        assert 'قريباً' in html

@@ -151,13 +151,17 @@ def live(request, session_id):
     )
 
 
+@cache_control(max_age=3600)
 def home(request):
-    """جذر نطاق المشاركة. ليس صفحة تسويقية — فقط ما يمنع الزائر الذي حذف
-    جزءاً من الرابط من مواجهة خطأ."""
-    return _render(
-        request,
-        title='الشورجة',
-        description='سوق العراق للبيع والشراء والمزادات.',
-        image=None,
-        deep_link='/',
-    )
+    """جذر shorjeh.com.
+
+    كان غير مسجَّل في urls.py فيردّ 404 — وهو أول ما يراه من يفتح النطاق،
+    ومن يحذف جزءاً من رابط مشارَك، ومن يفحصه قبل تثبيت التطبيق.
+
+    قالب منفصل عن preview.html لا نفسه: صفحة المعاينة مبنية حول صورة
+    منتج وزرّ واحد، والجذر يحتاج أن يشرح ما هذا المكان.
+    """
+    return render(request, 'share/home.html', {
+        'canonical': request.build_absolute_uri(),
+        'play_store_url': PLAY_STORE_URL,
+    })

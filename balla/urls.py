@@ -77,6 +77,9 @@ urlpatterns = [
     # تُخدم من نفس تطبيق Django لأن Caddy يوجّه النطاقين إلى web:8000؛
     # وهي عامة بلا مصادقة، فجالب واتساب لا يملك حساباً ولا يستطيع تسجيل
     # الدخول ليرسم بطاقة.
+    # جذر shorjeh.com. يأتي بعد tf_urls في الترتيب، وهي لا تعرّف مساراً
+    # فارغاً — فلولا ذلك لحجبته.
+    path('', share_views.home, name='share-home'),
     path('p/<int:listing_id>', share_views.product, name='share-product'),
     path('s/<int:store_id>', share_views.store, name='share-store'),
     path('a/<int:auction_id>', share_views.auction, name='share-auction'),
