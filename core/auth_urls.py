@@ -4,17 +4,20 @@ Custom authentication endpoints
 """
 
 from django.urls import path
+from .otp_views import (
+    SendPhoneCodeView,
+    VerifyPhoneCodeView,
+    ResetPasswordByCodeView,
+)
 from .auth_views import (
     RegisterView,
     LoginView,
     LogoutView,
     VerifyEmailView,
-    VerifyPhoneView,
     ResendVerificationView,
     ChangePasswordView,
     ResetPasswordView,
     ResetPasswordConfirmView,
-    ResetPasswordByPhoneView,
     UserProfileView,
     UpdateProfileView,
     FirebaseCustomTokenView,
@@ -37,15 +40,17 @@ urlpatterns = [
     path('verify-email/', VerifyEmailView.as_view(), name='verify-email'),
     path('resend-verification/', ResendVerificationView.as_view(), name='resend-verification'),
 
-    # Phone Verification
-    path('verify-phone/', VerifyPhoneView.as_view(), name='verify-phone'),
+    # Phone Verification — رمز واتساب عبر Wevlix. الخادم يطلب الإرسال
+    # ويتحقّق، بعد أن كانت Firebase ترسل من الجهاز بلا علمنا.
+    path('phone/send-code/', SendPhoneCodeView.as_view(), name='phone-send-code'),
+    path('phone/verify-code/', VerifyPhoneCodeView.as_view(), name='phone-verify-code'),
+    path('reset-password-code/', ResetPasswordByCodeView.as_view(),
+         name='reset-password-code'),
 
     # Password Management
     path('change-password/', ChangePasswordView.as_view(), name='change-password'),
     path('reset-password/', ResetPasswordView.as_view(), name='reset-password'),
     path('reset-password-confirm/', ResetPasswordConfirmView.as_view(), name='reset-password-confirm'),
-    # Phone route: the only one available to accounts without an email.
-    path('reset-password-phone/', ResetPasswordByPhoneView.as_view(), name='reset-password-phone'),
 
     # Profile
     path('profile/', UserProfileView.as_view(), name='profile'),

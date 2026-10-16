@@ -145,3 +145,21 @@ class TestPasswordResetByEmailNoLongerCrashes:
         r = client.post(reverse('reset-password'), {'email': ''}, format='json')
         assert r.status_code == 200
         assert 'message' in r.data
+
+
+def test_one_phone_cannot_reach_two_accounts_at_all():
+    """كان 409 من VerifyPhoneView يمسح بحثاً عن حساب آخر موثّق على الرقم.
+    User.phone صار UNIQUE، فالحساب الثاني لا يُنشأ أصلاً — ضمانة أقوى،
+    مفروضة طبقةً أدنى، وتشمل كل مسار كتابة (لوحة الإدارة، المِثبتات،
+    أوامر الإدارة) لا تلك النقطة وحدها.
+
+    نُقل إلى هنا حين حُذف مسار Firebase: القيد باقٍ، والملف الذي كان
+    يحرسه لم يعد له موضوع."""
+    from django.db import IntegrityError
+
+    User.objects.create_user(
+        username='ph_first', password='x', phone='07701234567',
+        phone_verified=True)
+    with pytest.raises(IntegrityError):
+        User.objects.create_user(
+            username='ph_second', password='x', phone='07701234567')

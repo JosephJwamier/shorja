@@ -239,6 +239,18 @@ DATABASES = {
 # Redis Cache & Celery
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 
+# ── Wevlix (رسائل التحقّق عبر واتساب) ────────────────────────────────────
+# يُستدعى من الخادم بمفتاح سرّي، لا من التطبيق — فكل رسالة تمرّ بنا
+# ويمكن خنقها وتسجيلها. (Firebase Phone Auth كانت تُرسل من الجهاز.)
+#
+# فارغ = الميزة معطّلة: نقاط التوثيق تردّ 503 برسالة واضحة بدل أن تنهار.
+WEVLIX_API_KEY = os.environ.get('WEVLIX_API_KEY', '')
+WEVLIX_BASE_URL = os.environ.get('WEVLIX_BASE_URL', 'https://api.wevlix.com')
+
+# مهلة صلاحية الرمز عندنا. Wevlix لها مهلتها أيضاً؛ هذه تحدّ عمر الربط
+# بين الرقم و messageId في الذاكرة المؤقتة.
+OTP_TTL_SECONDS = int(os.environ.get('OTP_TTL_SECONDS', '600'))
+
 CACHES = {
     'default': {
         'BACKEND': 'django_redis.cache.RedisCache',
@@ -416,7 +428,12 @@ REST_FRAMEWORK = {
         'auth_login_account': '5/min',    # per submitted username
         'auth_register': '30/hour',       # per IP
         'auth_reset': '30/hour',          # per IP: reset-password[-confirm]/
-        'auth_reset_email': '5/hour',     # per email — a 6-digit code needs this
+        'auth_reset_email': '5/hour',
+        # رسائل التحقّق تكلّف مالاً حقيقياً لكل نداء ناجح، فالحدّ هنا
+        # حماية من فاتورة لا من إساءة فقط. والتحقّق أرخص بكثير فيُترك
+        # أوسع — وإلا حُبس من أخطأ الرمز مرّة.
+        'otp_send': '10/hour',
+        'otp_verify': '30/hour',     # per email — a 6-digit code needs this
     },
 }
 
