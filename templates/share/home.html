@@ -1,4 +1,4 @@
-<!doctype html>
+{% load static %}<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8">
@@ -11,10 +11,13 @@
 <meta property="og:title" content="الشورجة — سوق العراق">
 <meta property="og:description" content="بِع واشترِ وزايد. توصيل لكل المحافظات الثماني عشرة، ودفع نقداً عند الاستلام.">
 <meta property="og:url" content="{{ canonical }}">
+<meta property="og:image" content="{{ canonical }}static/img/app-icon.png">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="theme-color" content="#5e120f">
+<meta name="theme-color" content="#5f1900">
 <meta name="description" content="سوق العراق للبيع والشراء والمزادات والبث المباشر. توصيل لكل المحافظات، ودفع نقداً عند الاستلام.">
 <link rel="canonical" href="{{ canonical }}">
+<link rel="icon" href="{% static 'img/app-icon.png' %}">
+<link rel="apple-touch-icon" href="{% static 'img/app-icon.png' %}">
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -24,18 +27,21 @@
 /* ══ الرموز ══════════════════════════════════════════════════════════
    لوحة لافتة المحلّ: أرضية حمراء، حروف عظميّة، ونحاسي من موازين السوق.
    كل لون رمز، ولا سداسيّ خام داخل المكوّنات. */
+/* مأخوذة من lib/theme/app_colors.dart لا مُخترعة: الصفحة والتطبيق
+   يجب أن يبدوا علامةً واحدة. كانت الصفحة حمراء (#8c1d18) والتطبيق
+   برتقالي — فمن يفتح الاثنين يرى علامتين. */
 :root {
-  --red:       #8c1d18;
-  --red-deep:  #5e120f;
-  --red-dark:  #3d0b09;
-  --bone:      #f6f1e8;
-  --bone-dim:  #d6c8b6;
-  --ink:       #191310;
-  --ink-2:     #675850;
-  --brass:     #d4a23c;
-  --paper:     #fffdf9;
-  --surface:   #fbf7f1;
-  --line:      #e6dccd;
+  --red:       #ab3500;   /* primary */
+  --red-deep:  #5f1900;   /* onPrimaryContainer — أرضية الواجهة */
+  --red-dark:  #431100;   /* أدكن منها لشريط الثقة */
+  --bone:      #fff3ea;
+  --bone-dim:  #e0c4b0;
+  --ink:       #1c1310;
+  --ink-2:     #6b564c;
+  --brass:     #d1a626;   /* tertiaryContainer */
+  --paper:     #fffdfb;
+  --surface:   #fbf5f0;
+  --line:      #ead9cd;
 
   --display: "Noto Kufi Arabic", system-ui, sans-serif;
   --body: "Rubik", "Noto Kufi Arabic", system-ui, sans-serif;
@@ -122,13 +128,13 @@ p { margin: 0; }
 .hero > * { position: relative; z-index: 1; }
 
 .nav { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s6); }
-.mark {
-  width: 38px; height: 38px; flex: none; border-radius: 10px;
-  display: grid; place-items: center;
-  background: var(--bone); color: var(--red-deep);
-  font-family: var(--display); font-weight: 800; font-size: 1.15rem;
-}
-.nav b { font-family: var(--display); font-weight: 600; font-size: 1.05rem; }
+/* الأيقونة الحقيقية: محلّ سوق بثلاثة أقواس تحت مظلّة — وهي الفكرة
+   نفسها التي بُنيت عليها الصفحة. الطبقة الأمامية (شفّافة) لا الأيقونة
+   الكاملة، فمربّعها البرتقالي كان سيصطدم بأرضية الواجهة. */
+/* 56px لا 42: الأقواس الثلاثة والمظلّة تفاصيل دقيقة تذوب في حجم
+   أصغر، فتبدو لطخة بدل علامة. */
+.mark { width: 56px; height: 56px; flex: none; display: block; }
+.nav b { font-family: var(--display); font-weight: 600; font-size: 1.2rem; }
 
 .hero-grid { display: grid; gap: var(--s5); align-items: center; }
 @media (min-width: 900px) { .hero-grid { grid-template-columns: 1.15fr .85fr; } }
@@ -306,7 +312,7 @@ footer { background: var(--ink); color: var(--bone-dim); padding: var(--s5) 0; f
 <header class="hero">
   <div class="wrap">
     <div class="nav">
-      <span class="mark">ش</span>
+      <img class="mark" src="{% static 'img/mark.png' %}" alt="" width="56" height="56">
       <b>الشورجة</b>
     </div>
 
