@@ -7,8 +7,8 @@ seed_legal_documents
     python manage.py seed_legal_documents                 # ينشئ الإصدار 1 إن لم يوجد
     python manage.py seed_legal_documents --update         # يحدّث محتوى أحدث إصدار مكانه
     python manage.py seed_legal_documents --bump           # ينشئ إصداراً جديداً ويُلزم بإعادة الموافقة
-    python manage.py seed_legal_documents --entity "شركة كذا" --email support@eshorja.com \
-        --address "بغداد - ..." --city "بغداد" --website https://eshorja.com
+    python manage.py seed_legal_documents --entity "شركة كذا" --email support@shorjeh.com \
+        --address "بغداد - ..." --city "بغداد" --website https://shorjeh.com
 
 بيانات الشركة تُقرأ من الوسائط أعلاه أو من متغيّرات البيئة
 (LEGAL_ENTITY / LEGAL_CONTACT_EMAIL / LEGAL_ADDRESS / LEGAL_CITY / LEGAL_WEBSITE)
@@ -31,8 +31,8 @@ def _cfg(options):
         'brand_en': 'Shorja',
         'entity_ar': g('entity', os.environ.get('LEGAL_ENTITY', '«يُملأ: الاسم القانوني المسجَّل للجهة المالكة»')),
         'entity_en': g('entity', os.environ.get('LEGAL_ENTITY', '«TO FILL: registered owning legal entity»')),
-        'email': g('email', os.environ.get('LEGAL_CONTACT_EMAIL', 'support@eshorja.com')),
-        'website': g('website', os.environ.get('LEGAL_WEBSITE', 'https://eshorja.com')),
+        'email': g('email', os.environ.get('LEGAL_CONTACT_EMAIL', 'support@shorjeh.com')),
+        'website': g('website', os.environ.get('LEGAL_WEBSITE', 'https://shorjeh.com')),
         'address_ar': g('address', os.environ.get('LEGAL_ADDRESS', '«يُملأ: العنوان الكامل — العراق»')),
         'address_en': g('address', os.environ.get('LEGAL_ADDRESS', '«TO FILL: full registered address — Iraq»')),
         'city_ar': g('city', os.environ.get('LEGAL_CITY', '«يُملأ: مدينة الاختصاص، مثال: بغداد»')),

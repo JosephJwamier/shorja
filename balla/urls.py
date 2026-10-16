@@ -45,8 +45,8 @@ schema_view = get_schema_view(
         2. Copy the access token from the response
         3. Click **Authorize** and enter: Bearer <token>
         """,
-        terms_of_service="https://www.reselltrust.com/terms/",
-        contact=openapi.Contact(email="contact@reselltrust.com"),
+        terms_of_service="https://shorjeh.com/legal/terms/",
+        contact=openapi.Contact(email="support@shorjeh.com"),
         license=openapi.License(name="BSD License"),
     ),
     public=True,
