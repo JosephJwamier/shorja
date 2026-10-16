@@ -129,19 +129,30 @@ class NotificationService:
             return False
 
 
-def notify_push(user, title, body, data=None):
-    """Save notification to DB and send FCM push to user's device"""
+def notify_push(user, title, body, data=None, actionable=False):
+    """Save notification to DB and send FCM push to user's device.
+
+    [actionable] يجعل الإشعار يحمل أزراراً على شاشة القفل — ويُرسَل
+    بيانات فقط لأن أزراره يرسمها التطبيق لا أندرويد (انظر
+    send_push_notification). يُرفع علم `actionable` في data ليعرف
+    التطبيق أنه مطالَب ببناء إشعار بأزرار لا إشعار عاديّ.
+    """
     from .models import Notification
     notification_type = (data or {}).get('type', 'general')
+    payload = dict(data or {})
+    if actionable:
+        payload['actionable'] = '1'
+
     Notification.objects.create(
         user=user,
         notification_type=notification_type,
         title=title,
         body=body,
-        data=data or {},
+        data=payload,
     )
     if FIREBASE_AVAILABLE and user.fcm_token:
-        send_push_notification(user.fcm_token, title, body, data)
+        send_push_notification(
+            user.fcm_token, title, body, payload, data_only=actionable)
 
 
 # Specific notification functions for different events
@@ -174,26 +185,50 @@ def notify_reservation_created(reservation):
         seller, subject, f'{bidi_isolate(buyer.username)} حجز منتجك "{item_title}".',
         data={'type': 'reservation_created', 'reservation_id': str(reservation.id)})
 
-    # Notify buyer
-    buyer_subject = f"تم تأكيد حجزك: {item_title}"
-    buyer_message = f"""
-    مرحباً {buyer.username}،
+    # لا إشعار فوري للمشتري: هو الذي ضغط «احجز» قبل ثانية ورأى شاشة
+    # التأكيد، فإشعار يخبره بما فعله للتوّ لا يضيف شيئاً. وأسوأ من ذلك
+    # أن نصّه «تم تأكيد حجزك» كان يوحي بأن المعاملة انتهت، بينما الحجز
+    # ما زال 'pending' وينتظر الدفع — فيكتشف بعضهم أنه انتهى صلاحيته.
+    #
+    # بدلاً منه: تذكير بعد ساعة يقول «أكمل حجزك»، ولا يُرسَل إن أكمله.
+    # انظر remind_to_complete_reservation في core/tasks.py.
+    if buyer.email:
+        buyer_subject = f"أكمل حجزك: {item_title}"
+        NotificationService.send_email(buyer.email, buyer_subject, f"""
+    مرحباً {buyer.get_full_name() or buyer.username}،
 
-    تم تأكيد حجزك لمنتج "{item_title}"!
+    حجزت "{item_title}" — ويبقى إكمال الحجز قبل انتهاء المهلة.
 
     تفاصيل الحجز:
-    - العربون المدفوع: {reservation.deposit_amount} IQD
-    - المتبقي: {reservation.total_price - reservation.deposit_amount} IQD
+    - العربون: {reservation.deposit_amount} IQD
+    - السعر الإجمالي: {reservation.total_price} IQD
     - ينتهي في: {reservation.expires_at.strftime('%Y-%m-%d %H:%M')}
 
-    يرجى إتمام الدفع قبل انتهاء المهلة.
+    فريق الشورجة
+    """)
 
-    فريق سوقي
+
+def notify_complete_your_reservation(reservation):
+    """تذكير المشتري بإكمال حجز ما زال معلّقاً.
+
+    يُرسل بعد ساعة من الحجز (core/tasks.py)، وبعد التحقّق من أنه ما زال
+    'pending' — فمن أكمل حجزه لا يُطالَب بإكماله.
+
+    النوع 'reservation_expiring' لا نوع جديد: التطبيق يوجّهه إلى شاشة
+    الحجوزات أصلاً، وهو ما نريده هنا بالضبط. المعنى واحد — حجز يحتاج
+    فعلاً قبل أن تنتهي مهلته.
     """
-
-    NotificationService.send_email(buyer.email, buyer_subject, buyer_message)
-    notify_push(buyer, buyer_subject, f'تم تأكيد حجزك لمنتج "{item_title}"!',
-                data={'type': 'reservation_confirmed', 'reservation_id': str(reservation.id)})
+    item_title = bidi_isolate(reservation.item.title)
+    notify_push(
+        reservation.buyer,
+        'أكمل حجزك',
+        f'أكمل حجزك لمنتج "{item_title}" قبل انتهاء المهلة.',
+        data={'type': 'reservation_expiring',
+              'reservation_id': str(reservation.id)},
+        # تفاعليّ: زرّ «أكمل الحجز» يفتح الحجز مباشرة من شاشة القفل.
+        # هذا تذكير لا خبر عاجل، فتأخّر رسائل البيانات مقبول هنا.
+        actionable=True,
+    )
 
 
 def notify_reservation_cancelled_by_seller(reservation):

@@ -43,7 +43,7 @@ def get_firebase_app():
         return None
 
 
-def send_push_notification(fcm_token, title, body, data=None):
+def send_push_notification(fcm_token, title, body, data=None, data_only=False):
     """
     Send a push notification to a single device.
 
@@ -52,6 +52,16 @@ def send_push_notification(fcm_token, title, body, data=None):
         title (str): Notification title
         body (str): Notification body text
         data (dict): Optional key-value payload (values must be strings)
+        data_only (bool): أرسل بلا كتلة notification.
+
+            أزرار الإشعار يرسمها التطبيق لا الخادم. وما دامت الرسالة تحمل
+            كتلة `notification` يرسم أندرويد الإشعار بنفسه حين يكون
+            التطبيق في الخلفية — بلا أزرار، ولا سبيل لإضافتها. فالإشعار
+            التفاعلي يُرسل بيانات فقط، ويبنيه معالج الخلفية في التطبيق.
+
+            الثمن حقيقي: رسائل البيانات أقلّ ضماناً في التسليم من رسائل
+            الإشعار — قد يؤجّلها وضع Doze أو تقييدات الشركات المصنّعة على
+            الأجهزة الاقتصادية. لذا تُستعمل للتذكيرات لا للعاجل.
 
     Returns:
         bool: True if sent successfully, False otherwise
@@ -70,20 +80,30 @@ def send_push_notification(fcm_token, title, body, data=None):
         # Ensure all data values are strings (FCM requirement)
         str_data = {k: str(v) for k, v in (data or {}).items()}
 
+        if data_only:
+            # العنوان والنصّ داخل data: بلا كتلة notification لا يعرفهما
+            # أندرويد، والتطبيق هو من سيبني الإشعار منهما.
+            str_data = {**str_data, 'title': title, 'body': body}
+
         message = messaging.Message(
-            notification=messaging.Notification(title=title, body=body),
+            notification=None if data_only
+            else messaging.Notification(title=title, body=body),
             data=str_data,
             token=fcm_token,
             android=messaging.AndroidConfig(
                 priority='high',
-                notification=messaging.AndroidNotification(
+                notification=None if data_only
+                else messaging.AndroidNotification(
                     sound='default',
                     click_action='FLUTTER_NOTIFICATION_CLICK',
                 )
             ),
             apns=messaging.APNSConfig(
                 payload=messaging.APNSPayload(
-                    aps=messaging.Aps(sound='default')
+                    # content_available يوقظ تطبيق iOS لرسالة بيانات؛
+                    # بدونه لا يصل شيء وهو في الخلفية.
+                    aps=messaging.Aps(content_available=True) if data_only
+                    else messaging.Aps(sound='default')
                 )
             ),
         )

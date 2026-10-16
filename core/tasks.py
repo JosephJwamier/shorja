@@ -146,6 +146,42 @@ def send_pending_reservation_reminders():
 
 
 @shared_task
+def remind_to_complete_reservation(reservation_id):
+    """يذكّر المشتري بإكمال حجزه — يُجدول بعد ساعة من إنشائه.
+
+    الشرط كله في الفحوص أدناه: من أكمل حجزه خلال الساعة، أو أُلغي حجزه،
+    أو انتهت مهلته، لا يُرسل له شيء. تذكير بإكمال حجز مكتمل أسوأ من لا
+    تذكير — يدفع المشتري إلى فتح التطبيق خائفاً أن الدفع لم يصل.
+
+    مجدولة بـ countdown لا عبر beat: كل حجز له ساعته الخاصة من لحظة
+    إنشائه، ومسح دوري كل ساعة كان سيُرسل لمن حجز قبل خمس دقائق.
+    """
+    from .models import Reservation
+    from .notifications import notify_complete_your_reservation
+
+    reservation = (
+        Reservation.objects
+        .select_related('item', 'buyer')
+        .filter(pk=reservation_id, status='pending')
+        .first()
+    )
+    if reservation is None:
+        return f"Reservation {reservation_id} is no longer pending - no reminder"
+
+    if reservation.expires_at <= timezone.now():
+        # انتهت مهلته داخل الساعة: دعوته لإكماله تدعوه إلى باب مغلق.
+        return f"Reservation {reservation_id} already expired - no reminder"
+
+    try:
+        notify_complete_your_reservation(reservation)
+    except Exception as e:
+        logger.error(f"Error reminding reservation {reservation_id}: {e}")
+        return f"Reminder failed for reservation {reservation_id}"
+
+    return f"Reminded buyer to complete reservation {reservation_id}"
+
+
+@shared_task
 def notify_store_followers_live(session_id):
     """Fan out the 'store just went live' push to all its followers. Run via
     .delay() from LiveSessionViewSet.create/go_live so a store with many

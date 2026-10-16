@@ -1160,6 +1160,7 @@ class FixedPriceListingViewSet(viewsets.ReadOnlyModelViewSet):
 from .consumers import send_websocket_notification, broadcast_live_event  # Import the utility functions
 from .agora_utils import build_rtc_token
 from .live_utils import end_live_session
+from .tasks import remind_to_complete_reservation
 from .notifications import (
     notify_reservation_created,
     notify_reservation_cancelled_by_seller,
@@ -3740,6 +3741,11 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             # Send notifications to seller and buyer
             try:
                 notify_reservation_created(reservation)
+                # تذكير المشتري بعد ساعة بإكمال حجزه. countdown لا beat:
+                # الساعة تُحسب من لحظة هذا الحجز بالذات، ومسح دوري كان
+                # سيُذكّر من حجز قبل خمس دقائق.
+                remind_to_complete_reservation.apply_async(
+                    args=[reservation.id], countdown=3600)
                 seller = reservation.item.owner
                 send_websocket_notification(
                     user_id=seller.id,
