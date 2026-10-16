@@ -5,115 +5,387 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>الشورجة — سوق العراق</title>
 
-{# الجذر يُشارَك أيضاً، فيحتاج بطاقته مثل صفحات المنتجات. #}
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="الشورجة">
 <meta property="og:locale" content="ar_IQ">
 <meta property="og:title" content="الشورجة — سوق العراق">
-<meta property="og:description" content="بيع واشترِ وزايد. توصيل لكل المحافظات، ودفع عند الاستلام.">
+<meta property="og:description" content="بِع واشترِ وزايد. توصيل لكل المحافظات الثماني عشرة، ودفع نقداً عند الاستلام.">
 <meta property="og:url" content="{{ canonical }}">
-<meta name="description" content="سوق العراق للبيع والشراء والمزادات والبث المباشر. توصيل لكل المحافظات، ودفع عند الاستلام.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="description" content="سوق العراق للبيع والشراء والمزادات والبث المباشر. توصيل لكل المحافظات، ودفع نقداً عند الاستلام.">
 <link rel="canonical" href="{{ canonical }}">
 
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Kufi+Arabic:wght@500;700;900&family=IBM+Plex+Sans+Arabic:wght@400;500;600&display=swap" rel="stylesheet">
+
 <style>
+  /* لوحة لافتة المحلّ: أرضية حمراء وحروف عظميّة، والنحاسي من موازين
+     السوق النحاسية — لا ذهبي زخرفي. */
   :root {
-    --bg: #faf8f5; --surface: #ffffff; --ink: #1c1b1f;
-    --muted: #6b6a70; --line: #e5e1dc; --brand: #8c1d18;
+    --red:        #8c1d18;
+    --red-deep:   #5e120f;
+    --red-ink:    #3d0b09;
+    --bone:       #f2ece3;
+    --bone-dim:   #cdbfae;
+    --ink:        #1a1512;
+    --ink-soft:   #6a5c51;
+    --brass:      #c9962f;
+    --paper:      #fffdfa;
+    --line:       #e3d9cc;
+
+    --display: "Noto Kufi Arabic", system-ui, sans-serif;
+    --body: "IBM Plex Sans Arabic", system-ui, sans-serif;
   }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg: #141316; --surface: #1f1d21; --ink: #e8e4e6;
-      --muted: #a3a0a6; --line: #332f35; --brand: #f2b8b5;
-    }
-  }
+
   * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    * { animation: none !important; transition: none !important; }
+  }
+
   body {
-    margin: 0; background: var(--bg); color: var(--ink);
-    font-family: system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif;
-    line-height: 1.7;
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 16px;
+    line-height: 1.75;
+    -webkit-font-smoothing: antialiased;
   }
-  .wrap { max-width: 760px; margin: 0 auto; padding: 0 16px; }
 
-  header { text-align: center; padding: 72px 0 48px; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 20px; }
+
+  h1, h2, h3 { font-family: var(--display); line-height: 1.3; margin: 0; }
+
+  /* عنوان القسم: شريحة صغيرة فوقه تسمّيه، كلافتة فوق باب محلّ. */
+  .eyebrow {
+    font-family: var(--display);
+    font-size: .72rem;
+    font-weight: 700;
+    letter-spacing: .14em;
+    color: var(--brass);
+    margin: 0 0 10px;
+  }
+
+  /* ── الواجهة ─────────────────────────────────────────────────────── */
+  .hero {
+    background: var(--red-deep);
+    color: var(--bone);
+    padding: 76px 0 64px;
+    position: relative;
+    overflow: hidden;
+  }
+  /* خطوط الأزقّة: فواصل رأسية خفيفة توحي بصفّ محلّات، لا نقش. */
+  .hero::after {
+    content: "";
+    position: absolute; inset: 0;
+    background: repeating-linear-gradient(
+      90deg, rgba(242,236,227,.05) 0 1px, transparent 1px 72px);
+    pointer-events: none;
+  }
+  .hero > * { position: relative; z-index: 1; }
+
+  .brandline {
+    display: flex; align-items: center; gap: 12px;
+    margin-bottom: 44px;
+  }
   .mark {
-    width: 72px; height: 72px; border-radius: 20px; margin: 0 auto 20px;
-    background: var(--brand); color: #fff; display: grid; place-items: center;
-    font-size: 2rem; font-weight: 800;
+    width: 40px; height: 40px; flex: none;
+    display: grid; place-items: center;
+    background: var(--bone); color: var(--red-deep);
+    font-family: var(--display); font-weight: 900; font-size: 1.25rem;
   }
-  h1 { font-size: 2rem; margin: 0 0 10px; }
-  .lede { color: var(--muted); margin: 0 auto; max-width: 42ch; }
-
-  .cta {
-    display: inline-block; margin-top: 28px; padding: 14px 32px;
-    background: var(--brand); color: #fff; text-decoration: none;
-    border-radius: 999px; font-weight: 700;
-  }
-  .soon {
-    display: inline-block; margin-top: 28px; padding: 12px 24px;
-    border: 1px solid var(--line); border-radius: 999px;
-    color: var(--muted); font-size: .9rem;
+  .brandname {
+    font-family: var(--display); font-weight: 700;
+    font-size: 1.05rem; letter-spacing: .02em;
   }
 
-  .grid {
-    display: grid; gap: 14px; padding-bottom: 56px;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  .hero h1 {
+    font-size: clamp(2.2rem, 7vw, 4rem);
+    font-weight: 900;
+    max-width: 16ch;
+    margin-bottom: 20px;
   }
-  .card {
-    background: var(--surface); border: 1px solid var(--line);
-    border-radius: 16px; padding: 20px;
-  }
-  .card h2 { font-size: 1rem; margin: 0 0 6px; }
-  .card p { margin: 0; color: var(--muted); font-size: .9rem; }
+  .hero h1 em { font-style: normal; color: var(--brass); }
 
+  .hero p {
+    font-size: clamp(1rem, 2.4vw, 1.18rem);
+    color: var(--bone-dim);
+    max-width: 46ch;
+    margin: 0 0 32px;
+  }
+
+  .actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+
+  .btn {
+    display: inline-block;
+    font-family: var(--display); font-weight: 700; font-size: .95rem;
+    padding: 14px 30px;
+    text-decoration: none;
+    border: 2px solid var(--bone);
+  }
+  .btn-solid { background: var(--bone); color: var(--red-deep); }
+  .btn-solid:hover { background: var(--brass); border-color: var(--brass); color: var(--red-ink); }
+  .btn-ghost { color: var(--bone); }
+  .btn-ghost:hover { background: rgba(242,236,227,.12); }
+
+  .pending {
+    display: inline-block;
+    font-family: var(--display); font-size: .9rem; font-weight: 500;
+    padding: 13px 26px;
+    border: 2px dashed rgba(242,236,227,.45);
+    color: var(--bone-dim);
+  }
+
+  /* ── أقسام ───────────────────────────────────────────────────────── */
+  section { padding: 72px 0; }
+  .section-head { max-width: 52ch; margin-bottom: 40px; }
+  .section-head h2 { font-size: clamp(1.5rem, 4vw, 2.1rem); font-weight: 700; }
+  .section-head p { color: var(--ink-soft); margin: 12px 0 0; }
+
+  /* ── الخطوات: تسلسل حقيقي، فالترقيم يحمل معنى ──────────────────── */
+  .steps { display: grid; gap: 0; border: 1px solid var(--line); }
+  @media (min-width: 760px) { .steps { grid-template-columns: repeat(3, 1fr); } }
+  .step { padding: 30px 26px; border-bottom: 1px solid var(--line); }
+  .step:last-child { border-bottom: none; }
+  @media (min-width: 760px) {
+    .step { border-bottom: none; border-left: 1px solid var(--line); }
+    .step:last-child { border-left: none; }
+  }
+  .step-n {
+    font-family: var(--display); font-weight: 900;
+    font-size: 2.4rem; color: var(--line);
+    line-height: 1; margin-bottom: 14px;
+  }
+  .step h3 { font-size: 1.05rem; font-weight: 700; margin-bottom: 6px; }
+  .step p { margin: 0; color: var(--ink-soft); font-size: .93rem; }
+
+  /* ── التوقيع: كتلة المحافظات. الادّعاء يُبرهَن بالسرد لا بالوصف. ── */
+  .reach { background: var(--ink); color: var(--bone); }
+  .reach .section-head h2 { color: var(--bone); }
+  .reach .section-head p { color: var(--bone-dim); }
+  .govs {
+    display: grid; gap: 1px;
+    background: rgba(242,236,227,.16);
+    border: 1px solid rgba(242,236,227,.16);
+    grid-template-columns: repeat(2, 1fr);
+  }
+  @media (min-width: 560px) { .govs { grid-template-columns: repeat(3, 1fr); } }
+  @media (min-width: 860px) { .govs { grid-template-columns: repeat(6, 1fr); } }
+  .gov {
+    background: var(--ink);
+    padding: 16px 12px;
+    font-family: var(--display); font-weight: 500; font-size: .88rem;
+    text-align: center;
+  }
+  .reach-note {
+    margin-top: 20px; color: var(--bone-dim);
+    font-size: .88rem; text-align: center;
+  }
+
+  /* ── الميزات: شبكة محلّات، كلّ خلية واجهة ───────────────────────── */
+  .stalls {
+    display: grid; gap: 1px; background: var(--line);
+    border: 1px solid var(--line);
+    grid-template-columns: 1fr;
+  }
+  @media (min-width: 700px) { .stalls { grid-template-columns: repeat(2, 1fr); } }
+  .stall { background: var(--paper); padding: 28px 26px; }
+  .stall h3 {
+    font-size: 1.05rem; font-weight: 700; margin-bottom: 8px;
+    padding-bottom: 8px; border-bottom: 2px solid var(--red);
+    display: inline-block;
+  }
+  .stall p { margin: 0; color: var(--ink-soft); font-size: .93rem; }
+
+  /* ── للتجّار ─────────────────────────────────────────────────────── */
+  .sellers { background: var(--red); color: var(--bone); }
+  .sellers .section-head h2 { color: var(--bone); }
+  .sellers .section-head p { color: rgba(242,236,227,.78); }
+  .perks { display: grid; gap: 18px; }
+  @media (min-width: 700px) { .perks { grid-template-columns: repeat(2, 1fr); } }
+  .perk { border-top: 2px solid var(--brass); padding-top: 14px; }
+  .perk h3 { font-size: .98rem; font-weight: 700; margin-bottom: 4px; }
+  .perk p { margin: 0; font-size: .9rem; color: rgba(242,236,227,.78); }
+
+  /* ── التذييل ─────────────────────────────────────────────────────── */
   footer {
-    border-top: 1px solid var(--line); padding: 28px 0 40px;
-    text-align: center; color: var(--muted); font-size: .85rem;
+    background: var(--ink); color: var(--bone-dim);
+    padding: 44px 0; font-size: .88rem;
   }
-  footer a { color: var(--muted); }
+  .foot-row {
+    display: flex; flex-wrap: wrap; gap: 14px 26px;
+    align-items: center; justify-content: space-between;
+  }
+  footer a { color: var(--bone); text-decoration: none; }
+  footer a:hover { color: var(--brass); text-decoration: underline; }
+  .foot-links { display: flex; flex-wrap: wrap; gap: 20px; }
+
+  :focus-visible { outline: 3px solid var(--brass); outline-offset: 3px; }
 </style>
 </head>
 <body>
+
+<header class="hero">
   <div class="wrap">
-    <header>
-      <div class="mark">ش</div>
-      <h1>الشورجة</h1>
-      <p class="lede">
-        سوق العراق للبيع والشراء والمزادات والبث المباشر.
-        توصيل لكل المحافظات، ودفع عند الاستلام.
-      </p>
-
-      {# زرّ لا يعمل أسوأ من زرّ غائب: رابط المتجر يظهر بعد النشر فقط. #}
-      {% if play_store_url %}
-        <a class="cta" href="{{ play_store_url }}">حمّل التطبيق</a>
-      {% else %}
-        <div class="soon">التطبيق قادم قريباً إلى Google Play</div>
-      {% endif %}
-    </header>
-
-    <div class="grid">
-      <div class="card">
-        <h2>بِع ما عندك</h2>
-        <p>انشر منتجك بصوره وسعره، ويصل المشتري إليك من كل العراق.</p>
-      </div>
-      <div class="card">
-        <h2>زايد لحظياً</h2>
-        <p>مزادات تنتهي بموعدها، والمزايدة تُحتسب في حينها.</p>
-      </div>
-      <div class="card">
-        <h2>بثّ مباشر</h2>
-        <p>اعرض بضاعتك مباشرة، ويحجز المشاهد فور ظهور المنتج.</p>
-      </div>
-      <div class="card">
-        <h2>دفع عند الاستلام</h2>
-        <p>ادفع كاش للمندوب عند الباب، أو عربوناً يثبّت الحجز.</p>
-      </div>
+    <div class="brandline">
+      <span class="mark">ش</span>
+      <span class="brandname">الشورجة</span>
     </div>
 
-    <footer>
-      <a href="/legal/privacy/">سياسة الخصوصية</a> ·
-      <a href="/legal/terms/">شروط الاستخدام</a><br>
-      الشورجة — سوق العراق
-    </footer>
+    <h1>سوق العراق، <em>في جيبك</em>.</h1>
+    <p>
+      بِع بضاعتك واشترِ ما تريد وزايد على ما يعجبك.
+      التوصيل يصل كل محافظة، والدفع نقداً عند الباب.
+    </p>
+
+    <div class="actions">
+      {% if play_store_url %}
+        <a class="btn btn-solid" href="{{ play_store_url }}">حمّل التطبيق</a>
+      {% else %}
+        <span class="pending">التطبيق قادم قريباً إلى Google Play</span>
+      {% endif %}
+      <a class="btn btn-ghost" href="#how">كيف يعمل</a>
+    </div>
   </div>
+</header>
+
+<section id="how">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">من التصفّح إلى الباب</p>
+      <h2>ثلاث خطوات، ولا دفعة قبل أوانها</h2>
+      <p>لا تحتاج حساباً لتتصفّح. الحساب يلزم حين تحجز.</p>
+    </div>
+
+    <div class="steps">
+      <div class="step">
+        <div class="step-n">١</div>
+        <h3>تصفّح</h3>
+        <p>منتجات ومزادات وبثّ مباشر من متاجر العراق — بلا تسجيل.</p>
+      </div>
+      <div class="step">
+        <div class="step-n">٢</div>
+        <h3>احجز</h3>
+        <p>ثبّت المنتج باسمك. بعض البائعين يطلبون عربوناً، وأكثرهم لا يطلب شيئاً.</p>
+      </div>
+      <div class="step">
+        <div class="step-n">٣</div>
+        <h3>استلم وادفع</h3>
+        <p>يصلك المندوب، تفحص البضاعة، ثم تدفع نقداً عند الباب.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="reach">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">التغطية</p>
+      <h2>ثماني عشرة محافظة</h2>
+      <p>أجرة التوصيل تُحسب من محافظة البائع إلى محافظتك قبل أن تؤكّد الحجز — لا مفاجآت عند الباب.</p>
+    </div>
+
+    <div class="govs">
+      <div class="gov">بغداد</div>
+      <div class="gov">البصرة</div>
+      <div class="gov">نينوى</div>
+      <div class="gov">أربيل</div>
+      <div class="gov">النجف</div>
+      <div class="gov">كربلاء</div>
+      <div class="gov">كركوك</div>
+      <div class="gov">الأنبار</div>
+      <div class="gov">بابل</div>
+      <div class="gov">ذي قار</div>
+      <div class="gov">ديالى</div>
+      <div class="gov">واسط</div>
+      <div class="gov">ميسان</div>
+      <div class="gov">المثنى</div>
+      <div class="gov">القادسية</div>
+      <div class="gov">صلاح الدين</div>
+      <div class="gov">دهوك</div>
+      <div class="gov">السليمانية</div>
+    </div>
+    <p class="reach-note">كل محافظة في العراق، بلا استثناء.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">ما الذي يجري هنا</p>
+      <h2>سوق كامل، لا قائمة إعلانات</h2>
+    </div>
+
+    <div class="stalls">
+      <div class="stall">
+        <h3>مزادات بوقت حقيقي</h3>
+        <p>تنتهي بموعدها لا بمزاج أحد، والمزايدة تُحتسب في حينها. الفائز يُخطَر فوراً.</p>
+      </div>
+      <div class="stall">
+        <h3>بثّ مباشر</h3>
+        <p>يعرض التاجر بضاعته أمام الكاميرا، ويحجز المشاهد فور ظهور القطعة.</p>
+      </div>
+      <div class="stall">
+        <h3>ريلز للبضاعة</h3>
+        <p>مقاطع قصيرة تُظهر المنتج كما هو — والسؤال في التعليقات يصل صاحبه فوراً.</p>
+      </div>
+      <div class="stall">
+        <h3>محادثة مع البائع</h3>
+        <p>اسأل عن المقاس أو اللون أو السعر قبل أن تحجز، داخل التطبيق.</p>
+      </div>
+      <div class="stall">
+        <h3>مهلة قبل تحرير المبلغ</h3>
+        <p>لا يصل المال إلى البائع فور التسليم. هناك مهلة تفحص فيها ما استلمت.</p>
+      </div>
+      <div class="stall">
+        <h3>خيارات المنتج</h3>
+        <p>لون ومقاس وسعة، لكلٍّ كميته وسعره — يختار المشتري قبل الحجز.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="sellers">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">للتجّار</p>
+      <h2>افتح متجرك، واترك التوصيل علينا</h2>
+      <p>متجر باسمك داخل التطبيق، وشركات توصيل تستلم من مخزنك وتسلّم إلى الزبون.</p>
+    </div>
+
+    <div class="perks">
+      <div class="perk">
+        <h3>انشر بالصور والسعر</h3>
+        <p>صوّر من الكاميرا مباشرة، حدّد الكمية والخيارات، وانشر.</p>
+      </div>
+      <div class="perk">
+        <h3>العربون بيدك</h3>
+        <p>اطلب نسبة مقدّماً لتثبيت الحجز، أو لا تطلب شيئاً.</p>
+      </div>
+      <div class="perk">
+        <h3>محفظة ومحاسبة</h3>
+        <p>تتبّع مبيعاتك ومستحقّاتك، واسحب رصيدك حين تشاء.</p>
+      </div>
+      <div class="perk">
+        <h3>مندوبون ونقل ملكية</h3>
+        <p>وكّل غيرك ببيع بضاعتك، أو انقل ملكيتها بالجملة إلى تاجر آخر.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot-row">
+    <div>الشورجة — سوق العراق</div>
+    <nav class="foot-links">
+      <a href="/legal/privacy/">سياسة الخصوصية</a>
+      <a href="/legal/terms/">شروط الاستخدام</a>
+    </nav>
+  </div>
+</footer>
+
 </body>
 </html>
