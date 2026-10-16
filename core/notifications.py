@@ -925,3 +925,59 @@ def send_bulk_notification(user_ids, subject, message, notification_type='email'
             NotificationService.send_email(user.email, subject, message)
         elif notification_type == 'sms' and user.phone_verified:
             NotificationService.send_sms(user.phone, message)
+
+
+# ── الريلز ───────────────────────────────────────────────────────────────
+
+# عتبات الإعجاب. إشعار لكل إعجاب يعني مئتي إشعار على ريل ناجح واحد —
+# فيُطفئ التاجر إشعارات التطبيق كلها، ويخسر معها إشعارات الحجوزات
+# والمزادات. العتبات تجعل الإشعار خبراً ("وصل ريلك إلى 100 إعجاب")
+# لا ضجيجاً، وتُشتقّ من likes_count بلا حالة إضافية تُخزَّن.
+REEL_LIKE_MILESTONES = (1, 10, 50, 100, 500, 1000, 5000)
+
+
+def notify_reel_liked(reel, liker):
+    """يُشعر صاحب الريل عند أول إعجاب ثم عند كل عتبة."""
+    owner = reel.store.user if reel.store_id else None
+    # لا إشعار لصاحبه عن نفسه: إعجاب المرء بريله لا خبر فيه.
+    if owner is None or owner.pk == liker.pk:
+        return
+    if reel.likes_count not in REEL_LIKE_MILESTONES:
+        return
+
+    if reel.likes_count == 1:
+        body = f'أعجب {bidi_isolate(liker.get_full_name() or liker.username)} بريلك'
+    else:
+        body = f'وصل ريلك إلى {reel.likes_count} إعجاب'
+
+    notify_push(
+        owner, 'إعجاب جديد', body,
+        data={'type': 'reel_liked', 'reel_id': str(reel.id)},
+    )
+
+
+def notify_reel_comment(comment):
+    """يُشعر صاحب الريل بكل تعليق.
+
+    بلا عتبات هنا: التعليق كلام موجَّه وغالباً سؤال عن البضاعة، وتأخيره
+    يُضيّع بيعاً. وحجمه أقل من الإعجاب بمراتب فلا يُغرق.
+    """
+    reel = comment.reel
+    owner = reel.store.user if reel.store_id else None
+    if owner is None or owner.pk == comment.user_id:
+        return
+
+    author = bidi_isolate(comment.user.get_full_name() or comment.user.username)
+    preview = comment.content.strip()
+    # الإشعار يُعرض في سطرٍ على القفل؛ النصّ الطويل يُقطع بلا إشارة.
+    if len(preview) > 60:
+        preview = preview[:60].rstrip() + '…'
+
+    notify_push(
+        owner, 'تعليق جديد على ريلك', f'{author}: {preview}',
+        data={
+            'type': 'reel_comment',
+            'reel_id': str(reel.id),
+            'comment_id': str(comment.id),
+        },
+    )

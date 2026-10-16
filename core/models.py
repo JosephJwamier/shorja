@@ -2594,6 +2594,8 @@ class Notification(models.Model):
         ('live_item_sold_out', 'Live Item Sold Out'),
         ('report_submitted', 'Report Submitted'),
         ('report_reviewed', 'Report Reviewed'),
+        ('reel_liked', 'Reel Liked'),
+        ('reel_comment', 'Reel Comment'),
         ('general', 'General'),
     ]
 

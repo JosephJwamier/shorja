@@ -1175,6 +1175,8 @@ from .notifications import (
     notify_report_submitted,
     notify_report_reviewed,
     notify_new_message,
+    notify_reel_liked,
+    notify_reel_comment,
     notify_push,
     bidi_isolate,
 )
@@ -3214,6 +3216,15 @@ class ReelViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin,
         if created:
             Reel.objects.filter(pk=reel.pk).update(likes_count=F('likes_count') + 1)
             reel.refresh_from_db(fields=['likes_count'])
+            # بعد refresh_from_db لا قبله: العتبة تُقرأ من العدّاد المحدَّث،
+            # وقراءته قبل التحديث تُفوّت كل عتبة بواحد.
+            #
+            # ولا يُفشل الإعجابَ فشلُ الإشعار: FCM طرف خارجي قد يتأخر أو
+            # يسقط، وضغطة قلب يجب أن تنجح بمعزل عنه.
+            try:
+                notify_reel_liked(reel, request.user)
+            except Exception:
+                logger.exception('notify_reel_liked failed for reel %s', reel.pk)
 
         return Response({
             'success': True,
@@ -3262,6 +3273,11 @@ class ReelViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin,
             reel=reel, user=request.user, content=serializer.validated_data['content']
         )
         Reel.objects.filter(pk=reel.pk).update(comments_count=F('comments_count') + 1)
+
+        try:
+            notify_reel_comment(comment)
+        except Exception:
+            logger.exception('notify_reel_comment failed for comment %s', comment.pk)
 
         return Response({
             'success': True,
