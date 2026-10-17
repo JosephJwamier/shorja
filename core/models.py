@@ -2400,7 +2400,14 @@ class Reel(models.Model):
     published_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        ordering = ['-created_at']
+        # -id as a tiebreaker, same as Favorite and SavedReel: MySQL's
+        # datetime(6) is still coarser than how fast two INSERTs can fire,
+        # so two reels posted back-to-back can share a created_at. This is
+        # the model the feed and every per-store grid paginate with
+        # LIMIT/OFFSET, and tied rows leave their relative order up to the
+        # database — which can hand the same reel to two pages, or no page
+        # at all. test_store_reels.test_newest_first caught it as a flake.
+        ordering = ['-created_at', '-id']
         verbose_name = 'ريل'
         verbose_name_plural = 'الريلز'
         indexes = [
