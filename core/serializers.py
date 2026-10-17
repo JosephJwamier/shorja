@@ -2519,6 +2519,14 @@ class ReelCardSerializer(serializers.ModelSerializer):
         return obj.thumbnail_url
 
     def get_is_liked_by_me(self, obj):
+        # ReelViewSet.annotate_viewer_flags puts an Exists() subquery on the
+        # queryset, so a whole page resolves in the page's own SELECT. The
+        # lookup below is the fallback for reels serialized outside that
+        # queryset — finalize and my_reels build their own, and the
+        # notify_* paths serialize a bare instance.
+        annotated = getattr(obj, 'is_liked_by_me', None)
+        if annotated is not None:
+            return annotated
         request = self.context.get('request')
         if not request or not request.user.is_authenticated:
             return False
@@ -2529,6 +2537,11 @@ class ReelCardSerializer(serializers.ModelSerializer):
         # likes_count there is nothing to read off the Reel row — the
         # saver's own row in SavedReel is the whole truth, and a guest
         # has none by definition.
+        #
+        # Annotated by the viewset for list pages, same as is_liked_by_me.
+        annotated = getattr(obj, 'is_saved_by_me', None)
+        if annotated is not None:
+            return annotated
         request = self.context.get('request')
         if not request or not request.user.is_authenticated:
             return False

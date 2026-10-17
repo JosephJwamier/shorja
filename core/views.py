@@ -3049,7 +3049,34 @@ class ReelViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin,
         # direct retrieve/finalize by the owning store.
         if self.action == 'list':
             queryset = queryset.filter(status='published')
-        return queryset
+        return self.annotate_viewer_flags(queryset)
+
+    def annotate_viewer_flags(self, queryset):
+        """Resolve is_liked_by_me/is_saved_by_me as two correlated EXISTS
+        subqueries on the page's own SELECT, instead of the two per-row
+        lookups ReelCardSerializer would otherwise issue.
+
+        A page of ItemStandardPagination is 20 reels, so the serializer's
+        fallback cost ~40 extra round trips on the feed, on every per-store
+        grid (`?store=<id>`) and on `saved/`. EXISTS lets the DB stop at the
+        first matching row, and the whole page now costs one query either
+        way.
+
+        Anonymous viewers get nothing annotated: they can neither like nor
+        save, so the serializer short-circuits to False without a query and
+        the subqueries would only be dead weight in the SQL.
+        """
+        user = self.request.user
+        if not user or not user.is_authenticated:
+            return queryset
+        return queryset.annotate(
+            is_liked_by_me=Exists(
+                ReelLike.objects.filter(reel_id=OuterRef('pk'), user_id=user.id)
+            ),
+            is_saved_by_me=Exists(
+                SavedReel.objects.filter(reel_id=OuterRef('pk'), user_id=user.id)
+            ),
+        )
 
     @swagger_auto_schema(
         operation_description="Request presigned S3 PUT URLs for a new reel's video (and optional thumbnail) — creates a pending_upload Reel immediately",
@@ -3306,8 +3333,13 @@ class ReelViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin,
 
         reels_by_id = {
             reel.id: reel
-            for reel in Reel.objects.filter(id__in=page_ids, status='published')
-            .select_related('store', 'store__user', 'item')
+            # Built outside get_queryset (the id__in/ordering dance above),
+            # so the viewer-flag annotations have to be applied by hand —
+            # without them this page pays the per-row like/save lookups.
+            for reel in self.annotate_viewer_flags(
+                Reel.objects.filter(id__in=page_ids, status='published')
+                .select_related('store', 'store__user', 'item')
+            )
         }
         ordered = [reels_by_id[i] for i in page_ids if i in reels_by_id]
 
