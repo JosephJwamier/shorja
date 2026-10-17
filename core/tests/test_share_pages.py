@@ -152,3 +152,12 @@ class TestHomePage:
         # زرّ يقود إلى 404 أسوأ من زرّ غائب.
         html = client.get('/').content.decode()
         assert 'قريباً' in html
+
+    def test_the_store_link_appears_once_it_is_configured(self, client,
+                                                           settings):
+        # الرابط من البيئة لا من الكود: يوم النشر يُضبط في .env وحده، فلا
+        # إعادة بناء ولا نشر لأجل سلسلة نصّية.
+        settings.PLAY_STORE_URL =             'https://play.google.com/store/apps/details?id=com.balla.balla'
+        html = client.get('/').content.decode()
+        assert 'play.google.com/store/apps/details?id=com.balla.balla' in html
+        assert 'قريباً' not in html

@@ -689,6 +689,10 @@ S3_ENDPOINT_URL = os.environ.get('S3_ENDPOINT_URL', '')
 # (e.g. https://media.example.com). Never the r2.dev subdomain in
 # production — it is rate-limited and bypasses the cache. Falls back to the
 # old BunnyCDN variable so a not-yet-migrated .env keeps serving.
+# رابط التطبيق على Google Play. فارغ قبل النشر: صفحات المشاركة تُظهر
+# «قادم قريباً» بدل زرّ يقود إلى 404. يُضبط في .env يوم النشر بلا تعديل كود.
+PLAY_STORE_URL = os.environ.get('PLAY_STORE_URL', '')
+
 REELS_PUBLIC_BASE_URL = (
     os.environ.get('REELS_PUBLIC_BASE_URL')
     or os.environ.get('BUNNYCDN_PULL_ZONE_BASE_URL', '')

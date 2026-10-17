@@ -17,6 +17,7 @@
 """
 from django.http import Http404
 from django.shortcuts import render
+from django.conf import settings
 from django.views.decorators.cache import cache_control
 
 from .models import AuctionListing, FixedPriceListing, LiveSession, UserStore
@@ -25,8 +26,14 @@ from .models import AuctionListing, FixedPriceListing, LiveSession, UserStore
 # ثابت أفضل من وسم ناقص.
 FALLBACK_IMAGE = '/static/share-fallback.png'
 
-# المتجر بعد النشر. يُترك فارغاً الآن فيختفي الزرّ بدل أن يقود إلى 404.
-PLAY_STORE_URL = ''
+def _play_store_url():
+    """رابط التطبيق على Google Play، أو '' قبل النشر.
+
+    من البيئة لا ثابتاً في الكود: يوم ينشر التطبيق يصير الرابط معروفاً، وربطه
+    بإعادة بناء الحاوية ونشرٍ كامل لأجل سلسلة نصّية واحدة ثمنٌ لا داعي له.
+    فارغاً يختفي الزرّ ويظهر «قادم قريباً» بدل أن يقود إلى 404.
+    """
+    return getattr(settings, 'PLAY_STORE_URL', '') or ''
 
 
 def _absolute(request, path):
@@ -49,7 +56,7 @@ def _render(request, *, title, description, image, deep_link, meta=None):
         'image': _absolute(request, image or FALLBACK_IMAGE),
         'canonical': request.build_absolute_uri(),
         'deep_link': deep_link,
-        'play_store_url': PLAY_STORE_URL,
+        'play_store_url': _play_store_url(),
         'meta': meta or [],
     })
 
@@ -163,5 +170,5 @@ def home(request):
     """
     return render(request, 'share/home.html', {
         'canonical': request.build_absolute_uri(),
-        'play_store_url': PLAY_STORE_URL,
+        'play_store_url': _play_store_url(),
     })
