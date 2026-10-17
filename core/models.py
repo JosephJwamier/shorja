@@ -2440,6 +2440,48 @@ class ReelLike(models.Model):
         return f"{self.user.username} likes reel #{self.reel_id}"
 
 
+class SavedReel(models.Model):
+    """A viewer bookmarking a reel to watch again (الريلز المحفوظة).
+
+    Deliberately NOT a flag on ReelLike, and deliberately not a second
+    target on Favorite:
+
+    - A like is public. It bumps Reel.likes_count and notifies the store
+      owner at milestones (core.notifications.notify_reel_liked). A save is
+      private: nobody but the saver sees it, no counter moves, and the owner
+      is never told. Folding the two together would mean bookmarking a reel
+      sends its owner a notification.
+    - Favorite.item is non-nullable and Favorite.unique_together is
+      ('item', 'user'), so adding reels there means nullable FKs plus an
+      exactly-one-target CheckConstraint — a migration with real risk on a
+      live MySQL table — for two things the app renders on separate tabs
+      anyway.
+
+    No counter on Reel either: a private bookmark count would tell a store
+    owner how many people saved a reel without telling them who, which is
+    a number that invites guessing and answers nothing.
+    """
+    reel = models.ForeignKey(Reel, on_delete=models.CASCADE, related_name='saved_by')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='saved_reels')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ['reel', 'user']
+        # الأحدث حفظاً أولاً: شاشة المفضلة تُقرأ من أعلى، وما حُفظ قبل قليل
+        # هو ما يُبحث عنه.
+        ordering = ['-created_at']
+        indexes = [
+            # الاستعلام الوحيد على هذا الجدول: «ريلزات هذا المستخدم المحفوظة،
+            # الأحدث أولاً».
+            models.Index(fields=['user', '-created_at']),
+        ]
+        verbose_name = 'ريل محفوظ'
+        verbose_name_plural = 'الريلز المحفوظة'
+
+    def __str__(self):
+        return f"{self.user.username} saved reel #{self.reel_id}"
+
+
 class ReelComment(models.Model):
     """A viewer's comment on a reel — mirrors LiveSessionComment's pattern."""
     reel = models.ForeignKey(Reel, on_delete=models.CASCADE, related_name='comments')

@@ -2486,19 +2486,22 @@ class CouponCollectionSerializer(serializers.ModelSerializer):
 
 
 class ReelCardSerializer(serializers.ModelSerializer):
-    """Lightweight card for the reels feed — mirrors LiveSessionCardSerializer's shape."""
+    """Lightweight card for the reels feed and for a store's own reel grid
+    (`?store=<id>`) — mirrors LiveSessionCardSerializer's shape."""
     store = PublicUserStoreSerializer(read_only=True)
     item = ItemListSerializer(read_only=True)
     video_url = serializers.SerializerMethodField()
     thumbnail_url = serializers.SerializerMethodField()
     is_liked_by_me = serializers.SerializerMethodField()
+    is_saved_by_me = serializers.SerializerMethodField()
 
     class Meta:
         model = Reel
         fields = [
-            'id', 'store', 'item', 'video_url', 'thumbnail_url',
+            'id', 'store', 'item', 'caption', 'video_url', 'thumbnail_url',
             'duration_seconds', 'view_count', 'likes_count', 'comments_count',
-            'is_liked_by_me', 'status', 'created_at', 'published_at',
+            'is_liked_by_me', 'is_saved_by_me', 'status', 'created_at',
+            'published_at',
         ]
         # Everything here is set by request_upload_url/finalize or by the
         # like/comment/view actions — never directly writable through
@@ -2521,11 +2524,25 @@ class ReelCardSerializer(serializers.ModelSerializer):
             return False
         return obj.likes.filter(user=request.user).exists()
 
+    def get_is_saved_by_me(self, obj):
+        # No counter equivalent: a save is private, so unlike
+        # likes_count there is nothing to read off the Reel row — the
+        # saver's own row in SavedReel is the whole truth, and a guest
+        # has none by definition.
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        return obj.saved_by.filter(user=request.user).exists()
+
 
 class ReelDetailSerializer(ReelCardSerializer):
-    """Full reel detail — adds the caption, omitted from the lightweight feed
-    card, plus the write-only `item_id` a store owner PATCHes to change or
-    clear the tagged product.
+    """Full reel detail — adds the write-only `item_id` a store owner PATCHes
+    to change or clear the tagged product.
+
+    The caption used to live here alone, which meant the list endpoint — and
+    therefore the public feed and every per-store reel grid — rendered an
+    empty caption for every reel. It is a short TextField on the same row
+    already being read, so it now belongs to the card.
 
     Read and write use two different fields on purpose, the same split
     FinalizeReelSerializer uses: `item` stays the nested read-only product
@@ -2537,7 +2554,7 @@ class ReelDetailSerializer(ReelCardSerializer):
     item_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
 
     class Meta(ReelCardSerializer.Meta):
-        fields = ReelCardSerializer.Meta.fields + ['caption', 'item_id']
+        fields = ReelCardSerializer.Meta.fields + ['item_id']
 
     def validate_item_id(self, value):
         # Same ownership rule as FinalizeReelSerializer.validate_item_id: a

@@ -42,7 +42,7 @@ from .models import (ItemImage, ItemVariant, Location,
     LiveSession, LiveSessionItem, LiveSessionLike, LiveSessionComment, LiveSessionViewer,
     LiveSessionModerator, LiveSessionBan,
     UserCategoryAffinity, record_interest,
-    Reel, ReelLike, ReelComment, ReelView, Favorite,
+    Reel, ReelLike, ReelComment, ReelView, SavedReel, Favorite,
 )
 
 from .serializers import (ItemImageSerializer, FixedPriceListingCreateSerializer,
@@ -3028,7 +3028,8 @@ class ReelViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin,
             return [IsStoreOwner()]
         if self.action == 'comments' and self.request.method == 'GET':
             return [AllowAny()]
-        if self.action in ('like', 'unlike', 'comments', 'comment_detail'):
+        if self.action in ('like', 'unlike', 'comments', 'comment_detail',
+                            'save', 'unsave', 'saved'):
             return [IsAuthenticated()]
         return [AllowAny()]
 
@@ -3247,6 +3248,73 @@ class ReelViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin,
             'is_liked': False,
             'likes_count': reel.likes_count,
         }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def save(self, request, pk=None):
+        """Bookmark this reel into the viewer's favourites (الريلز المحفوظة).
+
+        Private and silent on purpose — the opposite of `like` right above:
+        no counter on Reel moves and the store owner is never notified. A
+        bookmark is the viewer's own note to come back, not a signal to the
+        seller.
+        """
+        reel = self.get_object()
+        SavedReel.objects.get_or_create(reel=reel, user=request.user)
+        return Response({
+            'success': True,
+            'is_saved': True,
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def unsave(self, request, pk=None):
+        """Remove this reel from the viewer's favourites."""
+        reel = self.get_object()
+        SavedReel.objects.filter(reel=reel, user=request.user).delete()
+        return Response({
+            'success': True,
+            'is_saved': False,
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'])
+    def saved(self, request):
+        """The viewer's saved reels, most recently saved first.
+
+        Ordered by SavedReel.created_at read from the SavedReel table and
+        then re-applied in Python, not by `.order_by('saved_by__created_at')`
+        on the Reel queryset — the same reasoning as
+        FixedPriceListingViewSet.favorites: chaining that order_by after a
+        filter on the same reverse relation lets Django join SavedReel twice,
+        so a reel saved by several users could be ordered by a *different*
+        user's row and appear more than once.
+
+        Unpublished reels are filtered out rather than shown greyed: a reel
+        its owner archived or deleted has no video left to play, and a
+        bookmark that opens a black screen is worse than one that quietly
+        disappears.
+        """
+        saved_reel_ids = list(
+            SavedReel.objects.filter(user=request.user)
+            # -id as a tiebreaker, same as Favorite: two saves a moment apart
+            # can share a created_at, which would leave their relative order
+            # undefined between pages.
+            .order_by('-created_at', '-id')
+            .values_list('reel_id', flat=True)
+        )
+
+        page = self.paginate_queryset(saved_reel_ids)
+        page_ids = page if page is not None else saved_reel_ids
+
+        reels_by_id = {
+            reel.id: reel
+            for reel in Reel.objects.filter(id__in=page_ids, status='published')
+            .select_related('store', 'store__user', 'item')
+        }
+        ordered = [reels_by_id[i] for i in page_ids if i in reels_by_id]
+
+        serializer = ReelCardSerializer(ordered, many=True, context={'request': request})
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
 
     @action(detail=True, methods=['get', 'post'], url_path='comments')
     def comments(self, request, pk=None):

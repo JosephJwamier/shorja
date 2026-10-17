@@ -25,7 +25,7 @@ from .models import (
     LiveSession, LiveSessionItem, LiveSessionLike, LiveSessionComment,
     DeliveryCompany, DeliveryOrder, CashSettlement, DeliveryBatch,
     Wallet, Notification, DepositRequest, WithdrawalRequest,
-    Reel, ReelLike, ReelComment, ReelView,
+    Reel, ReelLike, ReelComment, ReelView, SavedReel,
     ItemVariant, PaymentIntent, StoreBadge, DeliveryRate,
     LiveSessionViewer, LiveSessionBan, LiveSessionModerator, UserCategoryAffinity,
 )
@@ -1082,6 +1082,16 @@ class ReelLikeAdmin(ModelAdmin):
 class ReelCommentAdmin(ModelAdmin):
     list_display = ('user', 'reel', 'content', 'created_at')
     search_fields = ('user__username', 'content')
+    raw_id_fields = ('user', 'reel')
+    list_select_related = ('user', 'reel', 'reel__store')
+
+
+@admin.register(SavedReel)
+class SavedReelAdmin(ModelAdmin):
+    """للقراءة عمليّاً: المحفوظات خاصّة بصاحبها، والإدارة تحتاجها للتشخيص
+    («لماذا لا يظهر هذا الريل في مفضلتي؟») لا للتعديل."""
+    list_display = ('user', 'reel', 'created_at')
+    search_fields = ('user__username',)
     raw_id_fields = ('user', 'reel')
     list_select_related = ('user', 'reel', 'reel__store')
 
