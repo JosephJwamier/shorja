@@ -689,6 +689,21 @@ S3_ENDPOINT_URL = os.environ.get('S3_ENDPOINT_URL', '')
 # (e.g. https://media.example.com). Never the r2.dev subdomain in
 # production — it is rate-limited and bypasses the cache. Falls back to the
 # old BunnyCDN variable so a not-yet-migrated .env keeps serving.
+# بريد المنصّة إلى العملاء: مُطفأ حتى يُضبط مُرسِل حقيقي.
+#
+# كل بريد يخرج من المنصّة يمرّ بـNotificationService.send_email، وهذه الراية
+# توقفه هناك: الإشعارات، والحجوزات، والمزادات، والمحفظة، وتفعيل البريد،
+# واستعادة كلمة المرور بالبريد. الإشعارات الفورية (FCM) لا تتأثّر — وهي
+# الناقل الفعلي للمعاملات، فالحجز يبلّغ صاحبه كما كان.
+#
+# مُطفأة افتراضياً لا مُشعلة: بلا SMTP كان send_mail يرمي استثناءً يُلتقط
+# ويُسجّل كخطأ عند كل حجز ومزايدة، فتمتلئ السجلات بعطبٍ ليس عطباً. والإطفاء
+# الصريح يقول ذلك بدل أن يبدو خللاً.
+EMAIL_NOTIFICATIONS_ENABLED = (
+    os.environ.get('EMAIL_NOTIFICATIONS_ENABLED', 'false').strip().lower()
+    in ('1', 'true', 'yes', 'on')
+)
+
 # رابط التطبيق على Google Play. فارغ قبل النشر: صفحات المشاركة تُظهر
 # «قادم قريباً» بدل زرّ يقود إلى 404. يُضبط في .env يوم النشر بلا تعديل كود.
 PLAY_STORE_URL = os.environ.get('PLAY_STORE_URL', '')

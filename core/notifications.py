@@ -67,8 +67,23 @@ class NotificationService:
     @staticmethod
     def send_email(to_email, subject, message, html_message=None, from_email=None):
         """
-        Send email notification
+        Send email notification.
+
+        Returns False without sending while settings.EMAIL_NOTIFICATIONS_ENABLED
+        is off — the single switch for all outgoing platform mail (see the
+        setting's comment). Logged, not silent: the trail says what would have
+        gone out, so turning the switch on later is a change in delivery, not
+        a change in behaviour.
+
+        Only two callers read this return value (ResendVerificationView and
+        send_email_verification_code); every notify_* function below calls it
+        and ignores the result, so a disabled mailer costs them nothing — the
+        FCM push beside each one still goes.
         """
+        if not getattr(settings, 'EMAIL_NOTIFICATIONS_ENABLED', False):
+            logger.info('Email disabled; not sending to %s: %s', to_email, subject)
+            return False
+
         try:
             from_email = from_email or settings.DEFAULT_FROM_EMAIL
 

@@ -10,6 +10,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from rest_framework.throttling import ScopedRateThrottle
 from .throttling import LoginUsernameThrottle, PasswordResetEmailThrottle
+from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model
 from django.db import transaction  # NEW
 from django.utils import timezone
@@ -245,6 +246,15 @@ class ResendVerificationView(APIView):
                 'message': 'Email already verified'
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        # 503 لا 502 حين تكون الراية مطفأة: «حاول لاحقاً» وعدٌ كاذب — لن
+        # يعمل لاحقاً اليوم ولا غداً حتى يُضبط المُرسِل.
+        if not getattr(settings, 'EMAIL_NOTIFICATIONS_ENABLED', False):
+            return Response({
+                'success': False,
+                'code': 'email_disabled',
+                'message': 'تفعيل البريد غير متاح حالياً',
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
         sent = send_email_verification_code(user)
         if not sent:
             return Response({
@@ -284,6 +294,19 @@ class ResetPasswordView(APIView):
     throttle_scope = 'auth_reset'
 
     def post(self, request):
+        # بريد المنصّة مُطفأ: الجواب العامّ أدناه كان سيقول «ستصلك رسالة»
+        # فينتظر المستخدم بريداً لا يأتي، ويظنّ حسابه مفقوداً. الاسترجاع
+        # بواتساب يعمل — فنقوله صريحاً.
+        #
+        # وهذا الجواب لا يكشف شيئاً عن الحساب: هو عن قدرة المنصّة لا عن
+        # وجود البريد، ويُردّ قبل لمس قاعدة البيانات أصلاً.
+        if not getattr(settings, 'EMAIL_NOTIFICATIONS_ENABLED', False):
+            return Response(
+                {'success': False,
+                 'code': 'email_disabled',
+                 'message': 'الاسترجاع بالبريد غير متاح حالياً — استخدم رقم هاتفك'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
         # Normalised and required: email is NULL for most accounts now, and
         # a blank request must not resolve to one of them. (`.get(email='')`
         # on the old non-unique column would have matched every phone-only

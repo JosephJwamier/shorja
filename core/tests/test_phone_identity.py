@@ -137,7 +137,14 @@ class TestLogin:
 
 
 class TestPasswordResetByEmailNoLongerCrashes:
-    def test_blank_email_does_not_match_the_phone_only_accounts(self, client):
+    def test_blank_email_does_not_match_the_phone_only_accounts(
+            self, client, settings):
+        # البريد مُطفأ على المنصّة الآن، والنقطة تردّ 503 قبل أن تقرأ الحقل
+        # أصلاً — فبلا إشعال الراية هنا كان هذا الاختبار يمرّ بلا أن يُنفّذ
+        # السطر الذي كُتب لحراسته، ويبقى كذلك صامتاً إلى يوم يُشعَل البريد
+        # فيعود العطب بلا حارس. الإشعال يجعل التبعية صريحة.
+        settings.EMAIL_NOTIFICATIONS_ENABLED = True
+
         User.objects.create_user(username='a', password='x', phone='07701234567')
         User.objects.create_user(username='b', password='x', phone='07801234567')
         # Both have email NULL. A blank request must be a quiet no-match,
@@ -145,6 +152,13 @@ class TestPasswordResetByEmailNoLongerCrashes:
         r = client.post(reverse('reset-password'), {'email': ''}, format='json')
         assert r.status_code == 200
         assert 'message' in r.data
+
+    def test_it_is_refused_outright_while_platform_email_is_off(self, client):
+        # الحالة الفعلية اليوم: لا رمز يُولَّد ولا وعدَ برسالة.
+        r = client.post(reverse('reset-password'),
+                        {'email': 'someone@example.com'}, format='json')
+        assert r.status_code == 503
+        assert r.data['code'] == 'email_disabled'
 
 
 def test_one_phone_cannot_reach_two_accounts_at_all():
