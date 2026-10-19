@@ -19,10 +19,38 @@
 
     # HLS playlists/segments — fallback playback and the only path a plain
     # video player needs.
+    #
+    # SRS has no hook for HLS: these are files it serves itself, so nothing
+    # ever asked Django about them. Caddy asks instead — forward_auth turns
+    # each playlist and segment request into a GET on /api/live/hls-auth/
+    # and serves the file only on a 2xx (core/live_hooks.HlsAuthView).
+    # Without it a banned viewer keeps watching and a stream name keeps
+    # serving after its session has ended.
+    #
+    # route, not bare directives: forward_auth and reverse_proxy sort to
+    # the same place in Caddy's directive order, and route is what fixes
+    # the first ahead of the second.
     handle /live/* {
         header Cache-Control "no-cache"
         header Access-Control-Allow-Origin "*"
-        reverse_proxy 127.0.0.1:8080
+
+        route {
+            forward_auth {$DJANGO_HOOK_BASE} {
+                uri /api/live/hls-auth/?secret={$SRS_HOOK_SECRET}
+
+                # Django sits on another box behind its own proxy, which
+                # routes by Host — so the Host has to name the API domain,
+                # not this one. {upstream_hostport} is DJANGO_HOOK_BASE's
+                # own host, which is also what its ALLOWED_HOSTS lists.
+                header_up Host {upstream_hostport}
+
+                # The viewer's address as Caddy saw it, not as the client
+                # claimed it: segments arrive with no token, and the grant
+                # that serves them hangs off this alone (_client_address).
+                header_up X-Forwarded-For {remote_host}
+            }
+            reverse_proxy 127.0.0.1:8080
+        }
     }
 
     # Read-only stats for the admin/dashboard (never the full SRS API).

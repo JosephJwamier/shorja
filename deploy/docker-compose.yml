@@ -111,6 +111,11 @@ services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+    # يسأل Caddy عن كل قائمة ومقطع HLS قبل خدمته، ويثبت أنه نحن بهذا
+    # السرّ نفسه — انظر handle /live/* في Caddyfile. فارغاً يردّ Django
+    # 403 على كل طلب فلا يعمل البثّ البديل إطلاقاً.
+    environment:
+      SRS_HOOK_SECRET: ${SRS_HOOK_SECRET}
     ports:
       - "80:80"
       - "443:443"

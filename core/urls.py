@@ -88,4 +88,10 @@ urlpatterns = [
     # it is ours with ?secret=.
     path('live/srs/<str:event>/', live_hooks.SrsHookView.as_view(), name='srs-hook'),
 
+    # HLS authorization. Not an SRS hook — SRS has none for HLS, which is
+    # exactly the hole this fills. Caddy's forward_auth on the /live/*
+    # handler asks here before serving each playlist and segment, and
+    # proves it is ours with the same ?secret=. See HlsAuthView.
+    path('live/hls-auth/', live_hooks.HlsAuthView.as_view(), name='srs-hls-auth'),
+
 ]

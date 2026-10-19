@@ -58,10 +58,38 @@ live.shorjeh.com {
 
 	# HLS: الطريق البديل لمن تحجب شبكته WebRTC. بلا no-cache يخدم
 	# الوكيل قائمة قديمة فيتجمّد البثّ عند مشاهد بلا رسالة خطأ.
+	#
+	# ولا خطّاف لـ HLS في SRS: القائمة ومقاطعها ملفات يخدمها بنفسه، فلا
+	# يسأل أحدٌ Django عنها. لذا يسأل Caddy: forward_auth يحوّل كل طلب
+	# قائمة ومقطع إلى GET على ‎/api/live/hls-auth/‎ ولا يخدم الملف إلا
+	# بردّ 2xx (انظر core/live_hooks.HlsAuthView). بدون هذا يُكمل من
+	# حظره البائع مشاهدته — بل ينقله إليه احتياطُ التطبيق نفسه — ويُخدَم
+	# اسم البثّ بعد انتهاء الجلسة ما دام الناشر قائماً.
+	#
+	# route لا سردٌ مباشر: forward_auth وreverse_proxy في رتبة واحدة من
+	# ترتيب Caddy للتوجيهات، وroute هي ما يضمن أن يسبق الأول الثاني.
 	handle /live/* {
 		header Cache-Control "no-cache"
 		header Access-Control-Allow-Origin "*"
-		reverse_proxy host.docker.internal:8080
+
+		route {
+			forward_auth web:8000 {
+				uri /api/live/hls-auth/?secret={$SRS_HOOK_SECRET}
+
+				# live.shorjeh.com ليس في ALLOWED_HOSTS ولا ينبغي أن
+				# يكون — لا شيء من Django يُخدَم على هذا النطاق. ولولا
+				# هذا السطر لردّ Django 400 على كل طلب، ويحوّله
+				# forward_auth إلى رفضٍ لكل مشاهد؛ وهو فشل لا يظهر إلا
+				# في سجل الوصول. 127.0.0.1 مطلوب هناك أصلاً للخطّافات.
+				header_up Host 127.0.0.1
+
+				# عنوان المشاهد كما رآه Caddy لا كما ادّعاه: المقاطع
+				# تأتي بلا رمز، والمنحة التي تخدمها معلّقة على هذا
+				# العنوان وحده (انظر _client_address).
+				header_up X-Forwarded-For {remote_host}
+			}
+			reverse_proxy host.docker.internal:8080
+		}
 	}
 
 	# إحصاءات للقراءة فقط — لا واجهة SRS كاملة فهي تقطع البثّ بطلب واحد.

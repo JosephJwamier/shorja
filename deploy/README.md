@@ -176,6 +176,19 @@ sudo ufw allow 49160:49200/udp comment 'turn relay'
 الأخير يردّ Django 400 على كل خطّاف فيمنع SRS كل بثّ ومشاهدة — وهو فشل لا
 يظهر في أي سجل إلا سجل SRS.
 
+و`SRS_HOOK_SECRET` نفسه يصل حاوية Caddy أيضاً (`deploy/docker-compose.yml`)،
+فهي من تسأل Django عن كل طلب HLS. فارغاً عندها يردّ Django 403 على كل قائمة
+ومقطع، فيختفي الطريق البديل كلّياً بينما يبقى WebRTC سليماً — انظر
+«التحقّق من حماية HLS» أدناه.
+
+و`LIVE_TOKEN_TTL_SECONDS`: اضبطه على أطول بثٍّ تسمح به (`21600` لستّ ساعات)
+لا على ساعة. المشاهد على HLS يستعمل رمزاً واحداً طول مشاهدته — المشغّل يعيد
+طلب نفس الرابط حتى يتوقّف — فانقضاء الرمز في منتصف البثّ يعني رفضاً ولا
+إعادة اتصال في التطبيق: شاشة ميّتة حتى يخرج من الجلسة ويعود. وطول العمر هذا
+رخيص لأن عمر الرمز ليس حدّ الحماية على هذا الطريق: الحظر وحالة الجلسة
+يُقرآن كل ثوانٍ (`HLS_DECISION_TTL_SECONDS`)، فرمزٌ طويل العمر يتوقّف عن
+العمل بعد ثوانٍ من الحظر أو انتهاء الجلسة.
+
 ### ثم
 
 ```bash
@@ -185,6 +198,57 @@ docker compose -f deploy/docker-compose.yml logs -f srs coturn
 
 اختبر من OBS **قبل** التطبيق: ظهور `on_publish` يعود `code: 0` في سجلّ SRS
 يعني أن السلسلة كلها سليمة.
+
+### التحقّق من حماية HLS
+
+خطّافات SRS تغطّي النشر والمشاهدة على WebRTC فقط؛ أما قوائم HLS ومقاطعها
+فملفات يخدمها SRS بنفسه ولا خطّاف لها. فيسألُ Caddy عنها: `forward_auth` في
+`handle /live/*` يحوّل كل طلب إلى `‎/api/live/hls-auth/‎` ولا يخدم الملف إلا
+بردّ 2xx. هذا يعني أن خطأً في الإعداد لا يُسقط الصورة بل يُسقط الطريق
+البديل وحده بصمت — ولمن شبكته تحجب WebRTC هو الطريق الوحيد. فتحقّق منه بعد
+كل نشر:
+
+```bash
+docker compose -f deploy/docker-compose.yml exec caddy \
+  caddy validate --config /etc/caddy/Caddyfile
+```
+
+ثم، وبثٌّ حيّ قائم، استخرج اسم البثّ ورمز مشاهدة لحساب حقيقي:
+
+```bash
+docker compose -f deploy/docker-compose.yml exec web python manage.py shell -c \
+  "from core.models import LiveSession
+from core.services.live_media.srs import make_stream_token
+s = LiveSession.objects.filter(status='live').first()
+print(s.stream_name, make_stream_token(s.stream_name, 'subscriber', 1800, user_id=USER_ID))"
+```
+
+(ضع رقم حساب المشاهد مكان `USER_ID`.) ثم بالقيمتين:
+
+```bash
+STREAM=live_...; TOKEN=...; LIVE=https://live.shorjeh.com
+code() { curl -sS -o /dev/null -w '%{http_code}\n' "$1"; }
+
+code "$LIVE/live/$STREAM.m3u8?token=$TOKEN"   # 200 — مشاهد عادي لجلسة حيّة
+code "$LIVE/live/$STREAM.m3u8"                # 403 — بلا رمز: من نُقل إليه الرابط
+code "$LIVE/live/$STREAM.m3u8?token=abc"      # 403 — رمز مُلفَّق
+```
+
+والمقاطع تأتي بلا رمز — لا مشغّل ينقل سلسلة استعلام القائمة إليها — فتُخدَم
+على منحةٍ قصيرة يتركها آخرُ طلب قائمة مسموح من العنوان نفسه:
+
+```bash
+SEG=$(curl -sS "$LIVE/live/$STREAM.m3u8?token=$TOKEN" | grep -m1 '\.ts$')
+code "$LIVE/live/$SEG"                        # 200 — على منحة طلب القائمة أعلاه
+sleep 15 && code "$LIVE/live/$SEG"            # 403 — انقضت المنحة بلا تجديد
+```
+
+وأخيراً ما يعني هذا كلّه: احظر هذا المشاهد من التطبيق، ثم أعد السطر الأول.
+يصير `403` في غضون خمسة عشر ثانية — وهو مجموع عمر القرار المحفوظ ومنحة
+العنوان (`HLS_DECISION_TTL_SECONDS` و`HLS_GRANT_TTL_SECONDS` في
+`core/live_hooks.py`)، تزيد عليها الثواني التي خزنها المشغّل عنده. لا فورياً
+عن قصد: الفور كان يعني استعلام حظرٍ لكل مقطعٍ من كل مشاهد، أي نحو مئة
+استعلام في الثانية عند مئة مشاهد.
 
 ### ما يكلّفه هذا الاشتراك
 

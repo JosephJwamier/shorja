@@ -53,6 +53,11 @@ services:
     environment:
       - LIVE_DOMAIN=${LIVE_DOMAIN}
       - ACME_EMAIL=${ACME_EMAIL}
+      # Caddy authorizes every HLS playlist and segment against Django
+      # before serving it (see handle /live/* in the Caddyfile), so it
+      # needs the same two values SRS uses for its hooks.
+      - DJANGO_HOOK_BASE=${DJANGO_HOOK_BASE}
+      - SRS_HOOK_SECRET=${SRS_HOOK_SECRET}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
