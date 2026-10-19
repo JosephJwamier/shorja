@@ -27,6 +27,15 @@
     # Without it a banned viewer keeps watching and a stream name keeps
     # serving after its session has ended.
     #
+    # The token does not travel in the URL: a playlist names its segments
+    # relatively and no player copies its query string onto them, so a
+    # segment would arrive with nothing to verify. The app sends it as the
+    # X-Live-Token header instead and the player repeats that on every
+    # request, so each viewer is judged on their own credential rather than
+    # on an address that CGNAT shares between many of them. Request headers
+    # are what forward_auth passes to Django anyway, so there is nothing to
+    # configure for it here.
+    #
     # route, not bare directives: forward_auth and reverse_proxy sort to
     # the same place in Caddy's directive order, and route is what fixes
     # the first ahead of the second.
@@ -43,11 +52,6 @@
                 # not this one. {upstream_hostport} is DJANGO_HOOK_BASE's
                 # own host, which is also what its ALLOWED_HOSTS lists.
                 header_up Host {upstream_hostport}
-
-                # The viewer's address as Caddy saw it, not as the client
-                # claimed it: segments arrive with no token, and the grant
-                # that serves them hangs off this alone (_client_address).
-                header_up X-Forwarded-For {remote_host}
             }
             reverse_proxy 127.0.0.1:8080
         }

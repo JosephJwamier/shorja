@@ -158,82 +158,90 @@ class SrsHookView(APIView):
 # asks us: `forward_auth` on the /live/* handler turns every playlist and
 # segment request into a GET here and serves the file only on a 2xx. Caddy
 # rewrites the URI to this endpoint, so the request to judge arrives in
-# X-Forwarded-Uri, and the viewer's address in X-Forwarded-For — which the
-# Caddyfile overwrites with the real peer, so a client cannot name someone
-# else there.
+# X-Forwarded-Uri.
 #
-# Why segments are judged by address and not by token
-# ---------------------------------------------------
-# A live m3u8 lists its segments by relative name, and no player copies the
-# playlist's query string onto them — not hls.js, not ExoPlayer or AVPlayer
-# behind the app's VideoPlayerController. A segment request therefore
-# arrives with no token at all and there is nothing to verify. What we do
-# know is that the same client was allowed the playlist a second or two
-# ago, because a live player reloads it every target duration (~2s here,
-# hls_fragment 2). So an allowed *playlist* fetch leaves a short grant for
-# (stream, address) and segments ride on it; a segment never mints or
-# renews a grant of its own, or a client could stop reloading the playlist
-# and never be re-checked again. Behind CGNAT — most Iraqi mobile links —
-# that grant is shared with anyone else on the same carrier address
-# watching the same stream, which is the price of it. It is not a way back
-# in for a banned viewer: their own playlist fetch is refused, so their
-# player never learns a segment name to ask for. A segment that does carry
-# a token is judged on the token instead, which is better evidence and
-# costs three lines to accept if a player ever starts sending it.
+# Where the token comes from
+# --------------------------
+# Not the URL. A live m3u8 lists its segments by relative name, and no
+# player copies the playlist's query string onto them, so a segment request
+# would arrive with nothing to verify. The app therefore sends the token as
+# the LIVE_TOKEN_HEADER request header, which both players repeat on every
+# request they make for that asset: on Android because video_player hands
+# httpHeaders to `DefaultHttpDataSource.Factory.setDefaultRequestProperties`
+# and that factory backs the whole HLS pipeline, on iOS because the headers
+# go on the asset as AVURLAssetHTTPHeaderFieldsKey. The `?token=` in the
+# URL is still read as a fallback, so curl and a plain browser can exercise
+# the playlist, but the header is what the app relies on — see
+# _fallBackToHls in live_viewer_screen.dart. **An app build that does not
+# send it gets a 403 on this path**, which is why the two repos ship this
+# together.
+#
+# Two things that look like answers and are not:
+#
+# * A cookie set on the allowed playlist response. It is the textbook
+#   shape and it does not work here: ExoPlayer's DefaultHttpDataSource is
+#   HttpURLConnection-based and honours cookies only if a CookieHandler is
+#   installed as the JVM default, which neither video_player_android nor
+#   Android itself does. Every Android segment request would arrive with
+#   nothing — HLS dead on the platform most of our viewers use.
+#
+# * The client's address, remembered from its last allowed playlist fetch.
+#   coturn exists in this project precisely because most Iraqi mobile lines
+#   are behind CGNAT, so a public address is normally *several* viewers. A
+#   banned viewer's own playlist fetch is refused, but segment names are
+#   `<stream>-<seq>.ts` with a sequential seq: they can extrapolate from
+#   the last playlist they were served and keep fetching, riding on a grant
+#   that a different viewer on the same carrier address keeps alive. That
+#   is indefinite, not brief. A grant has to name a viewer, and on this
+#   client stack the only thing that names one is the token.
 #
 # What a ban costs now
 # --------------------
-# Up to HLS_DECISION_TTL_SECONDS of a stale allow, and a playlist fetch
-# inside that window leaves a grant good for HLS_GRANT_TTL_SECONDS more:
-# about fifteen seconds of authorized requests after the ban, plus the few
-# seconds the player has already buffered. Against a path that runs 6+
-# seconds behind live anyway, and against today's "never", that is a fair
-# trade. It is also more than the WebRTC path does: on_play is asked once
-# when play starts, so mid-stream a WHEP viewer is only stopped by the app
-# kicking itself on the `viewer_banned` socket event
-# (live_viewer_screen._onBanned). An old build, or a hand-rolled player,
-# ignores that; it does not get to ignore this.
+# Up to HLS_DECISION_TTL_SECONDS of a stale decision, plus the few seconds
+# the player has already buffered. The bound is per viewer and holds
+# whoever else shares their address. It is also more than the WebRTC path
+# does: on_play is asked once when play starts, so mid-stream a WHEP viewer
+# is only stopped by the app kicking itself on the `viewer_banned` socket
+# event (live_viewer_screen._onBanned). An old build, or a hand-rolled
+# player, ignores that; it does not get to ignore this.
 #
 # Token expiry mid-broadcast
 # --------------------------
-# One token serves a whole watch here — the player reuses the m3u8 URL it
-# was given until it stops. At LIVE_TOKEN_TTL_SECONDS (an hour by default)
-# a viewer of a six-hour broadcast is refused at the hour mark, and the app
-# has no reconnect: _fallBackToHls has already spent its one attempt, so
-# the player surfaces an error and the viewer is left on a dead screen
-# until they leave the session and come back. Refusing is still right — an
-# expired token is not a token, and honouring it would put the only
-# unbounded credential in the system on the one path with no hooks. The
-# answer is the TTL, not an exception: set LIVE_TOKEN_TTL_SECONDS to cover
-# the longest broadcast you allow (21600 for six hours) and the case never
-# arises. That is cheap because the token's life is not the security
-# boundary on this path — _hls_allowed is, and it re-reads the ban and the
-# session's status every few seconds, so a long-lived token still stops
-# working seconds after a ban or the end of the session. deploy/README.md
-# says the same thing where the value is set.
+# One token serves a whole watch here — the player repeats the header until
+# it stops. At LIVE_TOKEN_TTL_SECONDS (an hour by default) a viewer of a
+# six-hour broadcast is refused at the hour mark, and the app has no
+# reconnect: _fallBackToHls has already spent its one attempt, so the
+# player surfaces an error and the viewer is left on a dead screen until
+# they leave the session and come back. Refusing is still right — an
+# expired token is not a token. The answer is the TTL, not an exception:
+# set LIVE_TOKEN_TTL_SECONDS to cover the longest broadcast you allow
+# (21600 for six hours) and the case never arises. That is cheap because
+# the token's life is not the security boundary on this path —
+# _hls_allowed is, and it re-reads the ban and the session's status every
+# few seconds, so a long-lived token still stops working seconds after a
+# ban or the end of the session. deploy/README.md says the same thing
+# where the value is set.
 #
 # Cost of asking
 # --------------
 # One request here per playlist reload and per segment — about one per
 # viewer per second, so around a hundred a second at a hundred viewers, on
 # a box whose README already names bandwidth as the ceiling. Hence the
-# caches below: a segment is one cache read and no query at all, and a
-# playlist costs one ban query per viewer every few seconds rather than one
-# per fetch.
+# cache below: the common request is one cache read and no query at all.
+
+# The header the app repeats on every HLS request. Not `Authorization`:
+# that one carries the API's JWT, and a stream credential is a different
+# thing for a different host.
+LIVE_TOKEN_HEADER = "X-Live-Token"
 
 # How stale an allow or a deny for one (stream, viewer) may be. Well under
 # the time a ban stays useful, and far longer than the ~2s between a
 # player's playlist reloads, which is the point.
 HLS_DECISION_TTL_SECONDS = 5
 
-# How long segments keep flowing on the grant left by the last allowed
-# playlist fetch from that address. Must outlast the reload interval with
-# room for one lost request, or an ordinary viewer stutters.
-HLS_GRANT_TTL_SECONDS = 10
 
-
-def _hls_target(uri):
-    """`(stream_name, is_playlist)` for an HLS request, else `(None, False)`.
+def _hls_stream(uri):
+    """The stream an HLS request is for, or None if it is not one.
 
     SRS names its files `[app]/[stream].m3u8` and `[app]/[stream]-[seq].ts`
     (infra/live/srs.conf), and a stream is `live_<16 hex>` with no dash in
@@ -244,27 +252,23 @@ def _hls_target(uri):
     """
     name = urlsplit(uri or "").path.rsplit("/", 1)[-1]
     if name.endswith(".m3u8"):
-        return name[:-len(".m3u8")] or None, True
+        return name[:-len(".m3u8")] or None
     if name.endswith(".ts"):
         stem = name[:-len(".ts")]
         base, dash, seq = stem.rpartition("-")
-        return (base if dash and seq.isdigit() else stem) or None, False
-    return None, False
-
-
-def _hls_grant_key(stream, address):
-    return "live:hls:grant:%s:%s" % (stream, address)
+        return (base if dash and seq.isdigit() else stem) or None
+    return None
 
 
 def _hls_allowed(stream, user_id):
     """`_may_play` for the HLS path, cached for a few seconds.
 
     The cache sits above the session lookup, not just the ban query: both
-    are database work and a segment request must do neither. A deny is
-    cached as well as an allow — otherwise a refused viewer whose player
-    keeps retrying is the cheapest query generator in the system. Only
-    booleans are ever stored, so a `None` back from the cache is
-    unambiguously a miss.
+    are database work, and at a request per viewer per second neither can
+    run every time. A deny is cached as well as an allow — otherwise a
+    refused viewer whose player keeps retrying is the cheapest query
+    generator in the system. Only booleans are ever stored, so a `None`
+    back from the cache is unambiguously a miss.
     """
     key = "live:hls:ok:%s:%d" % (stream, user_id)
     allowed = cache.get(key)
@@ -273,21 +277,6 @@ def _hls_allowed(stream, user_id):
         allowed = bool(session and _may_play(session, user_id))
         cache.set(key, allowed, HLS_DECISION_TTL_SECONDS)
     return allowed
-
-
-def _client_address(request):
-    """The viewer's address, as Caddy observed it.
-
-    The Caddyfile replaces X-Forwarded-For with the real peer rather than
-    appending to it, so the header is ours alone. The rightmost entry is
-    read anyway: that is the one a proxy appends and the one a client
-    cannot forge, so a header the client sent itself cannot borrow someone
-    else's grant.
-    """
-    forwarded = request.headers.get("X-Forwarded-For", "")
-    if forwarded:
-        return forwarded.rsplit(",", 1)[-1].strip()
-    return request.META.get("REMOTE_ADDR", "")
 
 
 class HlsAuthView(APIView):
@@ -318,25 +307,17 @@ class HlsAuthView(APIView):
             return Response(status=403)
 
         uri = request.headers.get("X-Forwarded-Uri", "")
-        stream, is_playlist = _hls_target(uri)
+        stream = _hls_stream(uri)
         if not stream:
             return Response(status=403)
 
-        token = (parse_qs(urlsplit(uri).query).get("token") or [""])[0]
-        address = _client_address(request)
+        # The header first: it is the one thing a player repeats on every
+        # request, so it is the only credential a segment can carry.
+        token = request.headers.get(LIVE_TOKEN_HEADER) or ""
+        if not token:
+            token = (parse_qs(urlsplit(uri).query).get("token") or [""])[0]
 
-        if token:
-            user_id = verify_stream_token(token, stream_name=stream, role=ROLE_SUBSCRIBER)
-            if not user_id or not _hls_allowed(stream, user_id):
-                return Response(status=403)
-            if is_playlist and address:
-                cache.set(_hls_grant_key(stream, address), True, HLS_GRANT_TTL_SECONDS)
-            return Response(status=204)
-
-        # No token. Only a segment can legitimately be in that position —
-        # a playlist request is the app's own and always carries one.
-        if is_playlist or not address:
-            return Response(status=403)
-        if not cache.get(_hls_grant_key(stream, address)):
+        user_id = verify_stream_token(token, stream_name=stream, role=ROLE_SUBSCRIBER)
+        if not user_id or not _hls_allowed(stream, user_id):
             return Response(status=403)
         return Response(status=204)

@@ -213,6 +213,12 @@ docker compose -f deploy/docker-compose.yml exec caddy \
   caddy validate --config /etc/caddy/Caddyfile
 ```
 
+**ويلزم أن يُنشر التطبيق مع هذا الخادم.** الرمز يسافر في ترويسة
+`X-Live-Token` لا في الرابط، لأن القائمة تسمّي مقاطعها بأسماء نسبية ولا
+مشغّل ينقل سلسلة استعلامها إليها. فبناءٌ قديم من التطبيق لا يرسل الترويسة
+يُرَدّ عليه 403 على طريق HLS كلّه ويرى صاحبه «تعذّر تشغيل البث على هذه
+الشبكة»، بينما WebRTC يعمل عنده كما هو.
+
 ثم، وبثٌّ حيّ قائم، استخرج اسم البثّ ورمز مشاهدة لحساب حقيقي:
 
 ```bash
@@ -227,28 +233,37 @@ print(s.stream_name, make_stream_token(s.stream_name, 'subscriber', 1800, user_i
 
 ```bash
 STREAM=live_...; TOKEN=...; LIVE=https://live.shorjeh.com
-code() { curl -sS -o /dev/null -w '%{http_code}\n' "$1"; }
+code() { curl -sS -o /dev/null -w '%{http_code}\n' "$@"; }
 
-code "$LIVE/live/$STREAM.m3u8?token=$TOKEN"   # 200 — مشاهد عادي لجلسة حيّة
-code "$LIVE/live/$STREAM.m3u8"                # 403 — بلا رمز: من نُقل إليه الرابط
-code "$LIVE/live/$STREAM.m3u8?token=abc"      # 403 — رمز مُلفَّق
+code -H "X-Live-Token: $TOKEN" "$LIVE/live/$STREAM.m3u8"   # 200 — كما يطلبها التطبيق
+code "$LIVE/live/$STREAM.m3u8?token=$TOKEN"                # 200 — الاستعلام بديل للترويسة
+code "$LIVE/live/$STREAM.m3u8"                             # 403 — من نُقل إليه الرابط
+code -H "X-Live-Token: abc" "$LIVE/live/$STREAM.m3u8"      # 403 — رمز مُلفَّق
 ```
 
-والمقاطع تأتي بلا رمز — لا مشغّل ينقل سلسلة استعلام القائمة إليها — فتُخدَم
-على منحةٍ قصيرة يتركها آخرُ طلب قائمة مسموح من العنوان نفسه:
+والمقاطع تُفحَص بنفس المقياس تماماً، لأن المشغّل يكرّر الترويسة في كل طلب
+(ExoPlayer على مصنع مصدر البيانات، وAVFoundation على الأصل نفسه):
 
 ```bash
-SEG=$(curl -sS "$LIVE/live/$STREAM.m3u8?token=$TOKEN" | grep -m1 '\.ts$')
-code "$LIVE/live/$SEG"                        # 200 — على منحة طلب القائمة أعلاه
-sleep 15 && code "$LIVE/live/$SEG"            # 403 — انقضت المنحة بلا تجديد
+SEG=$(curl -sS -H "X-Live-Token: $TOKEN" "$LIVE/live/$STREAM.m3u8" | grep -m1 '\.ts$')
+code -H "X-Live-Token: $TOKEN" "$LIVE/live/$SEG"           # 200
+code "$LIVE/live/$SEG"                                     # 403 — بلا رمز لا شيء
 ```
 
+السطر الأخير هو بيت القصيد: لا عنوانَ IP يُعتَدّ به هنا ولا كوكي. العنوان
+كان خياراً مطروحاً ورُفض لأن أكثر خطوط الجوّال العراقية خلف CGNAT — ولهذا
+coturn في الحزمة أصلاً — فالعنوان العام مشاهدون كثيرون لا مشاهد واحد، وكان
+المحظور سيركب منحة جاره ويستنتج اسم المقطع التالي من تسلسله. والكوكي كان
+سيُهمَل على أندرويد: `DefaultHttpDataSource` في ExoPlayer يقوم على
+`HttpURLConnection` ولا يعرف الكوكيز بلا `CookieHandler`، ولا يثبّته
+`video_player_android` ولا أندرويد.
+
 وأخيراً ما يعني هذا كلّه: احظر هذا المشاهد من التطبيق، ثم أعد السطر الأول.
-يصير `403` في غضون خمسة عشر ثانية — وهو مجموع عمر القرار المحفوظ ومنحة
-العنوان (`HLS_DECISION_TTL_SECONDS` و`HLS_GRANT_TTL_SECONDS` في
-`core/live_hooks.py`)، تزيد عليها الثواني التي خزنها المشغّل عنده. لا فورياً
-عن قصد: الفور كان يعني استعلام حظرٍ لكل مقطعٍ من كل مشاهد، أي نحو مئة
-استعلام في الثانية عند مئة مشاهد.
+يصير `403` في غضون خمس ثوانٍ — عمر القرار المحفوظ
+(`HLS_DECISION_TTL_SECONDS` في `core/live_hooks.py`)، تزيد عليها الثواني
+التي خزنها المشغّل عنده. والحدّ لكل مشاهد على حدته، فلا يطيله من يشاركه
+عنوانه. لا فورياً عن قصد: الفور كان يعني استعلام حظرٍ لكل مقطعٍ من كل
+مشاهد، أي نحو مئة استعلام في الثانية عند مئة مشاهد.
 
 ### ما يكلّفه هذا الاشتراك
 
