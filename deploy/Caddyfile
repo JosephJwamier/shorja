@@ -47,7 +47,12 @@ live.shorjeh.com {
 	encode gzip
 
 	# مفاوضة WHIP (نشر) وWHEP (مشاهدة) — طلب POST واحد لكل منهما.
-	handle_path /rtc/* {
+	#
+	# handle لا handle_path: SRS ينشر النقطتين على /rtc/v1/whip/ و/rtc/v1/whep/
+	# بالنصّ، وhandle_path يحذف البادئة المطابَقة فيصله /v1/whip/ فيردّ 404
+	# على كل نشر وكل مشاهدة. (عكس حالة assetlinks.json في نطاق
+	# المشاركة أعلاه، حيث الحذف هو المطلوب.)
+	handle /rtc/* {
 		reverse_proxy host.docker.internal:1985
 	}
 

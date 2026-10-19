@@ -10,7 +10,10 @@
 
     # WebRTC signalling (WHIP publish / WHEP play). SRS answers with the SDP;
     # the media itself then flows directly on udp/tcp 8000, not through Caddy.
-    handle_path /rtc/* {
+    # handle, not handle_path: SRS publishes these at /rtc/v1/whip/ and
+    # /rtc/v1/whep/ literally. handle_path strips the matched prefix, so SRS
+    # would receive /v1/whip/ and answer 404 to every publish and play.
+    handle /rtc/* {
         reverse_proxy 127.0.0.1:1985
     }
 
