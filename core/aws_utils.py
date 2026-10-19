@@ -20,7 +20,7 @@ _s3_client = None
 
 def get_s3_client():
     """Cached boto3 S3 client built from settings — one client per process,
-    matches the module-level-singleton style of core/agora_utils.py.
+    built once and reused rather than per request.
 
     R2 speaks the S3 API, so the only provider-specific knobs are the
     endpoint and the two checksum settings: boto3 >= 1.36 computes a CRC32

@@ -1158,7 +1158,8 @@ class FixedPriceListingViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 from .consumers import send_websocket_notification, broadcast_live_event  # Import the utility functions
-from .agora_utils import build_rtc_token
+from .services.live_media import get_live_media_provider
+from .services.live_media.base import MediaProviderError
 from .live_utils import end_live_session
 from .tasks import remind_to_complete_reservation
 from .notifications import (
@@ -1915,10 +1916,10 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
     Live shopping broadcasts (البث المباشر)
 
     Store owners start a live video broadcast (video/audio itself is
-    carried by Agora — see join_token, it never passes through Django),
-    queue catalog items with a live-only price/deposit, mark one item "now
-    showing", and viewers reserve it with a single tap (deposit charged
-    from their wallet immediately, same as an auction bid deposit).
+    carried by our own media server — see join_token, it never passes
+    through Django), queue catalog items with a live-only price/deposit,
+    mark one item "now showing", and viewers reserve it with a single tap
+    (deposit charged from their wallet immediately, same as a bid deposit).
     """
     queryset = LiveSession.objects.all().select_related('store', 'store__user')
     # No DestroyModelMixin — a session is ended/cancelled, never deleted
@@ -1938,7 +1939,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                             'moderators', 'moderator_detail']:
             return [IsStoreOwner()]
         if self.action in ['reserve', 'like', 'unlike', 'my_sessions', 'comments', 'comment_detail',
-                            'viewers', 'bans', 'ban_detail',
+                            'viewers', 'bans', 'ban_detail', 'join_token',
                             'show_item', 'catalog', 'quick_show', 'quick_auction']:
             return [IsAuthenticated()]
         return [AllowAny()]
@@ -2081,24 +2082,34 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         }, status=status.HTTP_200_OK)
 
     @swagger_auto_schema(
-        operation_description="Get an Agora RTC join token — 'publisher' to broadcast (store owner only), 'subscriber' to watch (anyone)",
+        operation_description="Stream credentials — 'publisher' to broadcast (store owner only), 'subscriber' to watch",
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
             properties={
                 'role': openapi.Schema(type=openapi.TYPE_STRING, enum=['subscriber', 'publisher']),
-                'uid': openapi.Schema(type=openapi.TYPE_INTEGER),
             }
         ),
-        responses={200: "Agora token issued", 403: "Only the store owner can publish"}
+        responses={200: "Credentials issued", 403: "Only the store owner can publish",
+                   503: "Live media is not configured"}
     )
     @action(detail=True, methods=['post'], url_path='join-token')
     def join_token(self, request, pk=None):
-        """Issue an Agora RTC join token — publisher (owner) or subscriber (viewer)"""
-        from django.conf import settings
+        """Credentials to publish (owner) or watch (viewer) this session's stream.
 
+        Media never passes through Django. What comes back is whatever the
+        configured provider's clients need — for our SRS box a WHIP or WHEP
+        URL carrying a signed token, plus ICE servers for the viewers stuck
+        behind carrier NAT. The app reads the envelope's `provider`/`role`
+        and ignores fields it does not know, so the next provider change is
+        a server-side change only.
+
+        Every credential names the user it was issued to — the media server
+        hands that name back on its publish/play hook (core/live_hooks.py),
+        which is how a ban is enforced on the stream itself and why
+        watching needs an account too.
+        """
         session = self.get_object()
         role = request.data.get('role', 'subscriber')
-        uid = int(request.data.get('uid', 0))
 
         if role not in ('subscriber', 'publisher'):
             return Response({
@@ -2107,27 +2118,28 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if role == 'publisher':
-            store = getattr(request.user, 'store', None) if request.user.is_authenticated else None
+            store = getattr(request.user, 'store', None)
             if not store or store.id != session.store_id:
                 return Response({
                     'success': False,
                     'message': 'Only the store owner can publish to this session'
                 }, status=status.HTTP_403_FORBIDDEN)
 
-        token, ttl, expires_at = build_rtc_token(session.agora_channel_name, uid=uid, role=role)
+        try:
+            provider = get_live_media_provider()
+            credentials = (provider.publish_credentials if role == 'publisher'
+                           else provider.play_credentials)(session, request.user)
+        except MediaProviderError as exc:
+            # The box is unreachable or a secret is missing — ours to fix,
+            # not the caller's. A plain 503, not a 500 traceback.
+            logger.error('live media unavailable for session %s: %s', session.id, exc)
+            return Response({
+                'success': False,
+                'code': 'live_media_unavailable',
+                'message': 'البث المباشر غير متاح حالياً',
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
-        return Response({
-            'success': True,
-            'data': {
-                'app_id': settings.AGORA_APP_ID,
-                'channel_name': session.agora_channel_name,
-                'token': token,
-                'uid': uid,
-                'role': role,
-                'expires_in': ttl,
-                'expires_at': expires_at,
-            }
-        }, status=status.HTTP_200_OK)
+        return Response({'success': True, 'data': credentials}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['get', 'post'], url_path='queue-items')
     def queue_items(self, request, pk=None):

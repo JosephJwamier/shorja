@@ -641,20 +641,17 @@ STRIPE_PUBLIC_KEY = os.environ.get('STRIPE_PUBLIC_KEY', '')
 STRIPE_SECRET_KEY = os.environ.get('STRIPE_SECRET_KEY', '')
 STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET', '')
 
-# Agora Configuration (live shopping video)
-# Django only issues RTC join tokens here — video/audio itself is carried
-# entirely by Agora and never passes through this server.
-AGORA_APP_ID = os.environ.get('AGORA_APP_ID', '')
-AGORA_APP_CERTIFICATE = os.environ.get('AGORA_APP_CERTIFICATE', '')
-AGORA_TOKEN_TTL_SECONDS = int(os.environ.get('AGORA_TOKEN_TTL_SECONDS', '3600'))
-
 # =============================================================================
-# Live media provider. 'agora' is what runs today. The SRS stack for the
-# Hetzner box is prepared under infra/live/ and core/services/live_media/;
-# flipping to it is a settings change plus the steps in
-# core/services/live_media/__init__.py — nothing below is read while 'agora'.
+# Live media provider (live shopping video).
+#
+# Media never passes through this server: Django hands the app the
+# credentials to publish or watch a stream, and answers the media server's
+# "may this be published/played?" hooks. The server is our own SRS box —
+# see infra/live/ for the stack and core/services/live_media/ for the
+# provider. Every value below has to be set for live to work at all; the
+# provider raises rather than hand out credentials it cannot honour.
 # =============================================================================
-LIVE_MEDIA_PROVIDER = os.environ.get('LIVE_MEDIA_PROVIDER', 'agora')
+LIVE_MEDIA_PROVIDER = os.environ.get('LIVE_MEDIA_PROVIDER', 'srs')
 SRS_PUBLIC_BASE_URL = os.environ.get('SRS_PUBLIC_BASE_URL', '')      # https://live.example.com
 SRS_APP = os.environ.get('SRS_APP', 'live')
 SRS_HOOK_SECRET = os.environ.get('SRS_HOOK_SECRET', '')              # same value as infra/live/.env

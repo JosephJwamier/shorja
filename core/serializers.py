@@ -2698,7 +2698,7 @@ class LiveSessionCardSerializer(serializers.ModelSerializer):
 
 class LiveSessionSerializer(LiveSessionCardSerializer):
     """Full live session detail — includes the queue and the current now_showing item.
-    Deliberately never exposes agora_channel_name (only join_token does)."""
+    Deliberately never exposes stream_name (only join_token does)."""
     queue_items = LiveSessionItemSerializer(source='items', many=True, read_only=True)
     current_now_showing = serializers.SerializerMethodField()
     current_live_auction = serializers.SerializerMethodField()

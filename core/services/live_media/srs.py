@@ -37,10 +37,8 @@ ROLE_SUBSCRIBER = "subscriber"
 
 
 def stream_name_of(session):
-    """The session's stream id. Today that is the Agora channel name (a
-    random `live_<hex>`), which is exactly what a public stream name should
-    be; renaming the column can wait for the switch itself."""
-    return getattr(session, "stream_name", None) or session.agora_channel_name
+    """The session's stream id — a random `live_<hex>` fixed at creation."""
+    return session.stream_name
 
 
 def _setting(name, default=""):

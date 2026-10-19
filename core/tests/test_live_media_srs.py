@@ -1,14 +1,11 @@
-"""The SRS live-media scaffolding — token math, credentials shape, and the
-SRS→Django hooks. None of it is routed yet (Agora still serves the app), so
-the hook view is exercised directly with a request factory.
+"""Live media on our own SRS box: token math, the credentials the app gets,
+the viewing policy, and the SRS -> Django hooks (exercised through their
+real URL, since they are routed now).
 """
-import json
-from unittest.mock import patch
-
 import pytest
-from rest_framework.test import APIRequestFactory
+from django.urls import reverse
+from rest_framework.test import APIClient
 
-from core.live_hooks import SrsHookView
 from core.models import LiveSession, LiveSessionBan, User, UserStore
 from core.services.live_media import get_live_media_provider
 from core.services.live_media.base import MediaProviderError
@@ -36,10 +33,10 @@ def srs_settings(settings):
         setattr(settings, k, v)
 
 
-def make_session(username='seller'):
+def make_session(username='seller', status='live'):
     user = User.objects.create_user(username=username, password='x')
     store = UserStore.objects.create(user=user, name='s')
-    return LiveSession.objects.create(store=store, title='t', status='live'), user
+    return LiveSession.objects.create(store=store, title='t', status=status), user
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +75,7 @@ def test_turn_is_omitted_when_not_configured(settings):
 
 
 # ---------------------------------------------------------------------------
-# Credentials the app would receive
+# Credentials the app receives
 # ---------------------------------------------------------------------------
 
 def test_publish_and_play_credentials_shape():
@@ -86,7 +83,7 @@ def test_publish_and_play_credentials_shape():
     provider = get_live_media_provider()
     pub = provider.publish_credentials(session, owner)
     play = provider.play_credentials(session, owner)
-    stream = session.agora_channel_name
+    stream = session.stream_name
     assert pub['provider'] == 'srs' and pub['role'] == 'publisher'
     assert pub['whip_url'].startswith('https://live.example.com/rtc/v1/whip/?app=live&stream=%s&token=' % stream)
     assert play['whep_url'].startswith('https://live.example.com/rtc/v1/whep/?app=live&stream=%s&token=' % stream)
@@ -105,39 +102,87 @@ def test_provider_refuses_to_run_unconfigured(settings):
         get_live_media_provider().publish_credentials(session, owner)
 
 
-def test_default_provider_is_still_agora(settings):
+def test_unknown_provider_name_raises_instead_of_falling_back(settings):
+    # A typo in production must stop live media loudly, not quietly serve
+    # credentials for a server nobody configured.
     settings.LIVE_MEDIA_PROVIDER = 'agora'
-    # The registry only knows srs today; agora is served by the untouched
-    # join_token view. Asking the registry for it must fail loudly, not
-    # silently hand out SRS credentials.
     with pytest.raises(MediaProviderError):
         get_live_media_provider()
 
 
 # ---------------------------------------------------------------------------
-# Hooks (SRS → Django), called directly — not routed yet
+# The join-token endpoint
+# ---------------------------------------------------------------------------
+
+def join_token(session, user=None, role='subscriber'):
+    client = APIClient()
+    if user is not None:
+        client.force_authenticate(user=user)
+    return client.post(
+        reverse('live-session-join-token', args=[session.id]), {'role': role}, format='json',
+    )
+
+
+def test_viewer_gets_play_credentials_for_their_own_account():
+    session, _ = make_session()
+    viewer = User.objects.create_user(username='viewer', password='x')
+    response = join_token(session, viewer)
+    assert response.status_code == 200
+    data = response.data['data']
+    assert data['provider'] == 'srs' and data['role'] == 'subscriber'
+    assert data['stream_name'] == session.stream_name
+    token = data['whep_url'].rsplit('token=', 1)[1]
+    assert verify_stream_token(token, stream_name=session.stream_name,
+                               role=ROLE_SUBSCRIBER) == viewer.id
+
+
+def test_only_the_store_owner_can_get_publish_credentials():
+    session, owner = make_session()
+    intruder = User.objects.create_user(username='intruder', password='x')
+    UserStore.objects.create(user=intruder, name='other')
+    assert join_token(session, owner, role='publisher').status_code == 200
+    assert join_token(session, intruder, role='publisher').status_code == 403
+
+
+def test_watching_needs_an_account():
+    # Every credential names its user, which is what makes bans and viewer
+    # counts mean anything — so an anonymous caller gets no token at all.
+    session, _ = make_session()
+    assert join_token(session).status_code in (401, 403)
+
+
+def test_a_bad_role_is_rejected():
+    session, owner = make_session()
+    assert join_token(session, owner, role='moderator').status_code == 400
+
+
+def test_unconfigured_live_media_is_503_not_500(settings):
+    settings.SRS_PUBLIC_BASE_URL = ''
+    session, owner = make_session()
+    response = join_token(session, owner)
+    assert response.status_code == 503
+    assert response.data['code'] == 'live_media_unavailable'
+
+
+# ---------------------------------------------------------------------------
+# Hooks (SRS -> Django), through the routed URL
 # ---------------------------------------------------------------------------
 
 def hook(event, stream, token='', secret='hook-secret'):
-    factory = APIRequestFactory()
-    request = factory.post(
-        '/api/live/srs/%s/?secret=%s' % (event, secret),
-        data=json.dumps({'action': event, 'app': 'live', 'stream': stream,
-                         'param': '?token=%s' % token}),
-        content_type='application/json',
-    )
-    return SrsHookView.as_view()(request, event=event)
+    url = '%s?secret=%s' % (reverse('srs-hook', args=[event]), secret)
+    return APIClient().post(url, {'action': event, 'app': 'live', 'stream': stream,
+                                  'param': '?token=%s' % token}, format='json')
 
 
 def test_hook_without_the_shared_secret_is_refused():
     session, _ = make_session()
-    response = hook('on_publish', session.agora_channel_name, secret='wrong')
+    response = hook('on_publish', session.stream_name, secret='wrong')
     assert response.status_code == 403
 
 
 def test_publish_needs_a_publish_token_for_that_stream():
     session, owner = make_session()
-    stream = session.agora_channel_name
+    stream = session.stream_name
     good = make_stream_token(stream, ROLE_PUBLISHER, 60, user_id=owner.id)
     play = make_stream_token(stream, ROLE_SUBSCRIBER, 60, user_id=owner.id)
     other = make_stream_token('live_other', ROLE_PUBLISHER, 60, user_id=owner.id)
@@ -147,41 +192,62 @@ def test_publish_needs_a_publish_token_for_that_stream():
     assert hook('on_publish', stream, '').data == {'code': 1}
 
 
+def test_a_seller_may_publish_before_going_live():
+    # The camera opens while the session is still 'scheduled'; refusing
+    # that would mean no way to check framing before an audience arrives.
+    session, owner = make_session(status='scheduled')
+    token = make_stream_token(session.stream_name, ROLE_PUBLISHER, 60, user_id=owner.id)
+    assert hook('on_publish', session.stream_name, token).data == {'code': 0}
+
+
 def test_publish_is_refused_once_the_session_ended():
-    session, owner = make_session()
-    session.status = 'ended'; session.save()
-    token = make_stream_token(session.agora_channel_name, ROLE_PUBLISHER, 60, user_id=owner.id)
-    assert hook('on_publish', session.agora_channel_name, token).data == {'code': 1}
+    session, owner = make_session(status='ended')
+    token = make_stream_token(session.stream_name, ROLE_PUBLISHER, 60, user_id=owner.id)
+    assert hook('on_publish', session.stream_name, token).data == {'code': 1}
 
 
 def test_unknown_stream_and_unknown_event_are_denied():
     session, _ = make_session()
     assert hook('on_publish', 'live_nope').data == {'code': 1}
-    assert hook('on_whatever', session.agora_channel_name).status_code == 404
+    assert hook('on_whatever', session.stream_name).status_code == 404
 
 
-def test_play_consults_the_policy_with_the_tokens_user():
-    session, owner = make_session()
-    viewer = User.objects.create_user(username='viewer', password='x')
-    token = make_stream_token(session.agora_channel_name, ROLE_SUBSCRIBER, 60, user_id=viewer.id)
-    with patch('core.live_hooks._may_play', return_value=True) as policy:
-        assert hook('on_play', session.agora_channel_name, token).data == {'code': 0}
-    policy.assert_called_once()
-    assert policy.call_args.args[1] == viewer.id
-    with patch('core.live_hooks._may_play', return_value=False):
-        assert hook('on_play', session.agora_channel_name, token).data == {'code': 1}
+# ---------------------------------------------------------------------------
+# The viewing policy, through on_play
+# ---------------------------------------------------------------------------
+
+def play(session, user_id):
+    token = make_stream_token(session.stream_name, ROLE_SUBSCRIBER, 60, user_id=user_id)
+    return hook('on_play', session.stream_name, token).data
 
 
-def test_play_with_a_bad_token_never_reaches_the_policy():
+def test_an_ordinary_viewer_may_watch_a_live_session():
     session, _ = make_session()
-    with patch('core.live_hooks._may_play') as policy:
-        assert hook('on_play', session.agora_channel_name, 'nope').data == {'code': 1}
-    policy.assert_not_called()
+    viewer = User.objects.create_user(username='viewer', password='x')
+    assert play(session, viewer.id) == {'code': 0}
 
 
-def test_ban_model_is_available_to_the_policy():
-    # Pins the shape _may_play can rely on: session.bans filtered by user_id.
+def test_an_anonymous_token_may_not_watch():
+    session, _ = make_session()
+    assert play(session, 0) == {'code': 1}
+
+
+def test_watching_stops_when_the_session_is_not_live():
+    # A stream name outlives its session, so without this check a token
+    # minted during the broadcast would keep replaying it afterwards.
+    viewer = User.objects.create_user(username='viewer', password='x')
+    for status in ('scheduled', 'ended', 'cancelled'):
+        session, _ = make_session(username='seller_%s' % status, status=status)
+        assert play(session, viewer.id) == {'code': 1}, status
+
+
+def test_a_banned_viewer_is_cut_off_at_the_media_server():
     session, owner = make_session()
     banned = User.objects.create_user(username='banned', password='x')
     LiveSessionBan.objects.create(session=session, user=banned, banned_by=owner)
-    assert session.bans.filter(user_id=banned.id).exists()
+    assert play(session, banned.id) == {'code': 1}
+
+
+def test_play_with_a_bad_token_is_denied():
+    session, _ = make_session()
+    assert hook('on_play', session.stream_name, 'nope').data == {'code': 1}

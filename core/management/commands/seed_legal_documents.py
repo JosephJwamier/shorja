@@ -96,8 +96,9 @@ def privacy_ar(c):
 <p>لا نبيع بياناتك الشخصية. وقد نُشاركها في الحدود اللازمة مع:</p>
 <ul>
   <li><strong>مزوّدي الخدمة:</strong> معالِج الدفع (Stripe)، وخدمات Google Firebase (الإشعارات، التحليلات،
-      تقارير الأعطال، والمصادقة)، وخدمة البث المباشر (Agora)، وخرائط OpenStreetMap، وشركات التوصيل،
-      ومزوّدي الاستضافة والبريد — وذلك لتشغيل الخدمة نيابةً عنّا.</li>
+      تقارير الأعطال، والمصادقة)، وخرائط OpenStreetMap، وشركات التوصيل،
+      ومزوّدي الاستضافة والبريد — وذلك لتشغيل الخدمة نيابةً عنّا. أمّا البث المباشر
+      فيمرّ عبر سيرفراتنا وحدها دون مزوّد خارجي.</li>
   <li><strong>مستخدمين آخرين:</strong> ما تنشره علناً (الإعلانات، اسم المتجر، التقييمات) يكون مرئيّاً للآخرين،
       وتُشارَك معلومات التواصل اللازمة مع الطرف الآخر عند إتمام صفقة أو توصيل.</li>
   <li><strong>لأسباب قانونية:</strong> عند طلب مشروع من سلطة مختصة في جمهورية العراق، أو لحماية حقوقنا وسلامة المستخدمين.</li>
@@ -299,8 +300,9 @@ our legitimate interests (security, fraud prevention, service improvement), and 
 <p>We do not sell your personal data. We may share it, only as necessary, with:</p>
 <ul>
   <li><strong>Service providers:</strong> the payment processor (Stripe), Google Firebase services (notifications, analytics,
-      crash reporting and authentication), the live-streaming provider (Agora), OpenStreetMap maps, delivery companies,
-      and hosting/email providers — to operate the service on our behalf.</li>
+      crash reporting and authentication), OpenStreetMap maps, delivery companies,
+      and hosting/email providers — to operate the service on our behalf. Live
+      broadcasts pass through our own servers only, with no third-party provider.</li>
   <li><strong>Other users:</strong> content you post publicly (listings, store name, reviews) is visible to others,
       and necessary contact information is shared with the counterparty upon a transaction or delivery.</li>
   <li><strong>Legal reasons:</strong> upon a lawful request from a competent authority in the Republic of Iraq, or to protect our rights and users.</li>

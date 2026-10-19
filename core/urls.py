@@ -61,7 +61,7 @@ router.register(r'reels', ReelViewSet, basename='reel')
 router.register(r'delivery-orders', DeliveryOrderViewSet, basename='delivery-order')
 router.register(r'legal/documents', LegalDocumentViewSet, basename='legal-document')
 
-from . import payment_views
+from . import live_hooks, payment_views
 
 urlpatterns = [
 
@@ -80,5 +80,12 @@ urlpatterns = [
          payment_views.PaymentWebhookView.as_view(), name='payment-webhook'),
     path('payments/<str:reference>/', payment_views.payment_detail,
          name='payment-detail'),
+
+    # Live media-server callbacks. Same reasoning as the payment webhook
+    # above: the caller is our own SRS box, not a user, so there is no
+    # resource CRUD surface to hang it off. One path for every event — the
+    # box is configured with these URLs in infra/live/srs.conf and proves
+    # it is ours with ?secret=.
+    path('live/srs/<str:event>/', live_hooks.SrsHookView.as_view(), name='srs-hook'),
 
 ]

@@ -452,7 +452,7 @@ class AuctionConsumer(AsyncWebsocketConsumer):
 class LiveSessionConsumer(AsyncWebsocketConsumer):
     """
     WebSocket consumer for a live shopping broadcast's control/data channel.
-    Video/audio itself is carried by Agora, not this socket — this only
+    Video/audio itself is carried by the media server, not this socket —
     relays viewer count, "now showing" product changes, reservations, likes,
     and stream lifecycle events. Anonymous viewing is allowed (same as
     AuctionConsumer); all writes happen over REST, this is broadcast-only.

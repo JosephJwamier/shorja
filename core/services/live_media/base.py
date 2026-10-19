@@ -7,7 +7,7 @@ Everything vendor-specific lives behind this interface so the session
 model, the viewsets and the app only ever see one shape:
 
     {
-      "provider": "srs" | "agora",
+      "provider": "srs",
       "role": "publisher" | "subscriber",
       "expires_in": 3600,
       ...provider fields (urls / tokens / ice servers)...

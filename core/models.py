@@ -2174,10 +2174,13 @@ class LiveSession(models.Model):
     thumbnail = models.ImageField(upload_to='live_thumbnails/', null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='scheduled')
 
-    # Agora RTC channel name. Media never passes through Django — this is
-    # only used to mint join tokens (see core/agora_utils.py). Generated at
-    # creation time so scheduled sessions already have a stable channel.
-    agora_channel_name = models.CharField(max_length=64, unique=True, blank=True, editable=False)
+    # Public stream name on the media server. Media never passes through
+    # Django — this only names the stream the app publishes to or watches
+    # (see core/services/live_media/). It is in every viewer's URL, so it
+    # is deliberately unguessable rather than secret: the *right* to use it
+    # is a signed token, not knowledge of the name. Generated at creation
+    # time so a scheduled session already has a stable stream.
+    stream_name = models.CharField(max_length=64, unique=True, blank=True, editable=False)
 
     scheduled_at = models.DateTimeField(null=True, blank=True)
     started_at = models.DateTimeField(null=True, blank=True)
@@ -2208,8 +2211,8 @@ class LiveSession(models.Model):
         return f"{self.title} - {self.store.name} [{self.status}]"
 
     def save(self, *args, **kwargs):
-        if not self.agora_channel_name:
-            self.agora_channel_name = f"live_{uuid.uuid4().hex[:16]}"
+        if not self.stream_name:
+            self.stream_name = f"live_{uuid.uuid4().hex[:16]}"
         super().save(*args, **kwargs)
 
     def is_live(self):

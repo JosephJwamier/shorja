@@ -1,10 +1,6 @@
 """SRS → Django callbacks (http_hooks in infra/live/srs.conf).
 
-NOT ROUTED YET. When the live box goes up, add to core/urls.py:
-
-    path('live/srs/<str:event>/', live_hooks.SrsHookView.as_view(), name='srs-hook'),
-
-SRS POSTs a JSON body like
+Routed at `live/srs/<event>/` (core/urls.py). SRS POSTs a JSON body like
     {"action": "on_publish", "client_id": "…", "ip": "…", "vhost": "…",
      "app": "live", "stream": "live_ab12…", "param": "?token=…"}
 and only proceeds if we answer `{"code": 0}`. Anything else (or a non-200)
@@ -46,18 +42,31 @@ def _token_from_param(param):
 def _may_play(session, user_id):
     """Whether the viewer named by a valid play token may watch `session`.
 
-    `user_id` is 0 for a token minted for an anonymous caller. Bans live in
-    LiveSessionBan (session.bans, user_id). Return True to allow.
+    Three rules, strictest of the options we weighed, because each one is
+    load-bearing somewhere else in the product:
+
+    1. **An account.** `user_id` is 0 for a token minted for an anonymous
+       caller. Refusing those is what makes viewer counts, moderation and
+       "who reserved during the stream" mean anything — a ban is useless
+       if the banned viewer can come back as nobody. The app already signs
+       every request, so this costs no real viewer anything.
+    2. **The session is live.** A stream name lives in every viewer's URL
+       and does not change when the session ends, so without this a stale
+       token would keep replaying a finished broadcast — and once DVR is
+       on, the recording too. Watching is a right over a *session*, not
+       over a name.
+    3. **Not banned.** The seller's own moderation, enforced on the media
+       server rather than only in the UI: a ban cuts the picture, not just
+       the comment box.
+
+    Rules 1 and 2 are cheap field reads; only the ban check touches the
+    database, and only for viewers who passed the first two.
     """
-    # TODO(live-media, still undecided): decide the viewing policy. Options, from most open to
-    # most closed:
-    #   (a) anyone with a valid play token watches, bans enforced;
-    #   (b) same, but anonymous tokens (user_id == 0) are refused so every
-    #       viewer is an account — needed if you want viewer counts,
-    #       moderation and "who bought during the stream" to be reliable;
-    #   (c) (b) plus the session must be 'live' — refuse replays of a
-    #       stream name after the session ended.
-    raise NotImplementedError
+    if not user_id:
+        return False
+    if session.status != 'live':
+        return False
+    return not session.bans.filter(user_id=user_id).exists()
 
 
 class SrsHookView(APIView):
@@ -78,7 +87,7 @@ class SrsHookView(APIView):
         if handler is None:
             return Response(DENY, status=404)
 
-        session = LiveSession.objects.filter(agora_channel_name=stream).first()
+        session = LiveSession.objects.filter(stream_name=stream).first()
         if session is None:
             logger.warning("srs %s for unknown stream %r", event, stream)
             return Response(DENY)
@@ -86,11 +95,15 @@ class SrsHookView(APIView):
 
     # -- publishing ------------------------------------------------------
     def handle_on_publish(self, session, token, body):
-        user_id = verify_stream_token(token, stream_name=session.agora_channel_name,
+        user_id = verify_stream_token(token, stream_name=session.stream_name,
                                       role=ROLE_PUBLISHER)
         if user_id is None:
             logger.warning("srs on_publish denied for %s (bad token)", session.id)
             return Response(DENY)
+        # 'scheduled' as well as 'live': the owner's app opens the camera
+        # before it flips the session live, and a seller checking their
+        # framing first should not be refused. Watching is stricter — see
+        # _may_play.
         if session.status not in ("scheduled", "live"):
             return Response(DENY)
         return Response(OK)
@@ -104,7 +117,7 @@ class SrsHookView(APIView):
 
     # -- watching --------------------------------------------------------
     def handle_on_play(self, session, token, body):
-        user_id = verify_stream_token(token, stream_name=session.agora_channel_name,
+        user_id = verify_stream_token(token, stream_name=session.stream_name,
                                       role=ROLE_SUBSCRIBER)
         if user_id is None:
             return Response(DENY)
