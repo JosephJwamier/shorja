@@ -7,6 +7,16 @@ django-cors-headers==4.9.0
 django-filter==26.1
 
 #===============================================================================
+#       HTTP client
+#===============================================================================
+# Declared because core/live_hooks.py imports it at module level and
+# core/urls.py imports that — so a missing `requests` does not break live
+# video, it stops Django booting. It arrives transitively today (stripe,
+# google-cloud-storage), which is exactly the kind of dependency that
+# disappears in someone else's release.
+requests==2.34.2
+
+#===============================================================================
 #       Database
 #===============================================================================
 mysqlclient==2.2.7
