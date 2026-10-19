@@ -37,6 +37,51 @@ api.shorjeh.com {
 	}
 }
 
+# البث المباشر. SRS يعمل على شبكة المضيف لا على شبكة compose — مرشّحات
+# WebRTC تحمل عنوان المضيف ومنافذه الحقيقية، وNAT الخاص بدوكر كان سيُعلن
+# عنواناً لا يصله مشاهد. لذا يُوصل الوكيل عبر host-gateway لا باسم خدمة.
+#
+# الوسائط نفسها لا تمرّ من هنا أبداً: Caddy يحمل المفاوضة (SDP) على 443،
+# ثم تنتقل الصورة مباشرةً على UDP/8000 بين الهاتف وSRS.
+live.shorjeh.com {
+	encode gzip
+
+	# مفاوضة WHIP (نشر) وWHEP (مشاهدة) — طلب POST واحد لكل منهما.
+	handle_path /rtc/* {
+		reverse_proxy host.docker.internal:1985
+	}
+
+	# HLS: الطريق البديل لمن تحجب شبكته WebRTC. بلا no-cache يخدم
+	# الوكيل قائمة قديمة فيتجمّد البثّ عند مشاهد بلا رسالة خطأ.
+	handle /live/* {
+		header Cache-Control "no-cache"
+		header Access-Control-Allow-Origin "*"
+		reverse_proxy host.docker.internal:8080
+	}
+
+	# إحصاءات للقراءة فقط — لا واجهة SRS كاملة فهي تقطع البثّ بطلب واحد.
+	handle /api/v1/streams* {
+		reverse_proxy host.docker.internal:1985
+	}
+
+	handle {
+		respond "live" 200
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	log {
+		output file /data/live-access.log {
+			roll_size 50mb
+			roll_keep 5
+		}
+	}
+}
+
 # نطاق المشاركة. المسارات /p/ /s/ /a/ /l/ هي ما يولّده
 # deep_link_config.dart، وتردّ بصفحة معاينة لمن يفتحها بلا تطبيق.
 shorjeh.com, www.shorjeh.com {

@@ -8,6 +8,11 @@
 #   worker   Celery — إشعارات، تنظيف، تحرير مدفوعات
 #   beat     جدولة Celery — إغلاق المزادات كل دقيقة؛ **نسخة واحدة فقط**
 #   caddy    TLS تلقائي + الملفات الثابتة والوسائط
+#   srs      سيرفر البثّ (WHIP/WHEP/HLS) — على شبكة المضيف
+#   coturn   مرحّل لمن هو خلف CGNAT (أكثر خطوط الجوّال العراقية)
+#
+# البثّ يشارك هذا الخادم بقرار؛ ما يعنيه ذلك وحدوده في deploy/README.md
+# تحت «البثّ على نفس الخادم».
 services:
   db:
     image: mysql:8.0
@@ -61,6 +66,15 @@ services:
       sh -c "python manage.py migrate --noinput &&
              python manage.py collectstatic --noinput &&
              daphne -b 0.0.0.0 -p 8000 balla.asgi:application"
+    # على الحلقة المحلية وحدها — ليس مدخلاً عامّاً ثانياً. SRS على شبكة
+    # المضيف ولا يرى شبكة compose، وهو يسأل Django عند كل نشر وكل مشاهدة
+    # (on_publish / on_play). المرور عبر api.shorjeh.com والعودة كان سيضع
+    # رحلة عامة كاملة في مسار كل مشاهد يضغط «شاهد».
+    #
+    # يتطلب وجود 127.0.0.1 في ALLOWED_HOSTS، وإلا ردّ Django بـ400 على كل
+    # خطّاف، ورآه SRS رفضاً فمنع كل بثّ وكل مشاهدة بلا سبب ظاهر.
+    ports:
+      - "127.0.0.1:8000:8000"
     volumes:
       - media:/app/media
       - static:/app/staticfiles
@@ -108,8 +122,62 @@ services:
       # urls.py يتوقف عن خدمتها كلياً عند DEBUG=False.
       - media:/srv/media:ro
       - static:/srv/static:ro
+    # SRS وcoturn على شبكة المضيف، فلا يُناديان باسم خدمة من هنا.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - web
+
+  # سيرفر البثّ. شبكة المضيف ليست ترفاً: مرشّحات ICE تحمل عنوان المضيف
+  # ومنافذه، وخلف NAT دوكر يُعلن عنواناً لا يصله أحد — فتكتمل المصافحة ولا
+  # تأتي صورة، وهي حالة أسوأ من فشل صريح لأن لا شيء فيها يُشتكى منه.
+  srs:
+    image: ossrs/srs:5
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      CANDIDATE: ${PUBLIC_IP}
+      DJANGO_HOOK_BASE: ${DJANGO_HOOK_BASE:-http://127.0.0.1:8000}
+      SRS_HOOK_SECRET: ${SRS_HOOK_SECRET}
+      # مطفأ على خادم مشترك: dvr_plan session يكتب MP4 كاملاً لكل جلسة بلا
+      # سقف ولا تنظيف (on_dvr يسجّل المسار ولا يرفع شيئاً بعد)، والقرص هنا
+      # قرص MySQL — امتلاؤه يوقف السوق كلّه لا البثّ وحده.
+      SRS_DVR: ${SRS_DVR:-off}
+    volumes:
+      - ../infra/live/srs.conf:/usr/local/srs/conf/docker.conf:ro
+      - srs_dvr:/usr/local/srs/objs/nginx/html/dvr
+    # مقاطع HLS تُكتب وتُحذف كل ثانيتين طوال كل بثّ. في الرام لا على قرص
+    # قاعدة البيانات: النافذة عشرون ثانية لكل بثّ، ومقطع ينتهي قبل إعادة
+    # التشغيل التالية لا شيء يُفقد بعدم حفظه.
+    tmpfs:
+      - /usr/local/srs/objs/nginx/html/live:size=256m
+    command: ["./objs/srs", "-c", "conf/docker.conf"]
+    depends_on:
+      - web
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://127.0.0.1:1985/api/v1/versions >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # مرحّل الوسائط. شهادة turns: مستعارة من Caddy للقراءة فقط — لا شهادة
+  # ثانية تُجدّد وحدها وتنتهي صامتةً.
+  coturn:
+    image: coturn/coturn:4.6
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      TURN_SECRET: ${TURN_SECRET}
+      PUBLIC_IP: ${PUBLIC_IP}
+      LIVE_DOMAIN: ${TURN_HOST}
+    volumes:
+      - ../infra/live/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - caddy_data:/certs:ro
+    command: >
+      sh -c "sed -e 's|__TURN_SECRET__|'\"$$TURN_SECRET\"'|' -e 's|__PUBLIC_IP__|'\"$$PUBLIC_IP\"'|' -e 's|__LIVE_DOMAIN__|'\"$$LIVE_DOMAIN\"'|'
+      /etc/coturn/turnserver.conf > /tmp/turnserver.conf && turnserver -c /tmp/turnserver.conf"
+    depends_on:
+      - caddy
 
 volumes:
   db_data:
@@ -118,3 +186,4 @@ volumes:
   static:
   caddy_data:
   caddy_config:
+  srs_dvr:

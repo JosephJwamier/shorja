@@ -92,12 +92,15 @@ def turn_credentials(user_label, ttl_seconds, *, now=None):
     password = base64.b64encode(
         hmac.new(secret.encode(), username.encode(), hashlib.sha1).digest()
     ).decode()
-    port = _setting("TURN_PORT", 443)
+    port = _setting("TURN_PORT", 3478)
+    tls_port = _setting("TURN_TLS_PORT", 5349)
     return [{
         "urls": [
             "turn:%s:%s?transport=udp" % (host, port),
             "turn:%s:%s?transport=tcp" % (host, port),
-            "turns:%s:%s?transport=tcp" % (host, port),
+            # turns: is a different listener on a different port. Pointing
+            # it at the plain one looks right and never relays.
+            "turns:%s:%s?transport=tcp" % (host, tls_port),
         ],
         "username": username,
         "credential": password,
@@ -124,7 +127,7 @@ class SrsProvider(LiveMediaProvider):
             raise MediaProviderError("SRS_PUBLIC_BASE_URL is not configured")
 
     def _ice_servers(self, user):
-        servers = [{"urls": ["stun:%s:%s" % (_setting("TURN_HOST"), _setting("TURN_PORT", 443))]}] \
+        servers = [{"urls": ["stun:%s:%s" % (_setting("TURN_HOST"), _setting("TURN_PORT", 3478))]}] \
             if _setting("TURN_HOST") else []
         servers += turn_credentials("u%s" % getattr(user, "id", 0), self.ttl)
         return servers

@@ -22,7 +22,8 @@ SRS_SETTINGS = dict(
     LIVE_TOKEN_SECRET='token-secret',
     LIVE_TOKEN_TTL_SECONDS=600,
     TURN_HOST='live.example.com',
-    TURN_PORT=443,
+    TURN_PORT=3478,
+    TURN_TLS_PORT=5349,
     TURN_SECRET='turn-secret',
 )
 
@@ -66,7 +67,16 @@ def test_turn_credentials_follow_the_rest_api_shape():
     servers = turn_credentials('u7', 600, now=1000)
     assert servers[0]['username'] == '1600:u7'
     assert servers[0]['credential']
-    assert any(u.startswith('turns:') for u in servers[0]['urls'])
+
+
+def test_turns_points_at_the_tls_listener_not_the_plain_one():
+    # Same host, different port. Getting this wrong is invisible: the
+    # client simply never gets a relay candidate and the viewer sees a
+    # stream that will not start.
+    urls = turn_credentials('u7', 600, now=1000)[0]['urls']
+    assert 'turn:live.example.com:3478?transport=udp' in urls
+    assert 'turn:live.example.com:3478?transport=tcp' in urls
+    assert 'turns:live.example.com:5349?transport=tcp' in urls
 
 
 def test_turn_is_omitted_when_not_configured(settings):
@@ -88,7 +98,7 @@ def test_publish_and_play_credentials_shape():
     assert pub['whip_url'].startswith('https://live.example.com/rtc/v1/whip/?app=live&stream=%s&token=' % stream)
     assert play['whep_url'].startswith('https://live.example.com/rtc/v1/whep/?app=live&stream=%s&token=' % stream)
     assert play['hls_url'].startswith('https://live.example.com/live/%s.m3u8' % stream)
-    assert play['ice_servers'][0]['urls'] == ['stun:live.example.com:443']
+    assert play['ice_servers'][0]['urls'] == ['stun:live.example.com:3478']
     assert play['ice_servers'][1]['username'].endswith(':u%d' % owner.id)
     # A play token must not be usable to publish.
     play_token = play['whep_url'].rsplit('token=', 1)[1]

@@ -658,7 +658,12 @@ SRS_HOOK_SECRET = os.environ.get('SRS_HOOK_SECRET', '')              # same valu
 LIVE_TOKEN_SECRET = os.environ.get('LIVE_TOKEN_SECRET', '')          # signs publish/play tokens
 LIVE_TOKEN_TTL_SECONDS = int(os.environ.get('LIVE_TOKEN_TTL_SECONDS', '3600'))
 TURN_HOST = os.environ.get('TURN_HOST', '')                          # live.example.com
-TURN_PORT = int(os.environ.get('TURN_PORT', '443'))
+# Plain STUN/TURN and TURN-over-TLS are separate listeners on separate
+# ports, so one number cannot describe both: handing a client
+# turns://host:3478 points TLS at a plaintext port and the relay simply
+# never connects — silently, since ICE just reports no candidate.
+TURN_PORT = int(os.environ.get('TURN_PORT', '3478'))
+TURN_TLS_PORT = int(os.environ.get('TURN_TLS_PORT', '5349'))
 TURN_SECRET = os.environ.get('TURN_SECRET', '')                      # same value as infra/live/.env
 
 # Live Shopping
