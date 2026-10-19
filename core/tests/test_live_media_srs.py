@@ -2,7 +2,11 @@
 the viewing policy, and the SRS -> Django hooks (exercised through their
 real URL, since they are routed now).
 """
+import time
+from urllib.parse import parse_qs
+
 import pytest
+from django.core.cache import cache
 from django.urls import reverse
 from rest_framework.test import APIClient
 
@@ -265,200 +269,360 @@ def test_play_with_a_bad_token_is_denied():
 
 
 # ---------------------------------------------------------------------------
-# The same viewing policy on the HLS path (Caddy forward_auth -> HlsAuthView)
+# The same viewing policy on the HLS path
 # ---------------------------------------------------------------------------
-# SRS fires no hook for HLS, so until this endpoint existed the ?token= in
+# SRS fires no hook for HLS, so until these endpoints existed the ?token= in
 # hls_url was decorative: a banned viewer kept watching and a finished
-# session kept serving. The token now travels in LIVE_TOKEN_HEADER, which
-# the player repeats on every request it makes for the asset, so a playlist
-# and a segment are judged exactly alike — see HlsAuthView for why neither
-# the URL's query nor the client's address can carry it.
+# session kept serving. Django now writes the playlist — applying the policy
+# and signing every URI in it for one viewer — and Caddy sends each segment
+# request to HlsAuthView, which reads that signature back out of the query
+# string. See the comment above HlsPlaylistView for why neither a request
+# header nor a cookie nor the client's address can carry it instead.
 
-def hls(uri, token=None, *, address='203.0.113.7', secret='hook-secret', method='GET'):
-    """A forward_auth subrequest: Caddy rewrites the URI to this endpoint
-    and passes the real one in X-Forwarded-Uri, along with the client's own
-    request headers."""
-    url = '%s?secret=%s' % (reverse('srs-hls-auth'), secret)
-    extra = {
-        'HTTP_X_FORWARDED_URI': uri,
-        'HTTP_X_FORWARDED_METHOD': method,
-        'HTTP_X_FORWARDED_FOR': address,
-    }
-    if token is not None:
-        extra['HTTP_' + live_hooks.LIVE_TOKEN_HEADER.upper().replace('-', '_')] = token
-    return APIClient().get(url, **extra)
+ORIGIN_PLAYLIST = """#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-ALLOW-CACHE:NO
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:12
+#EXTINF:2.0, no desc
+%(stream)s-12.ts
+#EXTINF:2.0, no desc
+%(stream)s-13.ts
+"""
 
 
-def tok(session, user_id, stream=None):
+class FakeOrigin:
+    """Stands in for SRS's http_server on the loopback."""
+
+    def __init__(self):
+        self.calls = []
+        self.status = 200
+        self.body = ''
+        self.unreachable = False
+
+    def serving(self, stream):
+        self.status, self.body = 200, ORIGIN_PLAYLIST % {'stream': stream}
+        return self
+
+    def get(self, url, timeout=None):
+        self.calls.append(url)
+        if self.unreachable:
+            raise live_hooks.requests.RequestException('connection refused')
+        return type('Resp', (), {'status_code': self.status, 'text': self.body})()
+
+
+@pytest.fixture
+def origin(monkeypatch):
+    fake = FakeOrigin()
+    monkeypatch.setattr(live_hooks.requests, 'get', fake.get)
+    return fake
+
+
+def tok(session, user_id, stream=None, ttl=60):
     return make_stream_token(stream or session.stream_name, ROLE_SUBSCRIBER,
-                             60, user_id=user_id)
+                             ttl, user_id=user_id)
 
 
-def playlist(session):
-    return '/live/%s.m3u8' % session.stream_name
+def ask_playlist(session, token=None, *, secret='hook-secret', uri=None):
+    """What Caddy sends for a `.m3u8`: the path rewritten to this view, the
+    original URI in X-Forwarded-Uri."""
+    url = '%s?secret=%s' % (reverse('srs-hls-playlist'), secret)
+    if uri is None:
+        uri = '/live/%s.m3u8' % session.stream_name
+        if token:
+            uri += '?token=%s' % token
+    return APIClient().get(url, HTTP_X_FORWARDED_URI=uri)
 
 
-def segment(session, seq=7):
-    return '/live/%s-%d.ts' % (session.stream_name, seq)
+def ask_segment(uri, *, secret='hook-secret', method='GET'):
+    """What Caddy's forward_auth sends for a `.ts`."""
+    url = '%s?secret=%s' % (reverse('srs-hls-auth'), secret)
+    return APIClient().get(url, HTTP_X_FORWARDED_URI=uri,
+                           HTTP_X_FORWARDED_METHOD=method)
 
 
-def test_a_viewer_of_a_live_session_is_allowed_the_playlist_and_its_segments():
+def segment_lines(body):
+    return [l for l in body.splitlines() if l and not l.startswith('#')]
+
+
+# -- the playlist ------------------------------------------------------------
+
+def test_a_viewer_of_a_live_session_gets_a_playlist_signed_for_them(origin):
     session, _ = make_session()
     viewer = User.objects.create_user(username='viewer', password='x')
-    assert hls(playlist(session), tok(session, viewer.id)).status_code == 204
-    assert hls(segment(session), tok(session, viewer.id)).status_code == 204
+    origin.serving(session.stream_name)
+
+    response = ask_playlist(session, tok(session, viewer.id))
+    assert response.status_code == 200
+    assert response['Content-Type'] == 'application/vnd.apple.mpegurl'
+    body = response.content.decode()
+
+    lines = segment_lines(body)
+    assert len(lines) == 2
+    for line in lines:
+        name, _, query = line.partition('?')
+        assert name.endswith('.ts')
+        token = parse_qs(query)['token'][0]
+        # Signed for this stream and this viewer, and nobody else's.
+        assert verify_stream_token(token, stream_name=session.stream_name,
+                                   role=ROLE_SUBSCRIBER) == viewer.id
 
 
-def test_a_banned_viewer_is_refused_playlist_and_segments_alike():
+def test_the_playlists_own_tags_come_back_untouched(origin):
+    session, _ = make_session()
+    viewer = User.objects.create_user(username='viewer', password='x')
+    origin.serving(session.stream_name)
+    body = ask_playlist(session, tok(session, viewer.id)).content.decode()
+    for tag in ('#EXTM3U', '#EXT-X-TARGETDURATION:2', '#EXT-X-MEDIA-SEQUENCE:12',
+                '#EXTINF:2.0, no desc'):
+        assert tag in body
+
+
+def test_a_uri_attribute_inside_a_tag_is_signed_too(origin):
+    # None appear with the current srs.conf — TS segments, hls_keys off —
+    # but an fMP4 init segment or an encryption key is fetched exactly like
+    # a segment, and an unsigned one would be a black screen with nothing
+    # in any log to explain it.
+    session, _ = make_session()
+    viewer = User.objects.create_user(username='viewer', password='x')
+    origin.serving(session.stream_name)
+    origin.body = '#EXT-X-MAP:URI="%s-init.mp4"\n%s-12.ts\n' % (
+        session.stream_name, session.stream_name)
+
+    body = ask_playlist(session, tok(session, viewer.id)).content.decode()
+    assert '#EXT-X-MAP:URI="%s-init.mp4?token=' % session.stream_name in body
+    assert body.count('token=') == 2
+
+
+def test_the_segment_token_outlives_the_playlist_window_and_not_much_more(origin):
+    # It has to cover the segments the playlist lists (hls_window 20) plus a
+    # reload, or an honest viewer's oldest segment 403s mid-watch. Past that
+    # it is how long a copied segment URL keeps working.
+    session, _ = make_session()
+    viewer = User.objects.create_user(username='viewer', password='x')
+    origin.serving(session.stream_name)
+    body = ask_playlist(session, tok(session, viewer.id)).content.decode()
+    token = parse_qs(segment_lines(body)[0].partition('?')[2])['token'][0]
+
+    assert live_hooks.HLS_SEGMENT_TOKEN_TTL_SECONDS > 20
+    alive = verify_stream_token(token, stream_name=session.stream_name,
+                               role=ROLE_SUBSCRIBER)
+    assert alive == viewer.id
+    # Long past its own lifetime it is refused, and long before the hour the
+    # playlist token gets.
+    expired = verify_stream_token(
+        token, stream_name=session.stream_name, role=ROLE_SUBSCRIBER,
+        now=time.time() + live_hooks.HLS_SEGMENT_TOKEN_TTL_SECONDS + 5)
+    assert expired is None
+
+
+def test_a_banned_viewer_gets_no_playlist(origin):
     # The one that matters most: the ban used to cut WebRTC only, and the
     # app's own fallback then moved the banned viewer onto HLS.
     session, owner = make_session()
     banned = User.objects.create_user(username='banned', password='x')
     LiveSessionBan.objects.create(session=session, user=banned, banned_by=owner)
-    assert hls(playlist(session), tok(session, banned.id)).status_code == 403
-    assert hls(segment(session), tok(session, banned.id)).status_code == 403
+    origin.serving(session.stream_name)
+    assert ask_playlist(session, tok(session, banned.id)).status_code == 403
+    assert origin.calls == []           # refused before SRS is even asked
 
 
-def test_a_banned_viewer_sharing_an_address_with_an_allowed_one_is_refused():
-    # CGNAT is the normal case on Iraqi mobile lines — coturn exists in
-    # this project for that reason — so one public address is usually
-    # several viewers. An allowed viewer keeps fetching from that address
-    # throughout; the banned one must still get nothing, and must not be
-    # able to extrapolate the next segment name and ride along.
-    session, owner = make_session()
-    allowed = User.objects.create_user(username='allowed', password='x')
-    banned = User.objects.create_user(username='banned', password='x')
-    LiveSessionBan.objects.create(session=session, user=banned, banned_by=owner)
-    shared = '203.0.113.7'
-
-    assert hls(playlist(session), tok(session, allowed.id), address=shared).status_code == 204
-    assert hls(segment(session), tok(session, allowed.id), address=shared).status_code == 204
-
-    assert hls(playlist(session), tok(session, banned.id), address=shared).status_code == 403
-    assert hls(segment(session), tok(session, banned.id), address=shared).status_code == 403
-    assert hls(segment(session, seq=9), address=shared).status_code == 403
-
-
-def test_an_anonymous_token_is_refused_on_the_hls_path():
+def test_an_anonymous_token_gets_no_playlist(origin):
     session, _ = make_session()
-    assert hls(playlist(session), tok(session, 0)).status_code == 403
+    origin.serving(session.stream_name)
+    assert ask_playlist(session, tok(session, 0)).status_code == 403
 
 
-def test_a_token_for_another_stream_or_role_is_refused():
+def test_a_token_for_another_stream_or_role_gets_no_playlist(origin):
     session, _ = make_session()
     viewer = User.objects.create_user(username='viewer', password='x')
+    origin.serving(session.stream_name)
     elsewhere = tok(session, viewer.id, stream='live_other')
     publish = make_stream_token(session.stream_name, ROLE_PUBLISHER, 60, user_id=viewer.id)
-    assert hls(playlist(session), elsewhere).status_code == 403
-    assert hls(playlist(session), publish).status_code == 403
-    assert hls(playlist(session), 'garbage').status_code == 403
+    assert ask_playlist(session, elsewhere).status_code == 403
+    assert ask_playlist(session, publish).status_code == 403
+    assert ask_playlist(session, 'garbage').status_code == 403
+    assert ask_playlist(session).status_code == 403
 
 
-def test_hls_is_refused_once_the_session_is_not_live():
+def test_the_playlist_stops_once_the_session_is_not_live(origin):
     # A stream name outlives its session and the publisher may still be up,
     # so this is what stops a finished broadcast from serving on.
     viewer = User.objects.create_user(username='viewer', password='x')
     for status in ('scheduled', 'ended', 'cancelled'):
         session, _ = make_session(username='seller_%s' % status, status=status)
-        assert hls(playlist(session), tok(session, viewer.id)).status_code == 403, status
+        origin.serving(session.stream_name)
+        assert ask_playlist(session, tok(session, viewer.id)).status_code == 403, status
 
 
-def test_a_request_with_no_token_at_all_is_refused():
-    # Someone who was handed the URL, or an app build that does not send
-    # the header. Both get nothing; there is no address or cookie to fall
-    # back on by design.
-    session, _ = make_session()
-    assert hls(playlist(session)).status_code == 403
-    assert hls(segment(session)).status_code == 403
-    assert hls(playlist(session), '').status_code == 403
-
-
-def test_a_token_in_the_query_still_works_for_curl_and_a_browser():
-    # The header is what the app relies on; the query is kept so the
-    # verification steps in deploy/README.md can be run with curl.
+def test_an_unknown_stream_is_refused_even_with_a_valid_signature(origin):
     session, _ = make_session()
     viewer = User.objects.create_user(username='viewer', password='x')
-    uri = '/live/%s.m3u8?token=%s' % (session.stream_name, tok(session, viewer.id))
-    assert hls(uri).status_code == 204
+    origin.serving('live_nosession')
+    token = make_stream_token('live_nosession', ROLE_SUBSCRIBER, 60, user_id=viewer.id)
+    assert ask_playlist(session, uri='/live/live_nosession.m3u8?token=%s' % token
+                        ).status_code == 403
 
 
-def test_the_header_is_preferred_over_the_query():
-    # A stale or borrowed token in a URL must not override the credential
-    # the player is actually presenting.
+def test_a_stream_srs_has_no_playlist_for_is_a_404_not_a_refusal(origin):
+    # Nobody is publishing yet, or SRS has disposed of the stream. The
+    # viewer is entitled to watch; there is just nothing there.
+    session, _ = make_session()
+    viewer = User.objects.create_user(username='viewer', password='x')
+    origin.status, origin.body = 404, 'not found'
+    assert ask_playlist(session, tok(session, viewer.id)).status_code == 404
+
+
+def test_an_unreachable_srs_is_a_502_not_a_refusal(origin):
+    # A 403 here would read as a ban to anyone reading the logs, and to the
+    # app it is the same dead screen either way — so say which it is.
+    session, _ = make_session()
+    viewer = User.objects.create_user(username='viewer', password='x')
+    origin.unreachable = True
+    assert ask_playlist(session, tok(session, viewer.id)).status_code == 502
+
+
+def test_the_origin_fetch_is_shared_between_viewers_of_one_stream(origin):
+    # 50 playlist reloads a second at a hundred viewers; signing is per
+    # viewer, reading from SRS is not.
+    session, _ = make_session()
+    one = User.objects.create_user(username='one', password='x')
+    two = User.objects.create_user(username='two', password='x')
+    origin.serving(session.stream_name)
+
+    first = ask_playlist(session, tok(session, one.id)).content.decode()
+    second = ask_playlist(session, tok(session, two.id)).content.decode()
+    assert len(origin.calls) == 1
+    # Shared fetch, separate signatures.
+    assert segment_lines(first) != segment_lines(second)
+
+
+# -- the segments ------------------------------------------------------------
+
+def test_a_segment_from_the_signed_playlist_is_allowed_and_a_bare_one_is_not(origin):
+    # End to end: what the playlist handed the player is what the proxy
+    # accepts, and the same segment without it gets nothing.
+    session, _ = make_session()
+    viewer = User.objects.create_user(username='viewer', password='x')
+    origin.serving(session.stream_name)
+    body = ask_playlist(session, tok(session, viewer.id)).content.decode()
+
+    signed = segment_lines(body)[0]
+    assert ask_segment('/live/%s' % signed).status_code == 204
+    assert ask_segment('/live/%s-12.ts' % session.stream_name).status_code == 403
+    assert ask_segment('/live/%s-12.ts?token=' % session.stream_name).status_code == 403
+    assert ask_segment('/live/%s-12.ts?token=garbage' % session.stream_name).status_code == 403
+
+
+def test_a_banned_viewers_segment_token_stops_working(origin):
+    # They keep the tokens the last allowed playlist gave them until those
+    # expire; what they do not get is a new playlist, and so no segment
+    # newer than the ban.
     session, owner = make_session()
     banned = User.objects.create_user(username='banned', password='x')
-    viewer = User.objects.create_user(username='viewer', password='x')
+    origin.serving(session.stream_name)
+    body = ask_playlist(session, tok(session, banned.id)).content.decode()
+    signed = segment_lines(body)[0]
+    assert ask_segment('/live/%s' % signed).status_code == 204
+
     LiveSessionBan.objects.create(session=session, user=banned, banned_by=owner)
-    uri = '/live/%s.m3u8?token=%s' % (session.stream_name, tok(session, viewer.id))
-    assert hls(uri, tok(session, banned.id)).status_code == 403
+    cache.clear()                       # the decision's few seconds running out
+    assert ask_segment('/live/%s' % signed).status_code == 403
+    assert ask_playlist(session, tok(session, banned.id)).status_code == 403
 
 
-def test_an_unknown_stream_is_refused_even_with_a_valid_signature():
+def test_neither_endpoint_covers_for_the_other(origin):
+    # Caddy routes .m3u8 to one and .ts to the other; asking the wrong one
+    # must not be a second way in.
     session, _ = make_session()
     viewer = User.objects.create_user(username='viewer', password='x')
-    token = make_stream_token('live_nosession', ROLE_SUBSCRIBER, 60, user_id=viewer.id)
-    assert hls('/live/live_nosession.m3u8', token).status_code == 403
+    origin.serving(session.stream_name)
+    token = tok(session, viewer.id)
+    assert ask_segment('/live/%s.m3u8?token=%s' % (session.stream_name, token)).status_code == 403
+    assert ask_playlist(session, uri='/live/%s-12.ts?token=%s'
+                        % (session.stream_name, token)).status_code == 403
 
 
-def test_the_endpoint_needs_the_shared_secret():
-    # Without it this is an oracle for who is banned from which session,
+def test_nothing_but_a_playlist_or_a_segment_is_authorized(origin):
+    # Caddy answers 404 to these without asking, but the views refuse them
+    # too: a DVR recording is an unbounded MP4 of a whole broadcast.
+    session, _ = make_session()
+    viewer = User.objects.create_user(username='viewer', password='x')
+    origin.serving(session.stream_name)
+    token = tok(session, viewer.id)
+    assert ask_segment('/live/dvr/%s.1700000000.mp4?token=%s'
+                       % (session.stream_name, token)).status_code == 403
+    assert ask_segment('/live/?token=%s' % token).status_code == 403
+    assert ask_playlist(session, uri='/live/dvr/x.mp4?token=%s' % token).status_code == 403
+
+
+def test_a_stream_name_cannot_walk_out_of_the_origin_path(origin):
+    # The name is interpolated into the URL we fetch from SRS. A token can
+    # only ever name a real stream, but this is the second lock.
+    session, _ = make_session()
+    viewer = User.objects.create_user(username='viewer', password='x')
+    token = tok(session, viewer.id, stream='..%2f..%2fetc%2fpasswd')
+    assert ask_playlist(session, uri='/live/..%%2f..%%2fetc%%2fpasswd.m3u8?token=%s'
+                        % token).status_code == 403
+    assert origin.calls == []
+
+
+def test_both_endpoints_need_the_shared_secret(origin):
+    # Without it they are an oracle for who is banned from which session,
     # answerable by anyone who finds the URL.
     session, _ = make_session()
     viewer = User.objects.create_user(username='viewer', password='x')
+    origin.serving(session.stream_name)
     token = tok(session, viewer.id)
-    assert hls(playlist(session), token, secret='wrong').status_code == 403
-    assert hls(playlist(session), token, secret='').status_code == 403
+    assert ask_playlist(session, token, secret='wrong').status_code == 403
+    assert ask_playlist(session, token, secret='').status_code == 403
+    assert ask_segment('/live/%s-12.ts?token=%s' % (session.stream_name, token),
+                       secret='wrong').status_code == 403
 
 
-def test_nothing_but_a_playlist_or_a_segment_is_authorized():
-    # A DVR recording under /live/ is an unbounded MP4 of the whole
-    # broadcast; refusing it here is the right default while nothing
-    # uploads or deletes those files.
+def test_the_original_segment_request_must_be_a_read(origin):
     session, _ = make_session()
     viewer = User.objects.create_user(username='viewer', password='x')
-    token = tok(session, viewer.id)
-    assert hls('/live/dvr/%s.1700000000.mp4' % session.stream_name, token).status_code == 403
-    assert hls('/live/', token).status_code == 403
-
-
-def test_the_original_request_must_be_a_read():
-    session, _ = make_session()
-    viewer = User.objects.create_user(username='viewer', password='x')
-    assert hls(playlist(session), tok(session, viewer.id), method='POST').status_code == 403
+    origin.serving(session.stream_name)
+    body = ask_playlist(session, tok(session, viewer.id)).content.decode()
+    signed = segment_lines(body)[0]
+    assert ask_segment('/live/%s' % signed, method='POST').status_code == 403
 
 
 # -- what it costs -----------------------------------------------------------
 
-def test_the_policy_is_not_re_queried_for_every_request(django_assert_num_queries):
-    # Hit once per playlist reload and once per two-second segment, so a
-    # ban query per request is not an option: ~100/s at a hundred viewers.
+def test_the_policy_is_not_re_queried_for_every_segment(origin, django_assert_num_queries):
+    # One request per two-second segment, so a ban query per request is not
+    # an option: ~50/s at a hundred viewers on top of the playlist reloads.
     session, _ = make_session()
     viewer = User.objects.create_user(username='viewer', password='x')
-    token = tok(session, viewer.id)
-    assert hls(playlist(session), token).status_code == 204
+    origin.serving(session.stream_name)
+    body = ask_playlist(session, tok(session, viewer.id)).content.decode()
+    lines = segment_lines(body)
     with django_assert_num_queries(0):
-        assert hls(playlist(session), token).status_code == 204
-        assert hls(segment(session), token).status_code == 204
-        assert hls(segment(session, seq=8), token).status_code == 204
+        assert ask_segment('/live/%s' % lines[0]).status_code == 204
+        assert ask_segment('/live/%s' % lines[1]).status_code == 204
 
 
-def test_a_refusal_is_cached_as_well_as_an_allow(django_assert_num_queries):
+def test_a_refusal_is_cached_as_well_as_an_allow(origin, django_assert_num_queries):
     # A refused player keeps retrying, which would otherwise make the
     # banned viewer the cheapest query generator in the system.
     session, owner = make_session()
     banned = User.objects.create_user(username='banned', password='x')
     LiveSessionBan.objects.create(session=session, user=banned, banned_by=owner)
+    origin.serving(session.stream_name)
     token = tok(session, banned.id)
-    assert hls(playlist(session), token).status_code == 403
+    assert ask_playlist(session, token).status_code == 403
     with django_assert_num_queries(0):
-        assert hls(playlist(session), token).status_code == 403
+        assert ask_playlist(session, token).status_code == 403
 
 
-def test_the_cached_decision_is_per_viewer_not_per_stream():
+def test_the_cached_decision_is_per_viewer_not_per_stream(origin):
     session, owner = make_session()
     viewer = User.objects.create_user(username='viewer', password='x')
     banned = User.objects.create_user(username='banned', password='x')
     LiveSessionBan.objects.create(session=session, user=banned, banned_by=owner)
-    assert hls(playlist(session), tok(session, viewer.id)).status_code == 204
-    assert hls(playlist(session), tok(session, banned.id)).status_code == 403
-    assert hls(playlist(session), tok(session, viewer.id)).status_code == 204
+    origin.serving(session.stream_name)
+    assert ask_playlist(session, tok(session, viewer.id)).status_code == 200
+    assert ask_playlist(session, tok(session, banned.id)).status_code == 403
+    assert ask_playlist(session, tok(session, viewer.id)).status_code == 200

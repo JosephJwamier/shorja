@@ -66,6 +66,11 @@ services:
       sh -c "python manage.py migrate --noinput &&
              python manage.py collectstatic --noinput &&
              daphne -b 0.0.0.0 -p 8000 balla.asgi:application"
+    # Django يقرأ قائمة HLS من SRS ليوقّع روابط مقاطعها، وSRS على شبكة
+    # المضيف لا على شبكة compose — فيُنادى عبر host-gateway كما يناديه
+    # Caddy. وSRS_HLS_ORIGIN في .env يطابق هذا.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # على الحلقة المحلية وحدها — ليس مدخلاً عامّاً ثانياً. SRS على شبكة
     # المضيف ولا يرى شبكة compose، وهو يسأل Django عند كل نشر وكل مشاهدة
     # (on_publish / on_play). المرور عبر api.shorjeh.com والعودة كان سيضع

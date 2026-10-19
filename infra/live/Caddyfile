@@ -21,39 +21,68 @@
     # video player needs.
     #
     # SRS has no hook for HLS: these are files it serves itself, so nothing
-    # ever asked Django about them. Caddy asks instead — forward_auth turns
-    # each playlist and segment request into a GET on /api/live/hls-auth/
-    # and serves the file only on a 2xx (core/live_hooks.HlsAuthView).
-    # Without it a banned viewer keeps watching and a stream name keeps
-    # serving after its session has ended.
+    # ever asked Django about them. Without what follows, a banned viewer
+    # keeps watching and a stream name keeps serving after its session has
+    # ended.
     #
-    # The token does not travel in the URL: a playlist names its segments
-    # relatively and no player copies its query string onto them, so a
-    # segment would arrive with nothing to verify. The app sends it as the
-    # X-Live-Token header instead and the player repeats that on every
-    # request, so each viewer is judged on their own credential rather than
-    # on an address that CGNAT shares between many of them. Request headers
-    # are what forward_auth passes to Django anyway, so there is nothing to
-    # configure for it here.
+    # The token travels in the segment URLs, not in a header or a cookie: a
+    # playlist names its segments relatively so no player copies its query
+    # string onto them, AVFoundation cannot be trusted to repeat a header on
+    # segment fetches (and the key that sets one is undocumented anyway),
+    # and ExoPlayer ignores cookies outright. So the playlist is written
+    # rather than served:
     #
-    # route, not bare directives: forward_auth and reverse_proxy sort to
-    # the same place in Caddy's directive order, and route is what fixes
-    # the first ahead of the second.
+    #   .m3u8 -> Django, which checks the token and the policy, reads the
+    #            real playlist from SRS and signs every URI in it for this
+    #            one viewer.
+    #   .ts   -> SRS directly behind forward_auth, with that signed token in
+    #            the query string.
+    #
+    # The two matchers cannot both match, so handle ordering is moot here,
+    # and anything that is neither is answered 404 without reaching Django —
+    # a DVR recording above all, those being whole broadcasts.
+    #
+    # Django is on another box in this arrangement, so its SRS_HLS_ORIGIN
+    # has to reach THIS box's SRS http_server (127.0.0.1:8080 from here —
+    # open 8080 to the API host only). Pointing it at {$LIVE_DOMAIN} would
+    # route .m3u8 straight back into the view that is asking.
     handle /live/* {
         header Cache-Control "no-cache"
         header Access-Control-Allow-Origin "*"
 
-        route {
-            forward_auth {$DJANGO_HOOK_BASE} {
-                uri /api/live/hls-auth/?secret={$SRS_HOOK_SECRET}
+        @playlist path *.m3u8
+        @segment path *.ts
 
-                # Django sits on another box behind its own proxy, which
-                # routes by Host — so the Host has to name the API domain,
-                # not this one. {upstream_hostport} is DJANGO_HOOK_BASE's
-                # own host, which is also what its ALLOWED_HOSTS lists.
+        handle @playlist {
+            # orig_uri, not uri: the former is pre-rewrite and still carries
+            # the stream name and the token that Django reads.
+            rewrite * /api/live/hls-playlist/?secret={$SRS_HOOK_SECRET}
+            reverse_proxy {$DJANGO_HOOK_BASE} {
                 header_up Host {upstream_hostport}
+                header_up X-Forwarded-Uri {orig_uri}
             }
-            reverse_proxy 127.0.0.1:8080
+        }
+
+        handle @segment {
+            # route, not bare directives: forward_auth and reverse_proxy
+            # sort to the same place in Caddy's directive order, and route
+            # is what fixes the first ahead of the second.
+            route {
+                forward_auth {$DJANGO_HOOK_BASE} {
+                    uri /api/live/hls-auth/?secret={$SRS_HOOK_SECRET}
+
+                    # Django sits behind its own proxy, which routes by
+                    # Host — so the Host has to name the API domain, not
+                    # this one. {upstream_hostport} is DJANGO_HOOK_BASE's
+                    # own host, which is also what its ALLOWED_HOSTS lists.
+                    header_up Host {upstream_hostport}
+                }
+                reverse_proxy 127.0.0.1:8080
+            }
+        }
+
+        handle {
+            respond 404
         }
     }
 

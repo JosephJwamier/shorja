@@ -655,6 +655,13 @@ LIVE_MEDIA_PROVIDER = os.environ.get('LIVE_MEDIA_PROVIDER', 'srs')
 SRS_PUBLIC_BASE_URL = os.environ.get('SRS_PUBLIC_BASE_URL', '')      # https://live.example.com
 SRS_APP = os.environ.get('SRS_APP', 'live')
 SRS_HOOK_SECRET = os.environ.get('SRS_HOOK_SECRET', '')              # same value as infra/live/.env
+# SRS's own http_server, where Django reads a stream's real playlist before
+# signing the segment URIs in it (core/live_hooks.HlsPlaylistView). It must
+# point at SRS directly: the public live domain routes .m3u8 back into that
+# same view, which would recurse. On the shared host SRS runs on the host's
+# network while Django is in a compose container, hence host.docker.internal
+# there — the same way Caddy reaches it.
+SRS_HLS_ORIGIN = os.environ.get('SRS_HLS_ORIGIN', 'http://127.0.0.1:8080')
 LIVE_TOKEN_SECRET = os.environ.get('LIVE_TOKEN_SECRET', '')          # signs publish/play tokens
 LIVE_TOKEN_TTL_SECONDS = int(os.environ.get('LIVE_TOKEN_TTL_SECONDS', '3600'))
 TURN_HOST = os.environ.get('TURN_HOST', '')                          # live.example.com
