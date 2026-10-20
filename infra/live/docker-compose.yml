@@ -5,7 +5,11 @@
 #   443/tcp   Caddy  -> WHIP/WHEP/HLS/API over HTTPS
 #   80/tcp    Caddy  -> ACME challenge + redirect
 #   8000/udp  SRS    -> WebRTC media (direct path)
-#   8000/tcp  SRS    -> WebRTC media over TCP (when UDP is filtered)
+#   8001/tcp  SRS    -> WebRTC media over TCP (when UDP is filtered). 8001,
+#             not 8000: srs.conf is shared with the single-box deployment,
+#             where daphne already holds 8000 — see the note on the tcp
+#             block there. Harmless on a dedicated box, and one config.
+#   8080/tcp  SRS    -> HLS origin, for the API host ONLY (SRS_HLS_ORIGIN)
 #   3478/udp+tcp, 5349/tcp, 49160-49200/udp  coturn
 #
 # Secrets come from ./.env (copy .env.example). Never commit .env.
