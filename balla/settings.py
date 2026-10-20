@@ -767,6 +767,18 @@ if not DEBUG:
     # إلى ما لا نهاية. هذه الترويسة هي ما يكسر الحلقة.
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     SECURE_SSL_REDIRECT = True
+    # خطّافات SRS تُستثنى من إعادة التوجيه إلى HTTPS.
+    #
+    # SRS ينادي Django على الحلقة المحلية بـHTTP مباشرةً، لا عبر Caddy —
+    # وهذا مقصود (انظر تعليق ports في deploy/docker-compose.yml): المرور
+    # عبر api.shorjeh.com والعودة كان سيضع رحلة عامة كاملة في مسار كل
+    # مشاهد. لكنه يعني أن الترويسة التي تكسر حلقة التوجيه أعلاه غائبة،
+    # فيردّ Django 301 — وSRS يقرأ أي جواب غير {"code": 0} رفضاً، فيمنع
+    # **كل** نشر و**كل** مشاهدة. ولا يظهر ذلك في أي سجل إلا سجل SRS.
+    #
+    # ولا يُضعِف هذا شيئاً: المسار غير منشور للعالم (daphne على
+    # 127.0.0.1:8000 وحدها)، وحجّته سرٌّ مشترك لا هيئة النقل.
+    SECURE_REDIRECT_EXEMPT = [r'^api/live/srs/']
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SECURE_BROWSER_XSS_FILTER = True

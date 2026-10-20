@@ -643,3 +643,27 @@ def test_the_cached_decision_is_per_viewer_not_per_stream(origin):
     assert ask_playlist(session, tok(session, viewer.id)).status_code == 200
     assert ask_playlist(session, tok(session, banned.id)).status_code == 403
     assert ask_playlist(session, tok(session, viewer.id)).status_code == 200
+
+
+def test_the_hook_is_not_redirected_to_https(settings, client):
+    """SRS ينادي Django على الحلقة المحلية بـHTTP، لا عبر Caddy.
+
+    فلا ترويسة `X-Forwarded-Proto`، و`SECURE_SSL_REDIRECT` يردّ 301 —
+    وSRS يقرأ أي جواب غير `{"code": 0}` رفضاً، فيمنع كل نشر وكل مشاهدة
+    بلا أثر في أي سجلّ إلا سجلّه. `SECURE_REDIRECT_EXEMPT` هو ما يمنع ذلك،
+    وهذا الاختبار يشغّل الإعدادين معاً لأن أيّهما وحده لا يُنتج العطب.
+    """
+    settings.SECURE_SSL_REDIRECT = True
+    settings.SECURE_REDIRECT_EXEMPT = [r'^api/live/srs/']
+    session, _ = make_session()
+
+    response = client.post(
+        '%s?secret=hook-secret' % reverse('srs-hook', args=['on_publish']),
+        data={'action': 'on_publish', 'stream': session.stream_name,
+              'param': ''},
+        content_type='application/json')
+
+    # المهمّ أنه ليس 301: الرفض هنا بسبب الرمز المفقود لا بسبب التوجيه.
+    assert response.status_code != 301, 'الخطّاف أُعيد توجيهه إلى HTTPS'
+    assert response.status_code == 200
+    assert response.data == {'code': 1}
