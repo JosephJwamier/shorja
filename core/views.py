@@ -985,14 +985,20 @@ class FixedPriceListingViewSet(viewsets.ReadOnlyModelViewSet):
         self._cache_set(cache_key, data, self.SIMILAR_CACHE_TTL)
         return Response(data)
 
-    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
+    @action(detail=False, methods=['get'], permission_classes=[AllowAny])
     def recommended(self, request):
         """Personalized feed ranked by the requesting user's category affinity
         (from onboarding interests + purchases/follows), falling back to
         popular items to fill the page — same lightweight cached/capped-pool
         approach as `similar` above, no live aggregation over history on
         every request. Standard page/page_size pagination (same shape as the
-        default listing endpoint) so "عرض الكل" can scroll through it."""
+        default listing endpoint) so "عرض الكل" can scroll through it.
+
+        Open to guests, who get the popular fallback the ranking already
+        computes for anyone with no affinity yet. It used to be
+        IsAuthenticated, which answered 401 — and the home screen's
+        recommended strip and the whole "عرض الكل" screen were therefore
+        empty for a visitor, on a feed that needs no identity to be useful."""
         ordered_ids = self._recommended_listing_ids(request.user)
 
         page = self.paginate_queryset(ordered_ids)
@@ -1050,7 +1056,12 @@ class FixedPriceListingViewSet(viewsets.ReadOnlyModelViewSet):
         """Full ranked pool of listing pks for this user (affinity-matched
         first, then popular fallback), cached as plain ids — cheap to store
         and cheap to slice per page, so pagination never re-runs the ranking."""
-        cache_key = f'recommended_listing_ids:{user.id}'
+        # الضيف: لا `id` يُبنى عليه مفتاح، ولا تفضيلات تُقرأ. ومفتاح واحد
+        # مشترك لكل الزوّار لا مفتاح لكل زائر — فالقائمة التي يرونها واحدة
+        # (الأكثر رواجاً)، فتُحسب مرّة وتُخدَم للجميع.
+        authenticated = bool(getattr(user, 'is_authenticated', False))
+        cache_key = ('recommended_listing_ids:%s' % user.id if authenticated
+                     else 'recommended_listing_ids:anon')
         cached = self._cache_get(cache_key)
         if cached is not None:
             return cached
@@ -1058,7 +1069,7 @@ class FixedPriceListingViewSet(viewsets.ReadOnlyModelViewSet):
         top_category_ids = list(
             UserCategoryAffinity.objects.filter(user=user, score__gt=0)
             .order_by('-score').values_list('category_id', flat=True)[:self.RECOMMENDED_TOP_CATEGORIES]
-        )
+        ) if authenticated else []
 
         base_qs = self.get_queryset()
         ordered_ids = []

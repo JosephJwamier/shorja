@@ -36,6 +36,26 @@ def item(seller):
         category=category, condition='new', status='available')
 
 
+@pytest.fixture
+def listing(item):
+    """عرض سعر ثابت ظاهر فعلاً في قوائم التصفّح.
+
+    حالة المنتج تُضبط إلى `active` صريحاً: مِثبت `item` أعلاه يستعمل
+    `'available'`، وهي ليست من `Item.STATUS_CHOICES` أصلاً (القيم
+    draft/active/reserved/sold/transferred/archived) — و`choices` تُتحقَّق
+    في بايثون لا في MySQL فتُخزَّن كما هي. و`FixedPriceListingViewSet`
+    يُرشّح على `item__status__in=['active','reserved']`، فعرضٌ على منتج
+    بحالة غير صالحة لا يظهر في أي قائمة.
+    """
+    from decimal import Decimal
+    from core.models import FixedPriceListing
+    item.status = 'active'
+    item.save(update_fields=['status'])
+    return FixedPriceListing.objects.create(
+        item=item, price=Decimal('250000'), deposit_percentage=Decimal('10'),
+        is_active=True)
+
+
 class TestGuestCanLook:
     def test_item_list(self, guest, item):
         r = guest.get('/api/items/')
@@ -83,3 +103,44 @@ class TestGuestCannotAct:
 
     def test_cannot_read_a_profile(self, guest):
         assert guest.get('/api/auth/profile/').status_code == 401
+
+
+class TestTheGuestHomeScreen:
+    """ما تناديه الشاشة الرئيسية فعلاً عند فتحها.
+
+    الزائر كان لا يرى منتجات. السبب الأول كان في التطبيق — الشاشة تخرج
+    قبل أن تطلب شيئاً إن كان الرمز `null` — والثاني هنا: نقطة «المقترَح»
+    كانت IsAuthenticated فتردّ 401، فيبقى شريط المقترَح وشاشة «عرض الكل»
+    فارغين لمن لا حساب له. وهذه الاختبارات تحرس الطرف الذي يملكه الخادم.
+    """
+
+    def test_recommended_opens_for_a_guest(self, guest):
+        response = guest.get('/api/listings/fixed/recommended/')
+        assert response.status_code == 200, response.data
+
+    def test_a_guest_gets_the_popular_fallback_not_an_empty_page(
+            self, guest, listing):
+        # لا تفضيلات للزائر، فالترتيب يسقط إلى «الأكثر رواجاً» — وهو ما
+        # تحسبه الدالّة أصلاً لكل من لا سجلّ له.
+        body = guest.get('/api/listings/fixed/recommended/').data
+        assert body['count'] >= 1
+        assert any(r['item']['id'] == listing.item_id for r in body['results'])
+
+    def test_it_is_paginated_like_the_main_listing(self, guest, listing):
+        body = guest.get('/api/listings/fixed/recommended/?page_size=1').data
+        assert {'count', 'next', 'previous', 'results'} <= set(body.keys())
+
+    def test_two_guests_share_one_cached_ranking(self, guest, listing):
+        # مفتاح واحد لكل الزوّار: لا `user.id` يُبنى عليه، ولا سبب لحساب
+        # نفس القائمة لكل زائر.
+        from django.core.cache import cache
+        cache.clear()
+        guest.get('/api/listings/fixed/recommended/')
+        assert cache.get('recommended_listing_ids:anon') is not None
+
+    def test_the_screens_a_guest_opens_all_answer(self, guest, listing):
+        # ما تطلبه الشاشة الرئيسية عند الإقلاع، مجتمعاً.
+        for path in ('/api/categories/', '/api/listings/fixed/',
+                     '/api/listings/fixed/recommended/', '/api/items/',
+                     '/api/auctions/', '/api/reels/'):
+            assert guest.get(path).status_code == 200, path
