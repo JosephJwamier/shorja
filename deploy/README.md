@@ -158,12 +158,18 @@ docker compose -f deploy/docker-compose.yml exec web python manage.py shell
 
 ```bash
 sudo ufw allow 8000/udp        comment 'srs webrtc'
-sudo ufw allow 8000/tcp        comment 'srs webrtc tcp'
+sudo ufw allow 8001/tcp        comment 'srs webrtc tcp'
 sudo ufw allow 3478/udp        comment 'turn'
 sudo ufw allow 3478/tcp        comment 'turn'
 sudo ufw allow 5349/tcp        comment 'turns'
 sudo ufw allow 49160:49200/udp comment 'turn relay'
 ```
+
+منفذ WebRTC-over-TCP هو **8001** لا 8000 على هذا الخادم: `daphne` منشور
+على `127.0.0.1:8000`، وSRS على شبكة المضيف فيصطدم `0.0.0.0:8000` به
+(`EADDRINUSE`) — وSRS يعدّ المنفذ الذي يفشل في ربطه خطأً قاتلاً، فيدور
+الحاوية في حلقة إعادة تشغيل ولا بثّ أصلاً ولو على UDP. وUDP 8000 فضاء
+منفصل فيبقى كما هو.
 
 منفذ RTMP (1935) ليس في القائمة عن قصد: لا يحتاجه إلا من يبثّ من OBS على
 حاسوب، وفتحه دائماً يعني مدخلاً إضافياً لا يستعمله أحد. افتحه وقت اختبار
