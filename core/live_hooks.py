@@ -22,6 +22,7 @@ HlsPlaylistView and HlsAuthView at the bottom of this file.
 """
 import logging
 import re
+import secrets
 from urllib.parse import parse_qs, urlsplit
 
 import requests
@@ -87,7 +88,21 @@ class SrsHookView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request, event):
-        if request.query_params.get("secret", "") != getattr(settings, "SRS_HOOK_SECRET", None):
+        expected = getattr(settings, "SRS_HOOK_SECRET", "") or ""
+        if not expected:
+            # SRS_HOOK_SECRET defaults to '' (settings.py), so an unset env
+            # var used to make this check compare "" against "" and pass —
+            # layer 1 of the two documented above silently became a no-op on
+            # any deploy that forgot the variable, and that is every fresh
+            # one, since .env.production.example ships it blank. Fail closed:
+            # an unconfigured secret is not a matching secret.
+            logger.error("SRS hook called but SRS_HOOK_SECRET is not set")
+            return Response(DENY, status=403)
+        # compare_digest, not !=: the secret is a fixed string checked on
+        # every publish and play, which is exactly the shape a timing
+        # comparison leaks.
+        if not secrets.compare_digest(
+                request.query_params.get("secret", ""), expected):
             # Wrong or missing shared secret: not our SRS. Deny, and say
             # nothing useful.
             return Response(DENY, status=403)

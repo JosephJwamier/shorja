@@ -492,9 +492,17 @@ class LiveSessionConsumer(AsyncWebsocketConsumer):
             self.channel_name
         )
 
+        # Always, and before the counter: this socket is closing whatever
+        # the counter says. end_live_session() resets current_viewer_count
+        # to 0, so every viewer still connected when a stream ends hits the
+        # `current_viewer_count__gt=0` guard below, got None back, and never
+        # reached this call — leaving active_connections stuck above zero
+        # and is_watching True for good. The viewers sheet then listed them
+        # as still watching a broadcast that had ended.
+        await self.track_viewer_left()
+
         viewer_count = await self.decrement_viewer_count()
         if viewer_count is not None:
-            await self.track_viewer_left()
             await self.channel_layer.group_send(
                 self.room_group_name,
                 {'type': 'live_event', 'event': 'viewer_count', 'data': {'current_viewer_count': viewer_count}}

@@ -2023,6 +2023,19 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 'message': f'Cannot go live. Current status: {session.status}'
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        # Same rule create(start_immediately=True) enforces, and it was
+        # missing here: schedule a second session while one is live, then
+        # go_live on it, and the store had two. The media is fine (one
+        # stream_name each) but everything that asks "is this store live"
+        # gets two answers — the live tab shows the store twice, and
+        # notify_store_followers_live fires again for the same store.
+        if LiveSession.objects.filter(
+                store_id=session.store_id, status='live').exists():
+            return Response({
+                'success': False,
+                'message': 'You already have a live session in progress'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         session.status = 'live'
         session.started_at = timezone.now()
         session.save(update_fields=['status', 'started_at'])

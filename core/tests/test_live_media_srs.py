@@ -195,6 +195,23 @@ def test_hook_without_the_shared_secret_is_refused():
     assert response.status_code == 403
 
 
+@pytest.mark.parametrize('configured', ['', None])
+def test_an_unconfigured_hook_secret_refuses_everyone(settings, configured):
+    """الراية الفارغة كانت تفتح الخطّاف للعالم.
+
+    `SRS_HOOK_SECRET` قيمتها الافتراضية `''` في الإعدادات، والمقارنة كانت
+    `request.query_params.get("secret", "") != settings.SRS_HOOK_SECRET` —
+    فنداءٌ بلا سرّ أصلاً يقارن `''` بـ`''` **فينجح**. أي أن أول طبقة من
+    طبقتي الحماية تتعطّل صامتةً على كل نشرٍ نُسي فيه المتغيّر، وهو كل نشرٍ
+    جديد لأن `.env.production.example` يشحنه فارغاً.
+    """
+    settings.SRS_HOOK_SECRET = configured
+    session, _ = make_session()
+    # لا سرّ في الطلب ولا في الإعدادات: الحالة التي كانت تمرّ.
+    assert hook('on_publish', session.stream_name, secret='').status_code == 403
+    assert hook('on_play', session.stream_name, secret='').status_code == 403
+
+
 def test_publish_needs_a_publish_token_for_that_stream():
     session, owner = make_session()
     stream = session.stream_name
