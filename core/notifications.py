@@ -1031,3 +1031,49 @@ def notify_reel_comment(comment):
             'comment_id': str(comment.id),
         },
     )
+
+
+def notify_seller_to_hand_over(reservation):
+    """يُذكّر البائع بتسليم طلب مدفوع إلى شركة التوصيل.
+
+    قناتان، وواحدة منهما مضمونة:
+
+      الإشعار الفوري (FCM) — يعمل دائماً، ولا يكلّف شيئاً.
+      واتساب (Wevlix)      — يصل من أسكت إشعارات التطبيق، وهو حال كثير
+                             من التجّار. يحتاج قالباً معتمداً عند Meta.
+
+    وفشل واتساب لا يُفشل التذكير: الإشعار أُرسل، والرسالة تحسينٌ فوقه.
+    فبلا قالب مضبوط تعمل الميزة منقوصةً لا أن تتعطّل.
+    """
+    from django.conf import settings
+
+    seller = reservation.item.owner
+    item_title = bidi_isolate(reservation.item.title)
+
+    notify_push(
+        seller,
+        'سلّم طلبك إلى شركة التوصيل',
+        f'طلب "{item_title}" مدفوع منذ أكثر من يوم ولم يُسلَّم بعد.',
+        data={'type': 'handover_reminder', 'reservation_id': str(reservation.id)},
+    )
+
+    phone = (seller.phone or '').strip()
+    if not phone:
+        return
+
+    try:
+        from .services.wevlix import (
+            WevlixError, WevlixNotConfigured, send_template_message,
+        )
+        send_template_message(
+            phone,
+            'handover_reminder',
+            # الترتيب يطابق {{1}} و{{2}} في القالب المعتمد عند Meta.
+            variables=[seller.first_name or seller.username, item_title],
+        )
+    except WevlixNotConfigured:
+        # القالب لم يُعتمد بعد — ليس عطباً، والإشعار الفوري خرج أعلاه.
+        logger.debug('handover reminder: WhatsApp template not configured')
+    except WevlixError as e:
+        logger.warning('handover reminder WhatsApp failed for %s: %s',
+                       reservation.id, e)

@@ -1609,3 +1609,65 @@ def purge_archived_items(retention_days=365):
                 f"(ids={item_ids}), {deleted_count} row(s) total across related tables")
     return f"Deleted {len(item_ids)} items"
 
+
+
+@shared_task
+def remind_sellers_to_hand_over():
+    """يذكّر البائع بتسليم طلب مدفوع لم يُسنده إلى شركة التوصيل بعد.
+
+    **مسحٌ دوري لا مؤقّت لكل حجز** — بخلاف remind_to_complete_reservation
+    أعلاه. ثلاثة أسباب:
+
+    1. النافذة. التذكير يجب أن يصل في وقت الدوام، ومؤقّت يُطلق بعد 24
+       ساعة بالضبط يُطلق في أي ساعة. المسح يعمل داخل النافذة أصلاً.
+    2. المسارات. الحجز يصير مدفوعاً من مكانين (المحفظة وخطّاف بوّابة
+       الدفع)، ومسحٌ واحد يغطّيهما وما يُضاف بعدهما بلا ربط جديد.
+    3. البقاء. مؤقّت يضيع بإعادة تشغيل العامل؛ والمسح يلتقط ما فات.
+
+    ولا يُرسَل أكثر من مرّة: handover_reminder_sent_at يُختم عند الإرسال.
+    """
+    from django.conf import settings
+    from .models import Reservation
+    from .notifications import notify_seller_to_hand_over
+    from .reminder_window import is_within_window
+
+    start = getattr(settings, 'SELLER_REMINDER_WINDOW_START', 9)
+    end = getattr(settings, 'SELLER_REMINDER_WINDOW_END', 21)
+    now_local = timezone.localtime()
+
+    if not is_within_window(now_local, start_hour=start, end_hour=end):
+        # خارج الدوام: لا نُرسل ولا نختم، فيلتقطها المرور التالي داخل
+        # النافذة. تأخيرُ تذكير أهون من إيقاظ تاجر.
+        return "Outside the reminder window - nothing sent"
+
+    hours = getattr(settings, 'SELLER_HANDOVER_REMINDER_HOURS', 24)
+    cutoff = timezone.now() - timedelta(hours=hours)
+
+    due = (
+        Reservation.objects
+        .filter(
+            status='completed',          # دفع المشتري، فالدور على البائع
+            completed_at__lte=cutoff,
+            handover_reminder_sent_at__isnull=True,
+        )
+        # سُلّم فعلاً: أي طلب توصيل صادر من البائع يُسقط التذكير.
+        .exclude(delivery_orders__direction='outbound')
+        .select_related('item', 'item__owner', 'buyer')
+        .distinct()[:200]
+    )
+
+    sent = 0
+    for reservation in due:
+        try:
+            notify_seller_to_hand_over(reservation)
+        except Exception:
+            logger.exception(
+                "handover reminder failed for reservation %s", reservation.pk)
+            # بلا ختم: يُعاد في المرور التالي. فشلُ الإرسال ليس إرسالاً.
+            continue
+        Reservation.objects.filter(pk=reservation.pk).update(
+            handover_reminder_sent_at=timezone.now())
+        sent += 1
+
+    logger.info("remind_sellers_to_hand_over: %s reminder(s) sent", sent)
+    return f"Sent {sent} handover reminder(s)"

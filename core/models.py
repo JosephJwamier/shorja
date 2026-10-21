@@ -1116,6 +1116,13 @@ class Reservation(models.Model):
     # later, separate milestone (see STATUS_CHOICES below) so this timestamp
     # does not move again after that.
     completed_at = models.DateTimeField(null=True, blank=True)
+
+    # متى ذُكّر البائع بتسليم الطلب لشركة التوصيل.
+    #
+    # حقل لا راية: المسح دوري، وبلا طابع زمني يُرسل التذكير في كل
+    # مرور — فيتلقّى البائع رسالة واتساب كل بضع ساعات عن الطلب نفسه،
+    # وهو أسرع طريق إلى أن يحظر رقمنا.
+    handover_reminder_sent_at = models.DateTimeField(null=True, blank=True)
     # True if the buyer paid only the deposit at completion (remainder is
     # collected in cash at delivery, outside the app). Kept separate from
     # `status` because status moves on through 'confirmed'/'disputed'/

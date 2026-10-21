@@ -278,6 +278,17 @@ CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes
 CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60  # 25 minutes
 
 CELERY_BEAT_SCHEDULE = {
+    # تذكير البائع بالتسليم — داخل نافذة الدوام وحدها.
+    #
+    # مرّتان في اليوم لا كل ساعة: التذكير عن مهلة يوم كامل، وتكراره
+    # أكثر من ذلك إلحاحٌ لا فائدة فيه. والمهمّة نفسها ترفض العمل خارج
+    # النافذة، فهذه الساعات والحارس يقولان الشيء نفسه مرّتين عن قصد —
+    # تغيير النافذة في .env لا يجب أن يتطلّب تعديل جدولة.
+    'remind-sellers-to-hand-over': {
+        'task': 'core.tasks.remind_sellers_to_hand_over',
+        'schedule': crontab(hour='10,17', minute=0),
+    },
+
     # Reservation Management
     'process-expired-reservations': {
         'task': 'core.tasks.process_expired_reservations',
@@ -712,6 +723,26 @@ EMAIL_NOTIFICATIONS_ENABLED = (
     os.environ.get('EMAIL_NOTIFICATIONS_ENABLED', 'false').strip().lower()
     in ('1', 'true', 'yes', 'on')
 )
+
+# ---------------------------------------------------------------------------
+# تذكير البائع بتسليم الطلب لشركة التوصيل
+# ---------------------------------------------------------------------------
+# بعد كم ساعة من **دفع المشتري** (لا من الحجز): مهلة البائع تبدأ حين تصير
+# عليه مسؤولية، لا حين ضغط المشتري «احجز».
+SELLER_HANDOVER_REMINDER_HOURS = int(
+    os.environ.get('SELLER_HANDOVER_REMINDER_HOURS', '24'))
+
+# نافذة الإرسال بتوقيت بغداد. رسالة واتساب الثالثة فجراً توقظ التاجر،
+# ومن أيقظناه مرّة يُسكت الرقم — فنخسر معه إشعارات الحجز والمزاد.
+SELLER_REMINDER_WINDOW_START = int(
+    os.environ.get('SELLER_REMINDER_WINDOW_START', '9'))
+SELLER_REMINDER_WINDOW_END = int(
+    os.environ.get('SELLER_REMINDER_WINDOW_END', '21'))
+
+# اسم قالب واتساب المعتمد عند Meta. فارغاً يُرسَل الإشعار الفوري وحده —
+# الميزة تعمل منقوصةً لا أن تتعطّل.
+WEVLIX_TEMPLATE_HANDOVER_REMINDER = os.environ.get(
+    'WEVLIX_TEMPLATE_HANDOVER_REMINDER', '')
 
 # رابط التطبيق على Google Play. فارغ قبل النشر: صفحات المشاركة تُظهر
 # «قادم قريباً» بدل زرّ يقود إلى 404. يُضبط في .env يوم النشر بلا تعديل كود.

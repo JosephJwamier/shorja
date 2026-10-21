@@ -92,6 +92,35 @@ def send_otp(phone_e164, client_message_id=None):
     return message_id
 
 
+def send_template_message(phone_e164, template, variables=None):
+    """رسالة واتساب بقالب معتمد — لغير رموز التحقّق.
+
+    واتساب لا يسمح برسالة حرّة لمن لم يراسلك خلال 24 ساعة: أي رسالة
+    تبدأها المنصّة يجب أن تكون **قالباً معتمداً** من Meta، ومتغيّراتها
+    وحدها هي ما يتبدّل. فاسم القالب إعداد لا نصّ في الكود — يُعتمد عند
+    Meta مرّة ثم يُضبط في `.env`.
+
+    وبلا قالب مضبوط ترفع WevlixNotConfigured لا WevlixError: هذه حالة
+    «لم يُضبط بعد» لا «تعطّل»، ومُستدعوها يتجاهلونها بهدوء بدل أن
+    يُسجّلوها كعطب كل مرّة.
+
+    [variables] تُرسل بالترتيب الذي يتوقّعه القالب عند Meta ({{1}}،
+    {{2}}…).
+    """
+    name = (getattr(settings, 'WEVLIX_TEMPLATE_%s' % template.upper(), '')
+            or '').strip()
+    if not name:
+        raise WevlixNotConfigured(
+            'WEVLIX_TEMPLATE_%s is not set' % template.upper())
+
+    data = _post('/v1/messages/template', {
+        'to': phone_e164,
+        'template': name,
+        'variables': list(variables or []),
+    })
+    return data.get('messageId') or ''
+
+
 def verify_otp(message_id, code):
     """True إن قبلت Wevlix الرمز.
 
