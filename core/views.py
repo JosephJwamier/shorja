@@ -929,7 +929,31 @@ class ItemViewSet(viewsets.ModelViewSet):
         })
 
 
-class FixedPriceListingViewSet(viewsets.ReadOnlyModelViewSet):
+class SafeRankingCacheMixin:
+    """قراءة/كتابة ذاكرة مؤقّتة لا تُسقط الطلب حين تسقط هي.
+
+    الترتيبات المحفوظة (قوائم السعر الثابت وخلاصة الريلز) تحسينٌ لا مصدرُ
+    حقيقة: Redis غير متاح يجب أن يعني ترتيباً أبطأ لا صفحةً فاشلة.
+
+    وهي مشتركة لا منسوخة: نسختان من نفس المساعد في ملفّ واحد تتباعدان
+    بصمت — تُصلَح إحداهما ويُنسى أن للأخرى وجوداً.
+    """
+
+    def _cache_get(self, key):
+        try:
+            return cache.get(key)
+        except Exception:
+            logger.warning('Ranking cache read failed for key %s', key, exc_info=True)
+            return None
+
+    def _cache_set(self, key, value, ttl):
+        try:
+            cache.set(key, value, ttl)
+        except Exception:
+            logger.warning('Ranking cache write failed for key %s', key, exc_info=True)
+
+
+class FixedPriceListingViewSet(SafeRankingCacheMixin, viewsets.ReadOnlyModelViewSet):
     """View fixed price listings — supports category browsing"""
     queryset = (
         FixedPriceListing.objects
@@ -1095,18 +1119,6 @@ class FixedPriceListingViewSet(viewsets.ReadOnlyModelViewSet):
         self._cache_set(cache_key, ordered_ids, self.RECOMMENDED_CACHE_TTL)
         return ordered_ids
 
-    def _cache_get(self, key):
-        try:
-            return cache.get(key)
-        except Exception:
-            logger.warning('Listings cache read failed for key %s', key, exc_info=True)
-            return None
-
-    def _cache_set(self, key, value, ttl):
-        try:
-            cache.set(key, value, ttl)
-        except Exception:
-            logger.warning('Listings cache write failed for key %s', key, exc_info=True)
 
     def _similar_listings(self, listing, limit):
         """Rank candidate pks with lightweight queries, then fetch full detail in one shot"""
@@ -3044,7 +3056,8 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         }, status=status.HTTP_200_OK)
 
 
-class ReelViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin,
+class ReelViewSet(SafeRankingCacheMixin,
+                   mixins.RetrieveModelMixin, mixins.ListModelMixin,
                    mixins.UpdateModelMixin, viewsets.GenericViewSet):
     """
     Reels (الريلز) — short vertical video posted by a store, optionally
@@ -3086,6 +3099,98 @@ class ReelViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin,
         if self.action == 'list':
             queryset = queryset.filter(status='published')
         return self.annotate_viewer_flags(queryset)
+
+    # ---- ترتيب الخلاصة -------------------------------------------------
+
+    # سقف ما يُرتَّب في المرّة الواحدة. الترتيب يجري في بايثون على هذا
+    # العدد، فهو ما يحدّ كلفته — ومئتان تكفي لعشر صفحات، وهي أكثر ممّا
+    # يسحبه أحد في جلسة.
+    FEED_POOL_SIZE = 200
+    # ثلاث دقائق: الريلز تُنشر على مدار اليوم، وقائمةٌ محفوظة ساعةً تُخفي
+    # ما نُشر للتوّ عن متابعي المتجر.
+    FEED_CACHE_TTL = 180
+    FEED_TOP_CATEGORIES = 5
+
+    def _ranked_feed_ids(self, user):
+        """معرّفات الريلز مرتّبةً لهذا المشاهد، محفوظةً كقائمة أرقام.
+
+        نفس شكل `_recommended_listing_ids` في قوائم السعر الثابت: تُحسب
+        مرّة وتُقطَّع صفحاتٍ، فلا يُعاد الترتيب مع كل صفحة.
+        """
+        from .reel_feed import rank_reels
+
+        authenticated = bool(getattr(user, 'is_authenticated', False))
+        cache_key = ('reel_feed_ids:%s' % user.id if authenticated
+                     else 'reel_feed_ids:anon')
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        pool = list(
+            Reel.objects.filter(status='published')
+            .values_list('id', 'store_id', 'item__category_id', 'likes_count')
+            [:self.FEED_POOL_SIZE]
+        )
+
+        if not authenticated:
+            # الضيف بلا تاريخ: الترتيب الزمني هو كل ما يمكن قوله، ومفتاح
+            # واحد مشترك يكفي للجميع.
+            ordered = [row[0] for row in pool]
+        else:
+            seen_ids = set(
+                ReelView.objects.filter(user=user).values_list('reel_id', flat=True))
+            followed_store_ids = set(
+                StoreFollow.objects.filter(follower=user)
+                .values_list('store_id', flat=True))
+            # متاجر تفاعل معها: إعجاب أو تعليق أو إكمال مشاهدة.
+            engaged_store_ids = set(
+                Reel.objects.filter(
+                    Q(likes__user=user) | Q(comments__user=user)
+                    | Q(view_records__user=user, view_records__completed=True)
+                ).values_list('store_id', flat=True))
+            top_categories = list(
+                UserCategoryAffinity.objects.filter(user=user, score__gt=0)
+                .order_by('-score')
+                .values_list('category_id', flat=True)[:self.FEED_TOP_CATEGORIES])
+            category_rank = {cid: i for i, cid in enumerate(top_categories)}
+
+            ordered = rank_reels(
+                pool,
+                seen_ids=seen_ids,
+                followed_store_ids=followed_store_ids,
+                engaged_store_ids=engaged_store_ids,
+                category_rank=category_rank,
+            )
+
+        self._cache_set(cache_key, ordered, self.FEED_CACHE_TTL)
+        return ordered
+
+    def list(self, request, *args, **kwargs):
+        """الخلاصة مرتّبةً للمشاهد — إلّا حين يُطلب متجر بعينه.
+
+        `?store=<id>` شبكةُ صفحة متجر، وترتيبها الزمني هو المقصود: من يفتح
+        متجراً يريد أحدث ما نشره لا ما يناسب ذوقه.
+        """
+        if request.query_params.get('store') or request.query_params.get('item'):
+            return super().list(request, *args, **kwargs)
+
+        ordered_ids = self._ranked_feed_ids(request.user)
+        page = self.paginate_queryset(ordered_ids)
+        page_ids = page if page is not None else ordered_ids
+
+        by_id = {
+            reel.id: reel
+            for reel in self.annotate_viewer_flags(
+                Reel.objects.filter(id__in=page_ids, status='published')
+                .select_related('store', 'store__user', 'item'))
+        }
+        ordered_page = [by_id[i] for i in page_ids if i in by_id]
+
+        serializer = ReelCardSerializer(
+            ordered_page, many=True, context={'request': request})
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
 
     def annotate_viewer_flags(self, queryset):
         """Resolve is_liked_by_me/is_saved_by_me as two correlated EXISTS
@@ -3291,6 +3396,8 @@ class ReelViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin,
             except Exception:
                 logger.exception('notify_reel_liked failed for reel %s', reel.pk)
 
+            self._record_reel_interest(request.user, reel, weight=1)
+
         return Response({
             'success': True,
             'is_liked': True,
@@ -3416,6 +3523,10 @@ class ReelViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin,
         except Exception:
             logger.exception('notify_reel_comment failed for comment %s', comment.pk)
 
+        # أثقل من الإعجاب: التعليق يكلّف المستخدم كتابةً، فلا يُكتب إلا
+        # عن اهتمام حقيقي.
+        self._record_reel_interest(request.user, reel, weight=2)
+
         return Response({
             'success': True,
             'data': ReelCommentSerializer(comment).data
@@ -3468,17 +3579,47 @@ class ReelViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin,
         Reel.objects.filter(pk=reel.pk).update(view_count=F('view_count') + 1)
         reel.refresh_from_db(fields=['view_count'])
 
+        # بلغ المشاهد نهاية الريل. أقوى إشارة اهتمام وأرخصها: الإعجاب
+        # والتعليق يفعلهما قلّة، وإكمال المشاهدة يفعله كل من أعجبه فعلاً
+        # بلا أن يُطلب منه شيء.
+        completed = bool(request.data.get('completed'))
+
         if request.user.is_authenticated:
-            view_record, created = ReelView.objects.get_or_create(reel=reel, user=request.user)
+            view_record, created = ReelView.objects.get_or_create(
+                reel=reel, user=request.user,
+                defaults={'completed': completed},
+            )
             if not created:
-                view_record.view_count = F('view_count') + 1
-                view_record.save(update_fields=['view_count', 'last_viewed_at'])
+                updates = {'view_count': F('view_count') + 1}
+                # يُرفع ولا يُخفض: من أكمل مرّة أكملها، ومرورٌ سريع لاحقاً
+                # لا يمحو ذلك.
+                if completed and not view_record.completed:
+                    updates['completed'] = True
+                ReelView.objects.filter(pk=view_record.pk).update(**updates)
+
+            if completed:
+                self._record_reel_interest(request.user, reel, weight=1)
 
         return Response({
             'success': True,
             'view_count': reel.view_count,
             'counted': True,
         }, status=status.HTTP_200_OK)
+
+    @staticmethod
+    def _record_reel_interest(user, reel, weight):
+        """يُغذّي UserCategoryAffinity من تفاعل الريلز.
+
+        نفس الجدول الذي تستعمله توصيات المنتجات — لا نظام ثانٍ بجانبه:
+        من يشاهد ريلزات الهواتف حتى آخرها يريد أن يرى هواتف في المتجر
+        أيضاً، والعكس صحيح.
+
+        وأوزانها أخفّ من أوزان المنتجات (متابعة=1، تفضيل=2، شراء=3):
+        إعجابٌ بريل ليس شراءً.
+        """
+        category = getattr(getattr(reel, 'item', None), 'category', None)
+        if category is not None:
+            record_interest(user, category, weight=weight)
 
     def destroy(self, request, *args, **kwargs):
         """Permanent delete at the owner's request — the row AND the S3

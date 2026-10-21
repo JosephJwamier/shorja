@@ -2521,6 +2521,15 @@ class ReelView(models.Model):
         User, on_delete=models.CASCADE, null=True, blank=True, related_name='reel_views'
     )
     view_count = models.PositiveIntegerField(default=1)
+
+    # هل بلغ المشاهد نهاية الريل مرّة على الأقل؟
+    #
+    # أقوى إشارة اهتمام نملكها وأرخصها: الإعجاب والتعليق فعلان واعيان
+    # يفعلهما قلّة، أمّا إكمال المشاهدة فيفعله كل من أعجبه الريل فعلاً
+    # بلا أن يُطلب منه شيء. ومن يمرّ بعد ثانيتين سجّل «مشاهدة» أيضاً —
+    # فبدون هذا الحقل لا فرق بين من شاهد ومن مرّ.
+    completed = models.BooleanField(default=False)
+
     first_viewed_at = models.DateTimeField(auto_now_add=True)
     last_viewed_at = models.DateTimeField(auto_now=True)
 
