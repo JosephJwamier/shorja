@@ -2061,6 +2061,23 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     def validate(self, data):
         if data['password'] != data['password2']:
             raise serializers.ValidationError("Passwords don't match")
+
+        # AUTH_PASSWORD_VALIDATORS كانت مُعلَنة ولا تُنفَّذ: min_length=8
+        # على الحقل كان كل ما يُفرض، فـ`12345678` و`password` مقبولتان.
+        # ويُمرَّر مستخدم غير محفوظ كي يعمل مُدقِّق التشابه — فلا يجعل
+        # أحدهم كلمة مروره اسمه أو رقمه.
+        from .models import User as _User
+        from .password_rules import password_error
+
+        error = password_error(data['password'], user=_User(
+            username=data.get('username') or '',
+            first_name=data.get('first_name') or '',
+            last_name=data.get('last_name') or '',
+            email=data.get('email') or '',
+            phone=data.get('phone') or '',
+        ))
+        if error:
+            raise serializers.ValidationError({'password': [error]})
         return data
 
     def create(self, validated_data):

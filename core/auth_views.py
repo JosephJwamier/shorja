@@ -26,6 +26,7 @@ from .serializers import (
     LogoutSerializer,
 )
 from .notifications import NotificationService
+from .password_rules import password_error
 from .phone_utils import to_e164
 from .models import Location  # NEW: Import Location
 
@@ -281,6 +282,11 @@ class ChangePasswordView(APIView):
                 'error': 'Old password is incorrect'
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        error = password_error(new_password, user=user)
+        if error:
+            return Response({'error': error},
+                            status=status.HTTP_400_BAD_REQUEST)
+
         user.set_password(new_password)
         user.save()
 
@@ -375,6 +381,11 @@ class ResetPasswordConfirmView(APIView):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         new_password = serializer.validated_data['new_password']
+        error = password_error(new_password, user=user)
+        if error:
+            return Response({'error': error},
+                            status=status.HTTP_400_BAD_REQUEST)
+
         user.set_password(new_password)
         user.save()
         user.clear_verification_code()

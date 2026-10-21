@@ -19,6 +19,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from .password_rules import password_error
 from .phone_utils import to_e164
 from .services.wevlix import (
     WevlixError, WevlixNotConfigured, send_otp, verify_otp,
@@ -182,6 +183,15 @@ class ResetPasswordByCodeView(APIView):
         user = get_user_model().objects.filter(phone=canonical).first()
         if user is None:
             return Response(self.GENERIC_OK)
+
+        # بعد إيجاد المستخدم كي يعمل مُدقِّق التشابه عليه هو. والرمز
+        # استُهلك قبل هذا السطر، فرفضُ كلمة ضعيفة يعني طلب رمز جديد —
+        # وهو الثمن الصحيح: الفحص قبل الاستهلاك كان سيكشف أي الأرقام
+        # لها حسابات.
+        error = password_error(new_password, user=user)
+        if error:
+            return Response({'success': False, 'message': error},
+                            status=status.HTTP_400_BAD_REQUEST)
 
         user.set_password(new_password)
         # الرمز وصل إلى الرقم، فملكيته مثبتة — وتسجيل ذلك يوفّر على
