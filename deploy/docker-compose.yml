@@ -132,6 +132,9 @@ services:
       # urls.py يتوقف عن خدمتها كلياً عند DEBUG=False.
       - media:/srv/media:ro
       - static:/srv/static:ro
+      # بوّابة شركة التوصيل: ملفّات ثابتة من المستودع مباشرةً — لا بناء
+      # ولا وقت تشغيل. للقراءة فقط، فلا يكتب فيها Caddy شيئاً.
+      - ../delivery_portal:/srv/delivery:ro
     # SRS وcoturn على شبكة المضيف، فلا يُناديان باسم خدمة من هنا.
     extra_hosts:
       - "host.docker.internal:host-gateway"

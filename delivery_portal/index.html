@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>بوابة شركة التوصيل — balla</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+  <!-- شاشة الدخول -->
+  <div id="login-view" class="login-shell">
+    <div class="login-card">
+      <h1>بوابة شركة التوصيل</h1>
+      <p class="sub">سجّل الدخول لعرض الطلبات المُسندة إليكم وتحديث حالتها.</p>
+      <div id="login-error" class="error-text hidden"></div>
+      <form id="login-form">
+        <div class="field">
+          <label for="username">اسم المستخدم</label>
+          <input id="username" name="username" type="text" autocomplete="username" required />
+        </div>
+        <div class="field">
+          <label for="password">كلمة المرور</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required />
+        </div>
+        <button id="login-button" type="submit" class="btn btn--primary">دخول</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- لوحة التحكم -->
+  <div id="dashboard-view" class="hidden">
+    <header class="topbar">
+      <h1>طلبات التوصيل</h1>
+      <div class="topbar__account">
+        <span id="account-label"></span>
+        <button id="logout-button" class="btn btn--ghost">خروج</button>
+      </div>
+    </header>
+
+    <main>
+      <div id="error-banner" class="hidden"></div>
+
+      <div class="toolbar">
+        <div id="tabs"></div>
+        <div class="toolbar__right">
+          <select id="governorate-filter" class="gov-filter" aria-label="فلترة حسب المحافظة"></select>
+          <button id="refresh-button" class="btn btn--ghost">تحديث</button>
+        </div>
+      </div>
+
+      <div id="empty-state" class="hidden">لا توجد طلبات في هذا القسم حالياً.</div>
+      <div id="orders-list"></div>
+    </main>
+  </div>
+
+  <script src="js/config.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

@@ -145,6 +145,28 @@ live.shorjeh.com {
 
 # نطاق المشاركة. المسارات /p/ /s/ /a/ /l/ هي ما يولّده
 # deep_link_config.dart، وتردّ بصفحة معاينة لمن يفتحها بلا تطبيق.
+# بوّابة شركة التوصيل — صفحة ستاتيكية بحتة.
+#
+# نطاق منفصل لا مسار تحت shorjeh.com: الصفحة تُخزّن رمز JWT في
+# localStorage، وهو مُقسَّم بالأصل — فنطاقها الخاصّ يمنع أي سكربت على
+# نطاق التسويق من قراءته.
+#
+# ولا أسرار في الملفّات نفسها: الصلاحية تُفرَض على الخادم
+# (DeliveryOrderViewSet._company_account_or_403)، فحساب الشركة لا يلمس
+# إلا الطلبات المُسنَدة إليه مهما عرف من روابط.
+delivery.shorjeh.com {
+	encode zstd gzip
+
+	# لا فهرسة: بوّابة تشغيل لا صفحة عامة.
+	header X-Robots-Tag "noindex, nofollow"
+	header X-Frame-Options "DENY"
+	header X-Content-Type-Options "nosniff"
+
+	root * /srv/delivery
+	try_files {path} {path}/ /index.html
+	file_server
+}
+
 shorjeh.com, www.shorjeh.com {
 	encode zstd gzip
 
