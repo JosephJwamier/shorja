@@ -61,7 +61,7 @@ router.register(r'reels', ReelViewSet, basename='reel')
 router.register(r'delivery-orders', DeliveryOrderViewSet, basename='delivery-order')
 router.register(r'legal/documents', LegalDocumentViewSet, basename='legal-document')
 
-from . import live_hooks, payment_views
+from . import installment_views, live_hooks, payment_views
 
 urlpatterns = [
 
@@ -80,6 +80,20 @@ urlpatterns = [
          payment_views.PaymentWebhookView.as_view(), name='payment-webhook'),
     path('payments/<str:reference>/', payment_views.payment_detail,
          name='payment-detail'),
+
+    # التقسيط. نفس شكل الدفع أعلاه ولنفس السبب: الـ webhook يأتي من
+    # المموّل لا من مستخدم، فلا سطح CRUD يُعلّق عليه. والفحص والتأكيد
+    # نداءان لا واحد عن قصد — رقم البطاقة يعبر مرّة في الفحص، والتأكيد
+    # يحمل مرجع العرض فقط. انظر installment_views.
+    path('installments/options/', installment_views.installment_options,
+         name='installment-options'),
+    path('installments/check/', installment_views.check_installment,
+         name='installment-check'),
+    path('installments/confirm/', installment_views.confirm_installment,
+         name='installment-confirm'),
+    path('installments/webhook/<str:provider_name>/',
+         installment_views.InstallmentWebhookView.as_view(),
+         name='installment-webhook'),
 
     # Live media-server callbacks. Same reasoning as the payment webhook
     # above: the caller is our own SRS box, not a user, so there is no

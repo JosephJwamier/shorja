@@ -893,6 +893,14 @@ LOGGING = {
 # which is where a silent failure would otherwise cost real money.
 # =============================================================================
 SENTRY_DSN = os.environ.get('SENTRY_DSN', '')
+def _scrub_card_numbers(event, hint):
+    """يُمرَّر إلى Sentry كـ before_send — انظر
+    core/services/installments/cards.py. يُستورَد هنا بتأخير لأن settings
+    تُقرأ قبل تحميل التطبيقات."""
+    from core.services.installments.cards import scrub_sentry_event
+    return scrub_sentry_event(event, hint)
+
+
 if SENTRY_DSN:
     import sentry_sdk
     from sentry_sdk.integrations.celery import CeleryIntegration
@@ -907,6 +915,10 @@ if SENTRY_DSN:
         traces_sample_rate=float(os.environ.get('SENTRY_TRACES_SAMPLE_RATE', '0')),
         # Never attach usernames/emails/IPs to events by default.
         send_default_pii=False,
+        # ولا أرقام بطاقات: جسم الطلب يُرفَق مع الخطأ، ونداء فحص التقسيط
+        # يحمل رقم بطاقة كي كارد — فأي 500 بعده كان سيشحن الرقم إلى متتبّع
+        # الأخطاء، وهو آخر مكان يفكّر أحد بالبحث فيه عنه.
+        before_send=_scrub_card_numbers,
     )
 
 # =============================================================================
@@ -933,6 +945,52 @@ PAYMENT_PROVIDERS = {
 
 # مخطّط الرابط العميق الذي يعيد المتصفّح إلى التطبيق بعد الدفع.
 APP_DEEP_LINK_SCHEME = os.environ.get('APP_DEEP_LINK_SCHEME', 'balla')
+
+# =============================================================================
+# التقسيط — مموّلون خارجيون (كي كارد)
+# -----------------------------------------------------------------------------
+# مموّل لا بوابة: هو من يدفع ثمن الطلب للمنصة، ثم يستقطع من راتب المشتري
+# عشرة أشهر. النموذجان المتّفَق عليهما مع كي كارد يختلفان بحقل واحد:
+#
+#   upfront  (الافتراضي) تدفع كي كارد كامل المبلغ للمنصة الآن ناقص نسبة
+#            التاجر، وتتابع هي الاستقطاع. لا مخاطرة ائتمانية ولا تمويل علينا.
+#   monthly  تستقطع شهرياً وتودع في حساب المنصة، وتأخذ نسبة المشتري فقط —
+#            لكن المنصة هي من يموّل البائع حتى آخر قسط. الحساب الذي رجّح
+#            upfront في QICARD_INSTALLMENTS_README.md.
+#
+# النسب هنا هي ما عُرض علينا (10% من المشتري تُضاف على سعره، 5% من التاجر
+# تُخصم من التسوية)؛ أي إعادة تفاوض تغيير متغيّر بيئة لا تغيير كود.
+#
+# المزوّد بلا بيانات اعتماد لا يظهر للمشتري أصلاً، و SANDBOX يجيب محلياً
+# بلا شبكة (ولا يعمل إلا مع DEBUG) حتى تصل بيانات كي كارد الحقيقية.
+# =============================================================================
+INSTALLMENT_PROVIDERS = {
+    'qicard': {
+        'BASE_URL': os.environ.get('QICARD_BASE_URL', ''),
+        'MERCHANT_ID': os.environ.get('QICARD_MERCHANT_ID', ''),
+        'CLIENT_ID': os.environ.get('QICARD_CLIENT_ID', ''),
+        'CLIENT_SECRET': os.environ.get('QICARD_CLIENT_SECRET', ''),
+        'API_KEY': os.environ.get('QICARD_API_KEY', ''),
+        'WEBHOOK_SECRET': os.environ.get('QICARD_WEBHOOK_SECRET', ''),
+        'TIMEOUT': int(os.environ.get('QICARD_TIMEOUT', '30')),
+        'MONTHS': int(os.environ.get('QICARD_MONTHS', '10')),
+        'CUSTOMER_FEE_PERCENT': os.environ.get('QICARD_CUSTOMER_FEE_PERCENT', '10'),
+        'MERCHANT_FEE_PERCENT': os.environ.get('QICARD_MERCHANT_FEE_PERCENT', '5'),
+        'SETTLEMENT_MODE': os.environ.get('QICARD_SETTLEMENT_MODE', 'upfront'),
+        # حدّان لا تجميل: خطة عشرة أشهر على مبلغ صغير كلّها رسوم بلا فائدة
+        # لأحد، وسقفٌ يمنع خطأً مطبعياً من تمويل طلب بمليارات.
+        'MIN_AMOUNT': os.environ.get('QICARD_MIN_AMOUNT', '250000'),
+        'MAX_AMOUNT': os.environ.get('QICARD_MAX_AMOUNT', '5000000'),
+        'CARD_LENGTHS': os.environ.get('QICARD_CARD_LENGTHS', '16'),
+        'REQUIRE_LUHN': os.environ.get('QICARD_REQUIRE_LUHN', '1'),
+        'SANDBOX': os.environ.get('QICARD_SANDBOX', '0'),
+    },
+}
+
+# كم من نسبة المموّل من التاجر يحملها البائع فعلاً: 1 = كلّها (الافتراضي)،
+# و0.5 مثلاً = المنصة تمتصّ نصفها من عمولتها لتشجيع التجار على التقسيط في
+# فترة الإطلاق. تُجمَّد على الخطة لحظة التأكيد، فتغييرها لا يمسّ خطّة جارية.
+INSTALLMENT_SELLER_FEE_SHARE = os.environ.get('INSTALLMENT_SELLER_FEE_SHARE', '1')
 
 # =============================================================================
 # Platform commission — what الشورجة keeps from each sale, taken from the

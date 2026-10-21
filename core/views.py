@@ -4,7 +4,8 @@ ReSell Trust - Django REST Framework ViewSets (Fixed)
 """
 import logging
 import uuid
-from .wallet_utils import credit_earnings, debit_balance, release_reservation_payment, complete_reservation
+from .wallet_utils import (credit_earnings, debit_balance, refund_to_buyer,
+                           release_reservation_payment, complete_reservation)
 from .services.disputes import resolve_dispute, DisputeResolutionError
 from .services.withdrawals import approve_withdrawal, reject_withdrawal, WithdrawalReviewError
 from .services.support import start_support_chat
@@ -3730,11 +3731,16 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if getattr(self, 'swagger_fake_view', False):
             return Reservation.objects.none()
 
+        # installment_plans is prefetched for the `installment` field on the
+        # serializer — without it the list grows one query per row, and the
+        # orders screen is the most-opened screen in the app.
+        base = Reservation.objects.prefetch_related('installment_plans__collections')
+
         if self.request.user.is_staff or self.request.user.is_superuser:
-            return Reservation.objects.all().order_by('-reserved_at')
+            return base.all().order_by('-reserved_at')
 
         from django.db.models import Q
-        return Reservation.objects.filter(
+        return base.filter(
             Q(buyer=self.request.user) | Q(item__owner=self.request.user)
         ).order_by('-reserved_at')
 
@@ -4539,12 +4545,12 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 # the refund comes from the platform's held funds, nobody's wallet.
                 refund_amount = reservation.amount_charged
                 if refund_amount > 0:
-                    credit_earnings(
-                        user=reservation.buyer,
-                        amount=refund_amount,
-                        transaction_type='refund',
-                        item=item,
-                        reservation=reservation
+                    # Not necessarily the buyer's wallet: a financed order
+                    # goes back to the financier instead, since that is who
+                    # paid for it. See wallet_utils.refund_to_buyer.
+                    refund_to_buyer(
+                        reservation, refund_amount, item=item,
+                        reason='إلغاء الحجز #%d' % reservation.pk,
                     )
 
             who = 'seller' if (is_seller and not is_buyer) else 'buyer'

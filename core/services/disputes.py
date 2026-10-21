@@ -11,7 +11,9 @@ from django.db import transaction
 from django.utils import timezone
 
 from ..delivery_utils import create_return_delivery_order, get_active_delivery_company
-from ..wallet_utils import credit_earnings, debit_balance, release_reservation_payment
+from ..wallet_utils import (
+    credit_earnings, debit_balance, refund_to_buyer, release_reservation_payment,
+)
 
 
 class DisputeResolutionError(Exception):
@@ -105,12 +107,9 @@ def resolve_dispute(dispute, *, resolution_action, resolution='', admin_notes=''
                             item=reservation.item,
                             reservation=reservation
                         )
-                    credit_earnings(
-                        user=reservation.buyer,
-                        amount=refund_amount,
-                        transaction_type='refund',
-                        item=reservation.item,
-                        reservation=reservation
+                    refund_to_buyer(
+                        reservation, refund_amount,
+                        reason='استرداد بعد نزاع #%d' % dispute.pk,
                     )
 
                     # Stock was taken when the reservation was
@@ -155,20 +154,14 @@ def resolve_dispute(dispute, *, resolution_action, resolution='', admin_notes=''
                     item=reservation.item,
                     reservation=reservation
                 )
-                credit_earnings(
-                    user=reservation.buyer,
-                    amount=partial_refund_amount,
-                    transaction_type='refund',
-                    item=reservation.item,
-                    reservation=reservation
+                refund_to_buyer(
+                    reservation, partial_refund_amount,
+                    reason='استرداد جزئي بعد نزاع #%d' % dispute.pk,
                 )
             else:
-                credit_earnings(
-                    user=reservation.buyer,
-                    amount=partial_refund_amount,
-                    transaction_type='refund',
-                    item=reservation.item,
-                    reservation=reservation
+                refund_to_buyer(
+                    reservation, partial_refund_amount,
+                    reason='استرداد جزئي بعد نزاع #%d' % dispute.pk,
                 )
                 remainder = reservation.amount_charged - partial_refund_amount
                 release_reservation_payment(reservation, amount=remainder)

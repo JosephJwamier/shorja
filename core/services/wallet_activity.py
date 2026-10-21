@@ -31,6 +31,7 @@ from ..models import (
 
 WALLET = "المحفظة"
 CARD = "بطاقة (القاصة)"
+FINANCIER = "كي كارد (تقسيط)"
 
 
 def _res_label(reservation):
@@ -105,6 +106,24 @@ def _transaction_entry(txn, user):
         # Legacy gateway deposit rows (pending Stripe-era) — money that may come in.
         return _entry(kind="topup", direction="pending" if txn.status == "pending" else "in",
                       amount=txn.amount, title="إيداع", from_label=CARD, to_label=WALLET, **base)
+
+    if kind == "installment":
+        # تمويل وصل من المموّل ليدفع ثمن هذا الحجز. يظهر «داخل» ثم يظهر
+        # بعده فوراً خصم الشراء، فالقصة تقرأ: جاء المال من كي كارد وذهب
+        # إلى الحجز — لا أن المحفظة دفعت من مال صاحبها.
+        return _entry(kind="installment", direction="in", amount=txn.amount,
+                      title="تمويل تقسيط", from_label=FINANCIER,
+                      to_label=WALLET,
+                      note="تُستقطع الأقساط من بطاقتك شهرياً", **base)
+
+    if kind == "installment_fee":
+        if res and res.buyer_id != user.id:
+            return _entry(kind="installment_fee", direction="in", amount=txn.amount,
+                          title="رسم تقسيط", from_label=_res_label(res),
+                          to_label=WALLET, **base)
+        return _entry(kind="installment_fee", direction="out", amount=txn.amount,
+                      title="رسم تقسيط", from_label=WALLET,
+                      to_label=_res_label(res) if res else FINANCIER, **base)
 
     if kind == "payout":
         if res:

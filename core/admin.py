@@ -27,6 +27,7 @@ from .models import (
     Wallet, Notification, DepositRequest, WithdrawalRequest,
     Reel, ReelLike, ReelComment, ReelView, SavedReel,
     ItemVariant, PaymentIntent, StoreBadge, DeliveryRate,
+    InstallmentPlan, InstallmentCollection, InstallmentReversal,
     LiveSessionViewer, LiveSessionBan, LiveSessionModerator, UserCategoryAffinity,
 )
 from .services.disputes import resolve_dispute, DisputeResolutionError
@@ -1542,6 +1543,97 @@ class PaymentIntentAdmin(ModelAdmin):
     list_select_related = ('user',)
     date_hierarchy = 'created_at'
     readonly_fields = tuple(f.name for f in PaymentIntent._meta.fields)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+class InstallmentCollectionInline(TabularInline):
+    model = InstallmentCollection
+    extra = 0
+    can_delete = False
+    readonly_fields = ('sequence', 'amount', 'collected_at', 'provider_reference')
+    fields = readonly_fields
+
+
+@admin.register(InstallmentPlan)
+class InstallmentPlanAdmin(ModelAdmin):
+    """خطط التقسيط — للقراءة لا للتحرير.
+
+    كل رقم هنا مجمَّد لحظة التأكيد أو آتٍ من المموّل، وتعديله بيدٍ يفصل
+    السطر عمّا تحمله كي كارد فعلاً — وهو السطر نفسه الذي يُحسب منه ما
+    يُعاد للمشتري عند الإلغاء. الزرّ الوحيد المسموح هو إعادة السؤال
+    (مزامنة)، وهي قراءة موثّقة من المموّل لا كتابة.
+    """
+    list_display = ('reference', 'buyer', 'state', 'principal', 'months',
+                    'monthly_amount', 'collected_amount', 'card_mask',
+                    'settlement_mode', 'created_at')
+    list_filter = ('provider', 'state', 'settlement_mode')
+    search_fields = ('reference', 'provider_plan_id', 'buyer__username',
+                     'card_last4', 'reservation__id')
+    raw_id_fields = ('reservation', 'buyer')
+    list_select_related = ('buyer', 'reservation')
+    date_hierarchy = 'created_at'
+    readonly_fields = tuple(f.name for f in InstallmentPlan._meta.fields)
+    inlines = [InstallmentCollectionInline]
+    actions = ['sync_with_provider']
+
+    @admin.display(description='البطاقة')
+    def card_mask(self, obj):
+        return '****%s' % obj.card_last4 if obj.card_last4 else '—'
+
+    @admin.display(description='إعادة السؤال عن الحالة من المموّل')
+    def sync_with_provider(self, request, queryset):
+        from .services.installments.base import InstallmentError
+        from .services.installments.service import sync_plan
+        done, failed = 0, 0
+        for plan in queryset:
+            try:
+                sync_plan(plan)
+                done += 1
+            except InstallmentError:
+                failed += 1
+        self.message_user(request, 'تمّت مزامنة %d خطة، وفشلت %d' % (done, failed))
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(InstallmentReversal)
+class InstallmentReversalAdmin(ModelAdmin):
+    """طابور التسوية اليدوية.
+
+    كل سطر `failed` هنا يعني: طلب أُلغي، والمموّل ما زال يستقطع من راتب
+    المشتري. هذا هو المكان الذي يُعرف منه ذلك — ولهذا يُفلتَر على الحالة
+    افتراضياً — وإعادة الإرسال هي الإجراء الوحيد المتاح.
+    """
+    list_display = ('plan', 'amount', 'state', 'reason', 'failure_reason',
+                    'created_at')
+    list_filter = ('state',)
+    search_fields = ('plan__reference', 'provider_reference')
+    raw_id_fields = ('plan',)
+    list_select_related = ('plan',)
+    readonly_fields = tuple(f.name for f in InstallmentReversal._meta.fields)
+    actions = ['retry_reversal']
+
+    @admin.display(description='إعادة إرسال الإرجاع للمموّل')
+    def retry_reversal(self, request, queryset):
+        from .models import InstallmentReversal as Reversal
+        from .services.installments.service import execute_reversal
+        retried = 0
+        for row in queryset.filter(state=Reversal.STATE_FAILED):
+            # Back to pending so the same guard that protects a first attempt
+            # protects the retry: execute_reversal only acts on pending rows.
+            Reversal.objects.filter(pk=row.pk).update(state=Reversal.STATE_PENDING)
+            execute_reversal(row.pk)
+            retried += 1
+        self.message_user(request, 'أُعيد إرسال %d إرجاع' % retried)
 
     def has_add_permission(self, request):
         return False

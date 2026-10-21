@@ -58,6 +58,76 @@ def debit_balance(user, amount, transaction_type, **transaction_kwargs):
     )
 
 
+def refund_to_buyer(reservation, amount, item=None, reason=''):
+    """Sends `amount` back where it actually came from, and returns what it did.
+
+    The default is the buyer's wallet, because that is what paid. A financed
+    order is the exception, and getting it wrong is the most expensive bug this
+    feature can have: the buyer did not spend a dinar of their own on it — a
+    financier did, and is deducting from their salary for ten months. Crediting
+    their wallet would hand them the full price of the goods in cash while the
+    deductions carried on.
+
+    So a financed refund splits in two:
+
+      to the buyer      only what the financier has already pulled from them
+                        *and* handed the platform (InstallmentPlan.
+                        collected_amount, net of what earlier refunds already
+                        returned). That is the buyer's own money, sitting in
+                        the platform's account.
+      to the financier  the rest, as a reversal: stop collecting, take the
+                        financing back. Requested here, sent after this
+                        transaction commits — see installments.service.
+                        request_reversal.
+
+    Returns a dict of the split, for the caller's logs and tests. Call inside
+    transaction.atomic(), like every other money mover here.
+    """
+    from .services.installments.service import live_plan_for, request_reversal
+
+    amount = Decimal(str(amount))
+    if amount <= 0:
+        return {'to_buyer': Decimal('0.00'), 'to_financier': Decimal('0.00')}
+
+    item = item if item is not None else reservation.item
+    plan = live_plan_for(reservation)
+    if plan is None:
+        credit_earnings(
+            user=reservation.buyer,
+            amount=amount,
+            transaction_type='refund',
+            item=item,
+            reservation=reservation,
+        )
+        return {'to_buyer': amount, 'to_financier': Decimal('0.00')}
+
+    from .models import InstallmentPlan
+    locked_plan = InstallmentPlan.objects.select_for_update().get(pk=plan.pk)
+    owed_to_buyer = max(
+        locked_plan.collected_amount - locked_plan.buyer_refunded_amount,
+        Decimal('0.00'),
+    )
+    to_buyer = min(amount, owed_to_buyer)
+    to_financier = amount - to_buyer
+
+    if to_buyer > 0:
+        credit_earnings(
+            user=reservation.buyer,
+            amount=to_buyer,
+            transaction_type='refund',
+            item=item,
+            reservation=reservation,
+        )
+        locked_plan.buyer_refunded_amount += to_buyer
+        locked_plan.save(update_fields=['buyer_refunded_amount', 'updated_at'])
+
+    if to_financier > 0:
+        request_reversal(locked_plan, to_financier,
+                         reason=reason or 'استرداد حجز مموَّل #%d' % reservation.pk)
+
+    return {'to_buyer': to_buyer, 'to_financier': to_financier}
+
+
 def complete_reservation(reservation, payment_type):
     """
     Charge whatever the buyer still owes for their chosen payment_type and
@@ -225,13 +295,13 @@ def release_reservation_payment(reservation, amount=None):
         charged -= (delivery_commission if fee_already_taken_in_cash
                     else reservation.delivery_fee)
 
-    # Platform commission comes off the seller's side, never the buyer's,
-    # the courier's or the representative's. Frozen at creation
-    # (services.commission.freeze_on_reservation); on a partial refund it is
-    # scaled to what the seller side actually receives so the platform never
-    # keeps a share of money that went back to the buyer.
-    platform_cut = Decimal('0.00')
-    if reservation.platform_commission_amount > 0 and charged > 0:
+    # How much of the whole charge is reaching the seller's side: 1 on a
+    # normal sale, less on a partial refund. Computed once, before anything
+    # is deducted, so every deduction below is measured against the same
+    # base — otherwise the commission would be scaled to one number and the
+    # installment fee to another.
+    payout_scale = Decimal('1')
+    if amount is not None:
         # Mirror of the subtraction above: on COD only the platform's cut of
         # the fee was ever part of amount_charged.
         outbound_for_base = reservation.delivery_orders.filter(direction='outbound').first()
@@ -239,11 +309,17 @@ def release_reservation_payment(reservation, amount=None):
         if outbound_for_base and outbound_for_base.cash_collected and outbound_for_base.cash_to_collect > 0:
             fee_in_pot = outbound_for_base.platform_commission_amount
         base_total = reservation.amount_charged - fee_in_pot
-        if amount is not None and base_total > 0:
-            platform_cut = (reservation.platform_commission_amount * charged / base_total
-                            ).quantize(Decimal('0.01'))
-        else:
-            platform_cut = reservation.platform_commission_amount
+        payout_scale = (charged / base_total) if base_total > 0 else Decimal('1')
+
+    # Platform commission comes off the seller's side, never the buyer's,
+    # the courier's or the representative's. Frozen at creation
+    # (services.commission.freeze_on_reservation); on a partial refund it is
+    # scaled to what the seller side actually receives so the platform never
+    # keeps a share of money that went back to the buyer.
+    platform_cut = Decimal('0.00')
+    if reservation.platform_commission_amount > 0 and charged > 0:
+        platform_cut = (reservation.platform_commission_amount * payout_scale
+                        ).quantize(Decimal('0.01'))
         platform_cut = min(platform_cut, charged)
         if platform_cut > 0:
             from .services.commission import platform_account
@@ -257,6 +333,31 @@ def release_reservation_payment(reservation, amount=None):
             charged -= platform_cut
             from ledger.services import record_platform_commission
             record_platform_commission(reservation, platform_cut)
+
+    # رسم التقسيط: ثمن أن تُموَّل هذه البيعة، يحمله البائع كما يحمل عمولة
+    # المنصة. والمنصة هي من دفعه فعلاً — المموّل خصمه من تسويته معها (انظر
+    # InstallmentPlan.platform_settlement) — فيُقيَّد لحسابها لا لحساب
+    # المموّل. صفر في أي بيعة غير مقسّطة، وصفر في النموذج الشهري حيث لا
+    # يأخذ المموّل من التاجر شيئاً.
+    from .services.installments.service import live_plan_for
+    installment_plan = live_plan_for(reservation)
+    if installment_plan is not None and installment_plan.seller_fee_amount > 0 and charged > 0:
+        installment_fee = min(
+            (installment_plan.seller_fee_amount * payout_scale).quantize(Decimal('0.01')),
+            charged,
+        )
+        if installment_fee > 0:
+            from .services.commission import platform_account
+            credit_earnings(
+                user=platform_account(),
+                amount=installment_fee,
+                transaction_type='installment_fee',
+                item=reservation.item,
+                reservation=reservation,
+            )
+            charged -= installment_fee
+            from ledger.services import record_installment_fee
+            record_installment_fee(reservation, installment_fee)
 
     if reservation.representative and reservation.commission_amount:
         seller_net = charged - reservation.commission_amount

@@ -1872,6 +1872,11 @@ class Transaction(models.Model):
         ('purchase', 'Purchase'),  # NEW
         ('payout', 'Payout'),  # NEW
         ('delivery_fee', 'Delivery Fee'),
+        # تمويل تقسيط وصل من مموّل خارجي (كي كارد) ليدفع ثمن حجز بدل
+        # المحفظة، ورسم ذلك التمويل الذي يحمله البائع. انظر
+        # services/installments/ و InstallmentPlan بالأسفل.
+        ('installment', 'Installment Financing'),
+        ('installment_fee', 'Installment Fee'),
     ]
 
     STATUS_CHOICES = [
@@ -2932,3 +2937,246 @@ class PaymentIntent(models.Model):
     def is_final(self):
         return self.state in (self.STATE_SUCCEEDED, self.STATE_FAILED,
                               self.STATE_CANCELLED)
+
+
+# =============================================================================
+# التقسيط — تمويل خارجي (كي كارد)
+#
+# الفرق الجوهري عن PaymentIntent أعلاه: هناك المشتري يدفع مالَه الآن عبر
+# بوابة، وهنا **مموّل** يدفع بدلاً عنه ويستقطع من راتبه شهرياً. فالمال الذي
+# يصل المنصة ليس مال المشتري بل مال المموّل، وهذا يغيّر إجابة سؤالين:
+#
+#   من يحمل الكلفة؟  المشتري يحمل نسبة المموّل منه (تُضاف على سعره)، والبائع
+#                    يحمل نسبة المموّل من التاجر (تُخصم من حصّته عند التحرير —
+#                    انظر wallet_utils.release_reservation_payment).
+#   إلى أين يرجع المال عند الإلغاء؟  إلى المموّل، لا إلى محفظة المشتري. محفظته
+#                    لم تدفع شيئاً، وإيداع المبلغ فيها يعني أنه قبض ثمن
+#                    المنتج نقداً وما زال الراتب يُستقطع. الاستثناء هو ما
+#                    استُقطع منه فعلاً ووصل حساب المنصة (collected_amount) —
+#                    ذاك مالُه ويعود إليه. انظر wallet_utils.refund_to_buyer.
+# =============================================================================
+
+
+class InstallmentPlan(models.Model):
+    """خطة تقسيط واحدة على حجز واحد.
+
+    السطر يُنشأ في حالة `quoted` لحظة فحص الأهلية، لا عند التأكيد: هكذا
+    يعبر رقم البطاقة خادمنا **مرّة واحدة** (نداء الفحص) ويُحتفظ منه بآخر
+    أربعة أرقام ورمز المموّل فقط، ثم يُؤكّد التطبيق بـ `reference` لا بالرقم.
+    انظر services/installments/cards.py — الرقم لا يُخزَّن ولا يُسجَّل في أي
+    مكان، فحفظه يُدخل المنصة في نطاق PCI بلا أي مقابل.
+
+    المبالغ كلها مجمَّدة لحظة التأكيد، مثل سعر الحجز وعمولة المنصة: تغيير
+    نسبة في الإعدادات غداً لا يجوز أن يمسّ خطّة جارية، والمشتري يوقّع على
+    جدول أقساط لا على معادلة.
+    """
+
+    STATE_QUOTED = 'quoted'
+    STATE_ACTIVE = 'active'
+    STATE_SETTLED = 'settled'
+    STATE_REVERSED = 'reversed'
+    STATE_FAILED = 'failed'
+    STATE_EXPIRED = 'expired'
+    STATE_CHOICES = [
+        (STATE_QUOTED, 'عرض — بانتظار تأكيد المشتري'),
+        (STATE_ACTIVE, 'نشطة — الاستقطاع جارٍ'),
+        (STATE_SETTLED, 'مسدّدة بالكامل'),
+        (STATE_REVERSED, 'ملغاة ومُرجَعة للمموّل'),
+        (STATE_FAILED, 'مرفوضة'),
+        (STATE_EXPIRED, 'انتهت صلاحية العرض'),
+    ]
+
+    # النموذجان اللذان عرضتهما كي كارد. الكود واحد والفرق حقلٌ واحد:
+    #   upfront  المموّل يسدّد للمنصة كامل المبلغ الآن ناقص نسبة التاجر،
+    #            ويتابع هو الاستقطاع من المشتري. لا مخاطرة ولا تمويل علينا.
+    #   monthly  المموّل يستقطع شهرياً ويودع في حساب المنصة. لا نسبة تاجر،
+    #            لكن المنصة هي من يموّل البائع حتى آخر قسط — انظر
+    #            QICARD_INSTALLMENTS_README.md للحساب الذي رجّح upfront.
+    SETTLEMENT_UPFRONT = 'upfront'
+    SETTLEMENT_MONTHLY = 'monthly'
+    SETTLEMENT_CHOICES = [
+        (SETTLEMENT_UPFRONT, 'تسوية فورية من المموّل'),
+        (SETTLEMENT_MONTHLY, 'تحصيل شهري لحساب المنصة'),
+    ]
+
+    reservation = models.ForeignKey(
+        Reservation, on_delete=models.CASCADE, related_name='installment_plans'
+    )
+    buyer = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name='installment_plans'
+    )
+    provider = models.CharField(max_length=32, db_index=True)
+    reference = models.CharField(max_length=64, unique=True, db_index=True)
+    state = models.CharField(
+        max_length=16, choices=STATE_CHOICES, default=STATE_QUOTED, db_index=True
+    )
+    settlement_mode = models.CharField(
+        max_length=16, choices=SETTLEMENT_CHOICES, default=SETTLEMENT_UPFRONT
+    )
+
+    # ما مُوّل فعلاً: ثمن المنتج + أجرة التوصيل، أي ما كان سيُخصم من المحفظة.
+    principal = models.DecimalField(max_digits=12, decimal_places=2)
+    months = models.PositiveSmallIntegerField(default=10)
+    # نسبة المموّل من المشتري — تُضاف على سعره ولا تدخل حساب المنصة أبداً.
+    customer_fee_percent = models.DecimalField(max_digits=5, decimal_places=2,
+                                               default=Decimal('0.00'))
+    customer_fee_amount = models.DecimalField(max_digits=12, decimal_places=2,
+                                              default=Decimal('0.00'))
+    # ما يدفعه المشتري إجمالاً، وقسطه الشهري. جدول المموّل هو المرجع إن
+    # أعاده نداؤه؛ هذه قيم العرض والتدقيق.
+    total_payable = models.DecimalField(max_digits=12, decimal_places=2)
+    monthly_amount = models.DecimalField(max_digits=12, decimal_places=2)
+
+    # نسبة المموّل من التاجر (upfront فقط)، وما يصل حساب المنصة بعدها.
+    merchant_fee_percent = models.DecimalField(max_digits=5, decimal_places=2,
+                                               default=Decimal('0.00'))
+    merchant_fee_amount = models.DecimalField(max_digits=12, decimal_places=2,
+                                              default=Decimal('0.00'))
+    # الجزء الذي يُخصم من حصّة البائع عند التحرير. الباقي تمتصّه المنصة —
+    # حصّة محدَّدة بـ settings.INSTALLMENT_SELLER_FEE_SHARE ومجمَّدة هنا.
+    seller_fee_amount = models.DecimalField(max_digits=12, decimal_places=2,
+                                            default=Decimal('0.00'))
+    platform_settlement = models.DecimalField(max_digits=12, decimal_places=2,
+                                              default=Decimal('0.00'))
+
+    # ما استُقطع من المشتري ووصل حساب المنصة فعلاً (مجموع InstallmentCollection).
+    # في upfront يبقى صفراً: المموّل سدّد مرّة واحدة ويحصّل لنفسه.
+    collected_amount = models.DecimalField(max_digits=12, decimal_places=2,
+                                           default=Decimal('0.00'))
+    reversed_amount = models.DecimalField(max_digits=12, decimal_places=2,
+                                          default=Decimal('0.00'))
+    # ما أُعيد من المحصَّل إلى محفظة المشتري. حقل قائم بذاته لأن الاسترداد
+    # قد يتجزّأ (نزاع بتسوية جزئية ثم إلغاء): بلا عدّاد، كل استرداد يعيد
+    # كامل collected_amount فيُدفع المال مرّتين.
+    buyer_refunded_amount = models.DecimalField(max_digits=12, decimal_places=2,
+                                                default=Decimal('0.00'))
+
+    card_last4 = models.CharField(max_length=4, blank=True)
+    card_holder_name = models.CharField(max_length=120, blank=True)
+    # رمز المموّل للبطاقة، بديل الرقم في كل نداء لاحق.
+    card_token = models.CharField(max_length=255, blank=True)
+
+    provider_plan_id = models.CharField(max_length=128, blank=True, db_index=True)
+    last_provider_response = models.JSONField(null=True, blank=True)
+    failure_reason = models.CharField(max_length=255, blank=True)
+
+    # صلاحية العرض. بعدها يُرفض التأكيد ويُعاد الفحص — سعر البطاقة وأهليتها
+    # قابلان للتغيّر، وتأكيد عرضٍ من الأمس يبيع للمشتري جدولاً لم يوافق عليه
+    # المموّل.
+    expires_at = models.DateTimeField()
+    # حرس التكرار، كـ PaymentIntent.applied_at: المال يتحرّك مرّة واحدة في
+    # الانتقال إلى `applied_at IS NOT NULL` وتحت قفل صفّ.
+    applied_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'خطة تقسيط'
+        verbose_name_plural = 'خطط التقسيط'
+        indexes = [
+            models.Index(fields=['buyer', '-created_at']),
+            models.Index(fields=['provider', 'state']),
+        ]
+        constraints = [
+            # حجز واحد لا يحمل خطّتين فاعلتين. العروض (quoted) مستثناة:
+            # المشتري قد يجرّب بطاقتين قبل أن يؤكّد بواحدة.
+            models.UniqueConstraint(
+                fields=['reservation'],
+                condition=models.Q(state__in=['active', 'settled']),
+                name='one_live_installment_plan_per_reservation',
+            ),
+        ]
+
+    def __str__(self):
+        return "Installment %s %s/%s via %s [%s]" % (
+            self.reference, self.principal, self.months, self.provider, self.state
+        )
+
+    @property
+    def is_live(self):
+        """الخطّة قائمة: الاستقطاع جارٍ أو تمّ، ولم تُلغَ."""
+        return self.state in (self.STATE_ACTIVE, self.STATE_SETTLED)
+
+    @property
+    def outstanding(self):
+        """ما لم يُستردّ بعد من أصل التمويل — سقف أي إرجاع للمموّل."""
+        return max(self.principal - self.reversed_amount, Decimal('0.00'))
+
+
+class InstallmentCollection(models.Model):
+    """قسط واحد أبلغ المموّل عن استقطاعه.
+
+    يُقيَّد في النموذجين: في `monthly` هو المال الداخل فعلاً لحساب المنصة،
+    وفي `upfront` هو تتبُّع فقط (المال وصل مقدّماً) — لكنه يبقى ضرورياً
+    هناك أيضاً، لأنه يحدّد عند الإلغاء كم استُقطع من المشتري حتى الآن، وهو
+    القدر الذي يعود إلى محفظته بدل أن يعود إلى المموّل.
+
+    `sequence` مع الخطّة مفتاح فريد: الـ webhook يُعاد إرساله، وقيد القسط
+    مرّتين يُضخّم المحصَّل ويُنتج إرجاعاً لمال لم يُقبض.
+    """
+
+    plan = models.ForeignKey(
+        InstallmentPlan, on_delete=models.CASCADE, related_name='collections'
+    )
+    sequence = models.PositiveSmallIntegerField(help_text='رقم القسط 1..months')
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    collected_at = models.DateTimeField()
+    provider_reference = models.CharField(max_length=128, blank=True)
+    raw = models.JSONField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['plan', 'sequence']
+        verbose_name = 'قسط محصَّل'
+        verbose_name_plural = 'الأقساط المحصَّلة'
+        constraints = [
+            models.UniqueConstraint(fields=['plan', 'sequence'],
+                                    name='one_row_per_installment_sequence'),
+        ]
+
+    def __str__(self):
+        return "%s #%d %s" % (self.plan.reference, self.sequence, self.amount)
+
+
+class InstallmentReversal(models.Model):
+    """طلب إرجاع تمويل إلى المموّل عند إلغاء حجز مموَّل أو استرداده.
+
+    سطرٌ لا نداءٌ فقط، لأن النداء قد يفشل والمال في منتصف الطريق: الحجز
+    أُلغي والبضاعة رجعت، والمموّل ما زال يستقطع من راتب المشتري. حين يفشل
+    الإرجاع تبقى الحالة `failed` ويظهر الصفّ في لوحة الإدارة ليُسوّى يدوياً
+    مع كي كارد — بدل أن يُبتّ بإيداع المبلغ في محفظة المشتري، فذاك يخلق
+    مالاً من لا شيء لو نجح الإرجاع لاحقاً.
+    """
+
+    STATE_PENDING = 'pending'
+    STATE_CONFIRMED = 'confirmed'
+    STATE_FAILED = 'failed'
+    STATE_CHOICES = [
+        (STATE_PENDING, 'مُرسَل للمموّل'),
+        (STATE_CONFIRMED, 'أكّده المموّل'),
+        (STATE_FAILED, 'فشل — تسوية يدوية'),
+    ]
+
+    plan = models.ForeignKey(
+        InstallmentPlan, on_delete=models.CASCADE, related_name='reversals'
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    state = models.CharField(max_length=16, choices=STATE_CHOICES,
+                             default=STATE_PENDING, db_index=True)
+    reason = models.CharField(max_length=255, blank=True)
+    provider_reference = models.CharField(max_length=128, blank=True)
+    failure_reason = models.CharField(max_length=255, blank=True)
+    raw = models.JSONField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'إرجاع تمويل'
+        verbose_name_plural = 'إرجاعات التمويل'
+
+    def __str__(self):
+        return "Reversal %s %s [%s]" % (self.plan.reference, self.amount, self.state)

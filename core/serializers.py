@@ -18,6 +18,7 @@ from .models import (
     LiveSession, LiveSessionItem, LiveSessionComment, LiveSessionViewer,
     LiveSessionModerator, LiveSessionBan,
     Reel, ReelLike, ReelComment, ReelView,
+    InstallmentPlan,
 )
 from .services.support import SUPPORT_USERNAME
 
@@ -904,6 +905,7 @@ class ReservationSerializer(serializers.ModelSerializer):
     delivery_order = serializers.SerializerMethodField()
     can_send_to_delivery = serializers.SerializerMethodField()
     can_request_payment_release = serializers.SerializerMethodField()
+    installment = serializers.SerializerMethodField()
 
     class Meta:
         model = Reservation
@@ -923,6 +925,7 @@ class ReservationSerializer(serializers.ModelSerializer):
             'time_remaining', 'has_dispute', 'dispute_status',
             'can_cancel', 'can_approve', 'payment_status',
             'delivery_order', 'can_send_to_delivery', 'can_request_payment_release',
+            'installment',
         ]
         # Every one of these transitions has its own guarded action
         # (create_reservation/complete/cancel/approve_and_release_payment/...);
@@ -938,6 +941,9 @@ class ReservationSerializer(serializers.ModelSerializer):
             'coupon_discount', 'delivery_fee', 'warranty_days',
             'platform_commission_percent', 'platform_commission_amount', 'seller_net',
         ]
+
+    def get_installment(self, obj):
+        return _reservation_installment(obj)
 
     def get_seller_net(self, obj):
         """What the seller will receive: price minus the platform's cut and
@@ -3092,3 +3098,57 @@ class StoreReviewCreateSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         return StoreReview.objects.create(reviewer=self.context['request'].user, **validated_data)
         read_only_fields = ['id', 'notification_type', 'title', 'body', 'data', 'created_at']
+
+
+class InstallmentPlanSerializer(serializers.ModelSerializer):
+    """What the buyer is agreeing to, or already agreed to.
+
+    `card_last4` and `card_holder_name` are the whole of what the platform
+    knows about the card — see services/installments/cards.py. The financier's
+    token is deliberately not exposed: the app never needs it, and a value
+    that can authorise a deduction has no business in a response body.
+    """
+
+    collected_count = serializers.SerializerMethodField()
+    state_label = serializers.CharField(source='get_state_display', read_only=True)
+
+    class Meta:
+        model = InstallmentPlan
+        fields = [
+            'reference', 'provider', 'state', 'state_label',
+            'principal', 'months', 'monthly_amount', 'total_payable',
+            'customer_fee_percent', 'customer_fee_amount',
+            'collected_amount', 'collected_count',
+            'card_last4', 'card_holder_name',
+            'expires_at', 'applied_at', 'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_collected_count(self, obj):
+        return obj.collections.count()
+
+
+def _reservation_installment(obj):
+    """The live plan behind a reservation, flattened for the order card.
+
+    A nested serializer would have been the obvious move, but this runs inside
+    the reservations list: one more related read per row, for four values the
+    card actually shows (مقسّطة، القسط الشهري، عدد الأقساط، آخر أربعة أرقام).
+    """
+    plan = next(
+        (p for p in obj.installment_plans.all() if p.state in ('active', 'settled')),
+        None,
+    )
+    if plan is None:
+        return None
+    return {
+        'reference': plan.reference,
+        'state': plan.state,
+        'months': plan.months,
+        'monthly_amount': str(plan.monthly_amount),
+        'total_payable': str(plan.total_payable),
+        'card_last4': plan.card_last4,
+        'collected_count': plan.collections.count(),
+    }
+
+

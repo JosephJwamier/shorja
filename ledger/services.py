@@ -266,6 +266,39 @@ def record_platform_commission(reservation, amount):
     )
 
 
+def record_installment_fee(reservation, amount):
+    """Books the financier's merchant fee as an expense in the seller's
+    ledger, the moment it is taken out of their payout.
+
+    Filed under the 'commission' category rather than one of its own: to the
+    seller it is the same kind of line — a platform fee deducted from an app
+    sale — and the note says which fee it was. A new category would have
+    bought a migration and a dashboard change to say the same thing.
+    Idempotent per reservation.
+    """
+    store = _store_for(reservation)
+    if store is None or amount <= 0:
+        return None
+    prefix = 'رسم تقسيط #%d ' % reservation.id
+    existing = LedgerEntry.objects.filter(
+        store=store, kind=LedgerEntry.KIND_EXPENSE, expense_category='commission',
+        source=LedgerEntry.SOURCE_APP, note__startswith=prefix,
+    ).first()
+    if existing:
+        return existing
+    return LedgerEntry.objects.create(
+        store=store,
+        kind=LedgerEntry.KIND_EXPENSE,
+        expense_category='commission',
+        amount=amount,
+        note=(prefix + '— %s (تقسيط كي كارد)' % reservation.item.title)[:255],
+        occurred_at=timezone.now(),
+        item=reservation.item,
+        source=LedgerEntry.SOURCE_APP,
+        created_by=None,
+    )
+
+
 def void_app_sale(reservation, reason):
     """The reservation was cancelled/refunded after completing: retire its
     ledger row so the book matches the money. Stock is handed back by the

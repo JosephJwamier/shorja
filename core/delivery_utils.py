@@ -19,7 +19,7 @@ from .notifications import (
     notify_return_pickup_assigned,
     notify_return_refund_released,
 )
-from .wallet_utils import credit_earnings, debit_balance
+from .wallet_utils import credit_earnings, debit_balance, refund_to_buyer
 
 
 def get_active_delivery_company():
@@ -249,12 +249,9 @@ def combine_deliveries(reservations, company):
         if reservation is not fee_carrier and reservation.delivery_fee > 0:
             waived_fee = reservation.delivery_fee
             if not reservation.is_deposit_only:
-                credit_earnings(
-                    user=reservation.buyer,
-                    amount=waived_fee,
-                    transaction_type='refund',
-                    item=reservation.item,
-                    reservation=reservation,
+                refund_to_buyer(
+                    reservation, waived_fee,
+                    reason='أجرة توصيل مكرّرة — حجز #%d' % reservation.pk,
                 )
                 total_refunded += waived_fee
             reservation.delivery_fee = Decimal('0.00')
@@ -366,12 +363,9 @@ def execute_return_refund(delivery_order):
                 item=reservation.item,
                 reservation=reservation,
             )
-        credit_earnings(
-            user=reservation.buyer,
-            amount=refund_amount,
-            transaction_type='refund',
-            item=reservation.item,
-            reservation=reservation,
+        refund_to_buyer(
+            reservation, refund_amount,
+            reason='إرجاع المنتج — حجز #%d' % reservation.pk,
         )
 
     if forfeited_amount > 0:
