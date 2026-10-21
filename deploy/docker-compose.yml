@@ -147,13 +147,8 @@ services:
     network_mode: host
     environment:
       CANDIDATE: ${PUBLIC_IP}
-      # روابط كاملة: SRS لا يستبدل متغيّراً مُضمَّناً داخل نصّ، فيُركَّب
-      # الرابط هنا ويصل إليه قيمةً واحدة — انظر http_hooks في srs.conf.
-      HOOK_ON_PUBLISH: ${DJANGO_HOOK_BASE:-http://127.0.0.1:8000}/api/live/srs/on_publish/?secret=${SRS_HOOK_SECRET}
-      HOOK_ON_UNPUBLISH: ${DJANGO_HOOK_BASE:-http://127.0.0.1:8000}/api/live/srs/on_unpublish/?secret=${SRS_HOOK_SECRET}
-      HOOK_ON_PLAY: ${DJANGO_HOOK_BASE:-http://127.0.0.1:8000}/api/live/srs/on_play/?secret=${SRS_HOOK_SECRET}
-      HOOK_ON_STOP: ${DJANGO_HOOK_BASE:-http://127.0.0.1:8000}/api/live/srs/on_stop/?secret=${SRS_HOOK_SECRET}
-      HOOK_ON_DVR: ${DJANGO_HOOK_BASE:-http://127.0.0.1:8000}/api/live/srs/on_dvr/?secret=${SRS_HOOK_SECRET}
+      DJANGO_HOOK_BASE: ${DJANGO_HOOK_BASE:-http://127.0.0.1:8000}
+      SRS_HOOK_SECRET: ${SRS_HOOK_SECRET}
       # مطفأ على خادم مشترك: dvr_plan session يكتب MP4 كاملاً لكل جلسة بلا
       # سقف ولا تنظيف (on_dvr يسجّل المسار ولا يرفع شيئاً بعد)، والقرص هنا
       # قرص MySQL — امتلاؤه يوقف السوق كلّه لا البثّ وحده.
@@ -166,7 +161,12 @@ services:
     # التشغيل التالية لا شيء يُفقد بعدم حفظه.
     tmpfs:
       - /usr/local/srs/objs/nginx/html/live:size=256m
-    command: ["./objs/srs", "-c", "conf/docker.conf"]
+    # يُكتب الإعداد قبل أن يُقرأ: SRS لا يستبدل متغيّرات البيئة في ملفّه،
+    # فـ`sed` تملأ النائبين كما تفعل coturn أدناه. و`/tmp` لأن الملفّ
+    # المركَّب مقروء فقط.
+    command: >
+      sh -c "sed -e 's|__HOOK_BASE__|'\"$$DJANGO_HOOK_BASE\"'|g' -e 's|__HOOK_SECRET__|'\"$$SRS_HOOK_SECRET\"'|g'
+      /usr/local/srs/conf/docker.conf > /tmp/srs.conf && exec ./objs/srs -c /tmp/srs.conf"
     depends_on:
       - web
     healthcheck:
