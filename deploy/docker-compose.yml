@@ -147,8 +147,13 @@ services:
     network_mode: host
     environment:
       CANDIDATE: ${PUBLIC_IP}
-      DJANGO_HOOK_BASE: ${DJANGO_HOOK_BASE:-http://127.0.0.1:8000}
-      SRS_HOOK_SECRET: ${SRS_HOOK_SECRET}
+      # روابط كاملة: SRS لا يستبدل متغيّراً مُضمَّناً داخل نصّ، فيُركَّب
+      # الرابط هنا ويصل إليه قيمةً واحدة — انظر http_hooks في srs.conf.
+      HOOK_ON_PUBLISH: ${DJANGO_HOOK_BASE:-http://127.0.0.1:8000}/api/live/srs/on_publish/?secret=${SRS_HOOK_SECRET}
+      HOOK_ON_UNPUBLISH: ${DJANGO_HOOK_BASE:-http://127.0.0.1:8000}/api/live/srs/on_unpublish/?secret=${SRS_HOOK_SECRET}
+      HOOK_ON_PLAY: ${DJANGO_HOOK_BASE:-http://127.0.0.1:8000}/api/live/srs/on_play/?secret=${SRS_HOOK_SECRET}
+      HOOK_ON_STOP: ${DJANGO_HOOK_BASE:-http://127.0.0.1:8000}/api/live/srs/on_stop/?secret=${SRS_HOOK_SECRET}
+      HOOK_ON_DVR: ${DJANGO_HOOK_BASE:-http://127.0.0.1:8000}/api/live/srs/on_dvr/?secret=${SRS_HOOK_SECRET}
       # مطفأ على خادم مشترك: dvr_plan session يكتب MP4 كاملاً لكل جلسة بلا
       # سقف ولا تنظيف (on_dvr يسجّل المسار ولا يرفع شيئاً بعد)، والقرص هنا
       # قرص MySQL — امتلاؤه يوقف السوق كلّه لا البثّ وحده.

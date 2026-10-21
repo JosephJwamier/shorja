@@ -21,8 +21,14 @@ services:
     network_mode: host            # WebRTC needs the real host ports/IP
     environment:
       - CANDIDATE=${PUBLIC_IP}    # advertised ICE candidate
-      - DJANGO_HOOK_BASE=${DJANGO_HOOK_BASE}
-      - SRS_HOOK_SECRET=${SRS_HOOK_SECRET}
+      # Full URLs: SRS only substitutes an env var when it is the entire
+      # config value, never embedded in a longer string — see http_hooks
+      # in srs.conf.
+      - HOOK_ON_PUBLISH=${DJANGO_HOOK_BASE}/api/live/srs/on_publish/?secret=${SRS_HOOK_SECRET}
+      - HOOK_ON_UNPUBLISH=${DJANGO_HOOK_BASE}/api/live/srs/on_unpublish/?secret=${SRS_HOOK_SECRET}
+      - HOOK_ON_PLAY=${DJANGO_HOOK_BASE}/api/live/srs/on_play/?secret=${SRS_HOOK_SECRET}
+      - HOOK_ON_STOP=${DJANGO_HOOK_BASE}/api/live/srs/on_stop/?secret=${SRS_HOOK_SECRET}
+      - HOOK_ON_DVR=${DJANGO_HOOK_BASE}/api/live/srs/on_dvr/?secret=${SRS_HOOK_SECRET}
     volumes:
       - ./srs.conf:/usr/local/srs/conf/docker.conf:ro
       - srs-dvr:/usr/local/srs/objs/nginx/html/dvr
