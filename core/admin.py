@@ -1646,6 +1646,20 @@ class InstallmentPlanAdmin(ModelAdmin):
         reservation = plan.reservation
         variant = reservation.stock_variant
         stock = variant.quantity if variant is not None else None
+
+        # تفصيل المبلغ للمراجع. كله من الخطة والحجز لا من حساب جديد:
+        # الأرقام مجمَّدة لحظة الطلب، وأي اختلاف عن الواقع اليوم يظهر في
+        # تحذير amount_changed لا في اختلاف صامت بين سطر وسطر.
+        #
+        # وأجرة التوصيل تُقرأ **كما مُوِّلت** (principal ناقص ثمن الطلب) لا
+        # كما تُحسب الآن: التفصيل يجب أن يجمع إلى المبلغ المكتوب في كي
+        # كارد، وسعر المسار قد يكون تغيّر منذ الطلب.
+        financed_fee = plan.principal - reservation.total_price
+        rep_commission = ((reservation.commission_amount or Decimal('0.00'))
+                          if reservation.representative_id else Decimal('0.00'))
+        seller_net = max(reservation.total_price
+                         - reservation.platform_commission_amount
+                         - rep_commission, Decimal('0.00'))
         context = dict(
             self.admin_site.each_context(request),
             title='مراجعة طلب تقسيط — حجز #%d' % reservation.id,
@@ -1655,6 +1669,19 @@ class InstallmentPlanAdmin(ModelAdmin):
             delivery_fee=compute_delivery_fee(reservation),
             current_amount=financed_amount(reservation),
             amount_changed=financed_amount(reservation) != plan.principal,
+            device_amount=reservation.total_price,
+            financed_delivery_fee=financed_fee,
+            # المكتوب في كي كارد يُدوَّر لأعلى دينار، فيُعرض الكسر صريحاً
+            # ليجمع العمود بالضبط بدل أن يبقى فرق لا يُفسَّر.
+            qi_rounding=(plan.amount_at_qi - plan.principal
+                         - plan.platform_fee_amount - plan.merchant_fee_amount),
+            qi_total=plan.merchant_fee_amount + plan.customer_fee_amount,
+            platform_total=(plan.platform_fee_amount
+                            + reservation.platform_commission_amount),
+            sale_commission=reservation.platform_commission_amount,
+            sale_commission_percent=reservation.platform_commission_percent,
+            rep_commission=rep_commission,
+            seller_net=seller_net,
             stock=stock,
             stock_short=(stock is not None and not reservation.representative_id
                          and stock < reservation.quantity),

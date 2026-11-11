@@ -387,6 +387,43 @@ def test_the_review_page_shows_the_number_and_approves(staff):
     assert 'QI-9' in after
 
 
+def test_the_review_page_breaks_the_amount_down_and_it_adds_up(staff):
+    """المراجع يرى الدينار داخلاً وخارجاً: ثمن الجهاز والتوصيل وعمولة
+    المنصة وعمولة كي كارد والمجموع — ويجمع العمودان إلى نفس الرقم.
+
+    الاختبار على المعادلة لا على النصّ: أي بند يُنسى من الصفحة أو يُحسب
+    مرّتين يكسر الجمع."""
+    buyer, seller = make_user('m_brk_b'), make_user('m_brk_s')
+    reservation, plan = requested(buyer, seller)
+    client = Client()
+    client.force_login(staff)
+    page = client.get(reverse('admin:core_installmentplan_review', args=[plan.pk]))
+    content = page.content.decode()
+
+    # كل بند مطلوب، بقيمته المجمَّدة على الخطة.
+    for value in (reservation.total_price, plan.principal,
+                  plan.platform_fee_amount, plan.merchant_fee_amount,
+                  plan.customer_fee_amount, plan.total_payable):
+        assert str(value) in content, value
+    assert str(plan.merchant_fee_amount + plan.customer_fee_amount) in content
+
+    # تكوين المبلغ: الثمن + التوصيل + العمولتان + التدوير = ما يدفعه الزبون.
+    financed_fee = plan.principal - reservation.total_price
+    build_up = (reservation.total_price + financed_fee
+                + plan.platform_fee_amount + plan.merchant_fee_amount
+                + plan.customer_fee_amount)
+    rounding = (plan.amount_at_qi - plan.principal
+                - plan.platform_fee_amount - plan.merchant_fee_amount)
+    assert build_up + rounding == plan.total_payable
+
+    # التوزيع: البائع + عمولة البيع + التوصيل + عمولة التقسيط + كي كارد.
+    seller_net = reservation.total_price - reservation.platform_commission_amount
+    payout = (seller_net + reservation.platform_commission_amount + financed_fee
+              + plan.platform_fee_amount
+              + plan.merchant_fee_amount + plan.customer_fee_amount + rounding)
+    assert payout == plan.total_payable
+
+
 def test_the_changelist_never_shows_the_full_number(staff):
     buyer, seller = make_user('m_cl_b'), make_user('m_cl_s')
     _, plan = requested(buyer, seller)

@@ -69,32 +69,99 @@ and these are figures an admin types into Qi's platform by hand.{% endcomment %}
       <div dir="ltr" class="text-2xl font-bold text-right select-all">{{ plan.amount_at_qi|floatformat:"0u" }}</div>
       <div class="text-xs mt-1">الزبون يدفع {{ plan.total_payable }} IQD ({{ plan.monthly_amount }} × {{ plan.months }}) — كي كارد تضيف {{ plan.customer_fee_percent }}% فوق هذا المبلغ.</div>
     </div>
-    <dl class="grid grid-cols-2 gap-4 text-sm">
-      <div>
-        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">ثمن الطلب (السعر + التوصيل) — يصل البائع كاملاً</dt>
-        <dd class="font-semibold">{{ plan.principal }} IQD</dd>
-      </div>
-      <div>
-        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">منها أجرة التوصيل</dt>
-        <dd>{{ delivery_fee }} IQD</dd>
-      </div>
-      <div>
-        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">تخصمه كي كارد ({{ plan.merchant_fee_percent }}% من المكتوب)</dt>
-        <dd>{{ plan.merchant_fee_amount }} IQD</dd>
-      </div>
-      <div>
-        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">تسدّده كي كارد للمنصة</dt>
-        <dd>{{ plan.platform_settlement }} IQD</dd>
-      </div>
-      <div>
-        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">رسم المنصة ({{ plan.platform_fee_percent }}%)</dt>
-        <dd>{{ plan.platform_fee_amount }} IQD</dd>
-      </div>
-      <div>
-        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">رسوم التقسيط على الزبون إجمالاً</dt>
-        <dd>{{ plan.fees_amount }} IQD</dd>
-      </div>
-    </dl>
+    {% comment %}جدولان لا قائمة بنود: العمود الأول يجمع إلى المبلغ الذي
+    يُكتب في كي كارد ثم إلى ما يدفعه الزبون، والثاني يوزّع نفس المبلغ على
+    من يقبضه. من يراجع طلباً يحتاج أن يرى الدينار داخلاً وخارجاً، لا ستّة
+    أرقام متجاورة يجمعها بنفسه.{% endcomment %}
+    <h3 class="text-xs font-semibold mb-2 text-font-subtle-light dark:text-font-subtle-dark">كيف يتكوّن المبلغ</h3>
+    <table class="w-full text-sm mb-6">
+      <tbody>
+        <tr>
+          <td class="py-1">ثمن الجهاز (× {{ reservation.quantity }})</td>
+          <td dir="ltr" class="py-1 text-right font-mono">{{ device_amount }}</td>
+        </tr>
+        <tr>
+          <td class="py-1">+ أجرة التوصيل (مموَّلة مع الثمن، لا كاش عند الباب)</td>
+          <td dir="ltr" class="py-1 text-right font-mono">{{ financed_delivery_fee }}</td>
+        </tr>
+        <tr class="border-t border-base-200 dark:border-base-700">
+          <td class="py-1 font-semibold">= المبلغ المموَّل</td>
+          <td dir="ltr" class="py-1 text-right font-mono font-semibold">{{ plan.principal }}</td>
+        </tr>
+        <tr>
+          <td class="py-1">+ عمولة المنصة على التقسيط ({{ plan.platform_fee_percent }}%)</td>
+          <td dir="ltr" class="py-1 text-right font-mono">{{ plan.platform_fee_amount }}</td>
+        </tr>
+        <tr>
+          <td class="py-1">+ عمولة كي كارد من المنصة ({{ plan.merchant_fee_percent }}% من المكتوب)</td>
+          <td dir="ltr" class="py-1 text-right font-mono">{{ plan.merchant_fee_amount }}</td>
+        </tr>
+        {% if qi_rounding %}
+        <tr>
+          <td class="py-1">+ تدوير لأعلى دينار</td>
+          <td dir="ltr" class="py-1 text-right font-mono">{{ qi_rounding }}</td>
+        </tr>
+        {% endif %}
+        <tr class="border-t border-base-200 dark:border-base-700">
+          <td class="py-1 font-semibold">= المبلغ المكتوب في كي كارد</td>
+          <td dir="ltr" class="py-1 text-right font-mono font-semibold select-all">{{ plan.amount_at_qi|floatformat:"0u" }}</td>
+        </tr>
+        <tr>
+          <td class="py-1">+ عمولة كي كارد من الزبون ({{ plan.customer_fee_percent }}% فوق المكتوب)</td>
+          <td dir="ltr" class="py-1 text-right font-mono">{{ plan.customer_fee_amount }}</td>
+        </tr>
+        <tr class="border-t-2 border-base-300 dark:border-base-600">
+          <td class="py-2 font-bold">= يدفع الزبون كاملاً ({{ plan.monthly_amount }} × {{ plan.months }})</td>
+          <td dir="ltr" class="py-2 text-right font-mono font-bold text-base">{{ plan.total_payable }}</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3 class="text-xs font-semibold mb-2 text-font-subtle-light dark:text-font-subtle-dark">إلى أين يذهب</h3>
+    <table class="w-full text-sm">
+      <tbody>
+        <tr>
+          <td class="py-1">البائع (عند تأكيد الاستلام)</td>
+          <td dir="ltr" class="py-1 text-right font-mono">{{ seller_net }}</td>
+        </tr>
+        <tr>
+          <td class="py-1">عمولة المنصة على البيع ({{ sale_commission_percent }}%)</td>
+          <td dir="ltr" class="py-1 text-right font-mono">{{ sale_commission }}</td>
+        </tr>
+        {% if rep_commission %}
+        <tr>
+          <td class="py-1">عمولة المندوب</td>
+          <td dir="ltr" class="py-1 text-right font-mono">{{ rep_commission }}</td>
+        </tr>
+        {% endif %}
+        <tr>
+          <td class="py-1">أجرة التوصيل — لشركة التوصيل (وللمنصة عمولتها منها)</td>
+          <td dir="ltr" class="py-1 text-right font-mono">{{ financed_delivery_fee }}</td>
+        </tr>
+        <tr>
+          <td class="py-1">عمولة المنصة على التقسيط</td>
+          <td dir="ltr" class="py-1 text-right font-mono">{{ plan.platform_fee_amount }}</td>
+        </tr>
+        <tr>
+          <td class="py-1">كي كارد ({{ plan.merchant_fee_percent }}% من المنصة + {{ plan.customer_fee_percent }}% من الزبون)</td>
+          <td dir="ltr" class="py-1 text-right font-mono">{{ qi_total }}</td>
+        </tr>
+        {% if qi_rounding %}
+        <tr>
+          <td class="py-1">كسر التدوير (للمنصة)</td>
+          <td dir="ltr" class="py-1 text-right font-mono">{{ qi_rounding }}</td>
+        </tr>
+        {% endif %}
+        <tr class="border-t-2 border-base-300 dark:border-base-600">
+          <td class="py-2 font-bold">المجموع</td>
+          <td dir="ltr" class="py-2 text-right font-mono font-bold">{{ plan.total_payable }}</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="text-xs text-font-subtle-light dark:text-font-subtle-dark mt-3">
+      تسدّده كي كارد لحساب المنصة عند التفعيل: <span dir="ltr" class="font-mono">{{ plan.platform_settlement }}</span> IQD
+      — منه {{ plan.principal }} للبائع والتوصيل، والباقي عمولة المنصة عند تحرير المبلغ.
+    </p>
     {% if amount_changed %}
       <p class="text-sm mt-4" style="color:#AC3A31;font-weight:600;">
         تغيّر مبلغ الحجز منذ الطلب: الآن {{ current_amount }} IQD. لا تفعّل الخطة في كي كارد —
