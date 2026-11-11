@@ -1097,8 +1097,9 @@ def notify_installment_requested(plan):
 
     الحجز: #{reservation.id} — {item_title}
     المشتري: {plan.buyer.username}
-    المبلغ المموَّل: {plan.principal} IQD
-    القسط الشهري: {plan.monthly_amount} IQD × {plan.months}
+    ثمن الطلب: {plan.principal} IQD
+    يُكتب في كي كارد: {plan.amount_at_qi} IQD
+    القسط الشهري على الزبون: {plan.monthly_amount} IQD × {plan.months}
     الحساب: {plan.account_mask}
 
     افتح لوحة الإدارة ← خطط التقسيط ← «مراجعة» لرؤية رقم الحساب الكامل

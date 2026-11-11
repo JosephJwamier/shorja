@@ -1569,7 +1569,7 @@ class InstallmentPlanAdmin(ModelAdmin):
     وحدها — لا تعديل حقول، لأن الموافقة هي التي تُكمل الحجز وتحرّك المال.
     """
     list_display = ('reference', 'reservation_link', 'buyer', 'state',
-                    'principal', 'monthly_amount', 'months', 'card_mask',
+                    'principal', 'qi_amount', 'monthly_amount', 'months', 'card_mask',
                     'created_at', 'review_link')
     list_filter = ('state', 'provider', 'settlement_mode')
     search_fields = ('reference', 'provider_plan_id', 'buyer__username',

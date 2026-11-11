@@ -206,7 +206,11 @@ class QiCardProvider(InstallmentProvider):
         body = {
             "merchant_id": self.merchant_id,
             "order_id": plan.reference,
-            "amount": float(plan.principal),
+            # What is written to Qi is the grossed-up amount (the customer
+            # carries Qi's merchant fee and the platform's fee) — see
+            # service.pricing. Older plans carry no qi_amount: amount_at_qi
+            # falls back to the order total they were priced on.
+            "amount": float(plan.amount_at_qi),
             "currency": "IQD",
             "months": plan.months,
             "settlement_mode": plan.settlement_mode,

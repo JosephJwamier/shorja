@@ -3047,11 +3047,27 @@ class InstallmentPlan(models.Model):
                                                default=Decimal('0.00'))
     merchant_fee_amount = models.DecimalField(max_digits=12, decimal_places=2,
                                               default=Decimal('0.00'))
-    # الجزء الذي يُخصم من حصّة البائع عند التحرير. الباقي تمتصّه المنصة —
-    # حصّة محدَّدة بـ settings.INSTALLMENT_SELLER_FEE_SHARE ومجمَّدة هنا.
+    # ما يُخصم من حصّة البائع عند التحرير. صفر في كل خطة جديدة: الزبون صار
+    # يحمل نسبة المموّل من التاجر (انظر qi_amount)؛ يبقى الحقل لخطط قديمة
+    # حُسبت حين كان البائع يحملها.
     seller_fee_amount = models.DecimalField(max_digits=12, decimal_places=2,
                                             default=Decimal('0.00'))
     platform_settlement = models.DecimalField(max_digits=12, decimal_places=2,
+                                              default=Decimal('0.00'))
+
+    # المبلغ الذي يُكتب في كي كارد. أكبر من principal لأن الزبون يحمل كل
+    # الرسوم: كي كارد تخصم نسبة التاجر منه، فيُرفع بحيث يبقى للمنصة بعد
+    # الخصم principal + رسم المنصة بالضبط:
+    #     qi_amount = (principal + platform_fee) ÷ (1 − merchant_fee%)
+    # ونسبة الزبون تُضاف فوقه (total_payable). صفر في خطط قديمة — هناك كان
+    # المبلغ المكتوب هو principal نفسه (انظر amount_at_qi).
+    qi_amount = models.DecimalField(max_digits=12, decimal_places=2,
+                                    default=Decimal('0.00'))
+    # رسم المنصة على البيعة المقسّطة — نسبة من principal يدفعها الزبون ضمن
+    # أقساطه، وتُقيَّد لحساب المنصة عند تحرير المبلغ للبائع.
+    platform_fee_percent = models.DecimalField(max_digits=5, decimal_places=2,
+                                               default=Decimal('0.00'))
+    platform_fee_amount = models.DecimalField(max_digits=12, decimal_places=2,
                                               default=Decimal('0.00'))
 
     # ما استُقطع من المشتري ووصل حساب المنصة فعلاً (مجموع InstallmentCollection).
@@ -3129,6 +3145,16 @@ class InstallmentPlan(models.Model):
         return self.state in (self.STATE_ACTIVE, self.STATE_SETTLED)
 
     @property
+    def amount_at_qi(self):
+        """ما كُتب في كي كارد — أساس أي إرجاع لها."""
+        return self.qi_amount or self.principal
+
+    @property
+    def fees_amount(self):
+        """كل ما يدفعه الزبون فوق ثمن الطلب: نسبتا كي كارد ورسم المنصة."""
+        return max(self.total_payable - self.principal, Decimal('0.00'))
+
+    @property
     def outstanding(self):
         """ما لم يُطلب إرجاعه بعد من أصل التمويل — سقف أي إرجاع جديد.
 
@@ -3137,7 +3163,7 @@ class InstallmentPlan(models.Model):
         مرّة ثانية فيتجاوز مجموع الطلبات أصل التمويل.
         """
         requested = self.reversals.aggregate(total=models.Sum('amount'))['total']
-        return max(self.principal - (requested or Decimal('0.00')), Decimal('0.00'))
+        return max(self.amount_at_qi - (requested or Decimal('0.00')), Decimal('0.00'))
 
     @property
     def account_mask(self):

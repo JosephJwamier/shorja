@@ -3112,13 +3112,17 @@ class InstallmentPlanSerializer(serializers.ModelSerializer):
 
     collected_count = serializers.SerializerMethodField()
     state_label = serializers.CharField(source='get_state_display', read_only=True)
+    # Everything the buyer pays above the order total: Qi's two fees and the
+    # platform's, shown to them as one "رسوم التقسيط" line.
+    fees_amount = serializers.DecimalField(max_digits=12, decimal_places=2,
+                                           read_only=True)
 
     class Meta:
         model = InstallmentPlan
         fields = [
             'reference', 'provider', 'state', 'state_label',
             'principal', 'months', 'monthly_amount', 'total_payable',
-            'customer_fee_percent', 'customer_fee_amount',
+            'customer_fee_percent', 'customer_fee_amount', 'fees_amount',
             'collected_amount', 'collected_count',
             'card_last4', 'failure_reason',
             'expires_at', 'applied_at', 'created_at',

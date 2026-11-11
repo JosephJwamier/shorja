@@ -1,7 +1,10 @@
 {% extends "admin/base_site.html" %}
-{% load i18n %}
+{% load i18n l10n %}
 
 {% block content %}
+{% comment %}Unlocalised: the Arabic locale renders 1073685.00 as "1073685,00",
+and these are figures an admin types into Qi's platform by hand.{% endcomment %}
+{% localize off %}
 <div class="flex flex-col gap-6 max-w-3xl">
 
   <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-6">
@@ -61,22 +64,35 @@
     </dl>
 
     <h2 class="text-sm font-semibold mb-3">ما يُفعَّل في منصة كي كارد</h2>
+    <div class="rounded-default p-4 mb-4" style="background:#2E7D5714;border:1px solid #2E7D5755;">
+      <div class="text-xs mb-1">المبلغ الذي يُكتب في منصة كي كارد</div>
+      <div dir="ltr" class="text-2xl font-bold text-right select-all">{{ plan.amount_at_qi|floatformat:"0u" }}</div>
+      <div class="text-xs mt-1">الزبون يدفع {{ plan.total_payable }} IQD ({{ plan.monthly_amount }} × {{ plan.months }}) — كي كارد تضيف {{ plan.customer_fee_percent }}% فوق هذا المبلغ.</div>
+    </div>
     <dl class="grid grid-cols-2 gap-4 text-sm">
       <div>
-        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">المبلغ المموَّل (السعر + التوصيل)</dt>
-        <dd class="font-semibold text-base">{{ plan.principal }} IQD</dd>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">ثمن الطلب (السعر + التوصيل) — يصل البائع كاملاً</dt>
+        <dd class="font-semibold">{{ plan.principal }} IQD</dd>
       </div>
       <div>
         <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">منها أجرة التوصيل</dt>
         <dd>{{ delivery_fee }} IQD</dd>
       </div>
       <div>
-        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">القسط الشهري × الأشهر</dt>
-        <dd class="font-semibold">{{ plan.monthly_amount }} × {{ plan.months }}</dd>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">تخصمه كي كارد ({{ plan.merchant_fee_percent }}% من المكتوب)</dt>
+        <dd>{{ plan.merchant_fee_amount }} IQD</dd>
       </div>
       <div>
-        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">إجمالي ما يدفعه المشتري (يشمل {{ plan.customer_fee_percent }}%)</dt>
-        <dd>{{ plan.total_payable }} IQD</dd>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">تسدّده كي كارد للمنصة</dt>
+        <dd>{{ plan.platform_settlement }} IQD</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">رسم المنصة ({{ plan.platform_fee_percent }}%)</dt>
+        <dd>{{ plan.platform_fee_amount }} IQD</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">رسوم التقسيط على الزبون إجمالاً</dt>
+        <dd>{{ plan.fees_amount }} IQD</dd>
       </div>
     </dl>
     {% if amount_changed %}
@@ -100,7 +116,7 @@
       {% if plan.admin_notes %}<p class="text-sm mt-2">{{ plan.admin_notes }}</p>{% endif %}
     {% else %}
       <ol class="text-sm list-decimal pr-5 mb-5 flex flex-col gap-1">
-        <li>تحقّق في منصة كي كارد أن الحساب أعلاه مؤهّل للتقسيط بمبلغ <b>{{ plan.principal }}</b>.</li>
+        <li>تحقّق في منصة كي كارد أن الحساب أعلاه مؤهّل للتقسيط بمبلغ <b dir="ltr">{{ plan.amount_at_qi|floatformat:"0u" }}</b> — اكتب هذا المبلغ لا ثمن الطلب.</li>
         <li>اتصل بالمشتري واطلب منه الرمز الذي أرسلته كي كارد إليه.</li>
         <li>أدخل الرمز في منصة كي كارد لتفعيل الخطة.</li>
         <li>بعد التفعيل فقط: أدخل مرجع الخطة من كي كارد واضغط «فُعّل — اعتماد الحجز».</li>
@@ -157,4 +173,5 @@
   </div>
 
 </div>
+{% endlocalize %}
 {% endblock %}

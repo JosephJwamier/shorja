@@ -29,7 +29,8 @@ from core.services.installments.service import (
 )
 from core.tasks import process_expired_reservations
 from core.tests.test_installments import (
-    GOOD_CARD, PRICE, PROVIDER_SETTINGS, balance, make_reservation, make_user,
+    GOOD_CARD, MONTHLY, PRICE, PROVIDER_SETTINGS, QI_AMOUNT, balance,
+    make_reservation, make_user,
 )
 from core.throttling import InstallmentThrottle
 from core.wallet_utils import refund_to_buyer
@@ -54,7 +55,7 @@ MANUAL_SETTINGS = {
 @pytest.fixture(autouse=True)
 def manual(settings):
     settings.INSTALLMENT_PROVIDERS = MANUAL_SETTINGS
-    settings.INSTALLMENT_SELLER_FEE_SHARE = '1'
+    settings.INSTALLMENT_PLATFORM_FEE_PERCENT = '2'
     reset_cache()
     yield
     reset_cache()
@@ -103,7 +104,8 @@ def test_a_request_moves_no_money_and_keeps_the_reservation_pending():
     assert plan.account_number == ACCOUNT
     assert plan.card_last4 == '0123'
     assert plan.principal == PRICE
-    assert plan.monthly_amount == Decimal('110000')
+    assert plan.qi_amount == QI_AMOUNT
+    assert plan.monthly_amount == MONTHLY
     reservation.refresh_from_db()
     assert reservation.status == 'pending'
     assert balance(buyer) == Decimal('0.00')
@@ -336,14 +338,14 @@ def test_cancelling_an_approved_order_queues_a_manual_reversal(staff):
     assert balance(buyer) == Decimal('0.00')
     reversal = InstallmentReversal.objects.get(plan=plan)
     assert reversal.state == InstallmentReversal.STATE_PENDING
-    assert reversal.amount == PRICE
+    assert reversal.amount == QI_AMOUNT
 
     mark_reversal_done(reversal.pk, reviewed_by=staff, provider_reference='QI-5-X')
     plan.refresh_from_db()
     reversal.refresh_from_db()
     assert reversal.state == InstallmentReversal.STATE_CONFIRMED
     assert plan.state == InstallmentPlan.STATE_REVERSED
-    assert plan.reversed_amount == PRICE
+    assert plan.reversed_amount == QI_AMOUNT
 
 
 def test_a_manual_plan_cannot_be_synced(staff):
@@ -369,6 +371,11 @@ def test_the_review_page_shows_the_number_and_approves(staff):
     page = client.get(url)
     assert page.status_code == 200
     assert ACCOUNT in page.content.decode()
+    # The figure the admin types into Qi is the grossed-up one, not the price,
+    # and it is not localised into "1073685,00".
+    content = page.content.decode()
+    assert '>1073685<' in content
+    assert '1073685,00' not in content
 
     done = client.post(url, {'decision': 'approve', 'provider_reference': 'QI-9'})
     assert done.status_code == 302
@@ -470,7 +477,7 @@ def test_pending_reversals_count_against_what_is_left(api_mode):
         refund_to_buyer(reservation, Decimal('600000'))
 
     total = sum(r.amount for r in InstallmentReversal.objects.filter(plan=plan))
-    assert total == plan.principal
+    assert total == plan.amount_at_qi
 
 
 def test_the_check_does_not_reveal_who_owns_a_card(api_mode):
