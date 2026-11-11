@@ -1682,6 +1682,23 @@ class InstallmentPlanAdmin(ModelAdmin):
         return False
 
 
+@admin.register(InstallmentCollection)
+class InstallmentCollectionAdmin(ModelAdmin):
+    """الأقساط التي أبلغ المموّل عن استقطاعها — للقراءة فقط. تُعرض أيضاً
+    داخل صفحة الخطة؛ التسجيل هنا للبحث بها مباشرة."""
+    list_display = ('plan', 'sequence', 'amount', 'collected_at', 'provider_reference')
+    search_fields = ('plan__reference', 'provider_reference')
+    raw_id_fields = ('plan',)
+    list_select_related = ('plan',)
+    readonly_fields = tuple(f.name for f in InstallmentCollection._meta.fields)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
 @admin.register(InstallmentReversal)
 class InstallmentReversalAdmin(ModelAdmin):
     """طابور التسوية اليدوية.
