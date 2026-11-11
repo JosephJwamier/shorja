@@ -406,6 +406,28 @@ def test_an_order_cancelled_before_release_earns_the_platform_nothing(client):
     assert balance(platform_account()) == Decimal('0.00')
 
 
+def test_a_legacy_plan_still_takes_its_fee_off_the_seller():
+    """خطة أُنشئت قبل أن ينتقل الرسم إلى الزبون (seller_fee_amount > 0
+    و qi_amount = 0): المنصة دفعت نسبة التاجر لكي كارد من تسويتها، فالخصم
+    من البائع يبقى صحيحاً لها وحدها.
+
+    الفرع في release_reservation_payment موجود لهذه الخطط فقط — وهذا
+    الاختبار يمنع حذفه بوصفه «كوداً ميتاً»، ويمنع في الوقت نفسه أن
+    يُحاسَب البائع مرّتين لو عاد أحدٌ فأعاد تفعيله للخطط الجديدة."""
+    from core.services.commission import platform_account
+    buyer, seller = make_user('ins_lg_buyer'), make_user('ins_lg_seller')
+    reservation, plan = financed(buyer, seller)
+    # شكل الخطة القديمة: المبلغ المكتوب هو الثمن نفسه، والرسم على البائع.
+    InstallmentPlan.objects.filter(pk=plan.pk).update(
+        qi_amount=Decimal('0.00'), platform_fee_amount=Decimal('0.00'),
+        seller_fee_amount=Decimal('50000.00'))
+
+    release_reservation_payment(reservation)
+
+    assert balance(seller) == PRICE - Decimal('50000.00')
+    assert balance(platform_account()) == Decimal('50000.00')
+
+
 def test_a_wallet_sale_pays_no_installment_fee():
     """الحارس على الانحدار: الخصم الجديد لا يجوز أن يلمس بيعة غير مقسّطة."""
     from core.wallet_utils import complete_reservation
@@ -537,40 +559,86 @@ def test_a_refused_reversal_waits_for_a_human_instead_of_paying_the_buyer():
     assert plan.reversed_amount == Decimal('0.00')
 
 
-def test_what_the_buyer_already_paid_comes_back_to_them(client):
-    """الاستثناء الوحيد: الأقساط التي استُقطعت منه فعلاً ووصلت حساب المنصة
-    مالُه هو، فتعود إلى محفظته — والباقي فقط يعود للمموّل."""
+def test_upfront_pays_the_buyer_nothing_and_cancels_the_whole_plan(client):
+    """في upfront الأقساط التي استُقطعت من المشتري ذهبت لكي كارد لا للمنصة:
+    كي كارد سدّدت كامل المبلغ عند التفعيل وصارت تحصّل لنفسها.
+
+    فإعادتها له من حساب المنصة كانت تدفع مالاً لم يُقبض، وتُنقص ما يُلغى
+    عند كي كارد بالقدر نفسه — فيبقى ربع الخطة قائماً والاستقطاع من راتبه
+    مستمرّاً على طلب أُلغي. الصحيح: تُلغى الخطة كاملة، وكي كارد تُعيد له
+    ما أخذته."""
     buyer, seller = make_user('ins_cb_buyer'), make_user('ins_cb_seller')
     reservation, plan = collected_plan(buyer, seller, months_ago=2)
+    assert plan.collected_amount == 2 * MONTHLY  # المموّل أبلغ عن قسطين
 
     client.force_authenticate(user=buyer)
     response = client.post('/api/reservations/%d/cancel/' % reservation.id)
     assert response.status_code == 200, response.data
 
-    assert balance(buyer) == 2 * MONTHLY
+    assert balance(buyer) == Decimal('0.00')
     reversal = InstallmentReversal.objects.get(plan=plan)
-    # The rest of the order goes back to Qi, in Qi's terms (grossed up).
-    assert reversal.amount == ((PRICE - 2 * MONTHLY) * QI_AMOUNT / PRICE).quantize(Decimal('0.01'))
+    assert reversal.amount == QI_AMOUNT
+    assert plan.outstanding == Decimal('0.00')
 
 
-def test_two_refunds_never_return_the_collected_amount_twice():
+def test_monthly_returns_the_order_money_the_platform_holds(settings):
+    """في monthly تودع كي كارد ما تحصّله في حساب المنصة، فجزءٌ من كل قسط
+    مالُ المشتري وفي يدها.
+
+    والقسط بعبارته (يحمل نسبة كي كارد ورسم المنصة) لا بعبارة الطلب، فيُحوَّل
+    قبل أن يُعاد: 236,212 قسطان ← 200,001 ثمناً. والدليل على استقامة
+    العبارتين أن ما يبقى قائماً عند كي كارد بعد الإلغاء يساوي بالضبط ما
+    سدّده المشتري من الخطة — لا دينار أقلّ ولا أكثر."""
+    settings.INSTALLMENT_PROVIDERS = {
+        'qicard': dict(PROVIDER_SETTINGS['qicard'], SETTLEMENT_MODE='monthly')}
+    reset_cache()
+    buyer, seller = make_user('ins_mb_buyer'), make_user('ins_mb_seller')
+    reservation, plan = collected_plan(buyer, seller, months_ago=2)
+    assert plan.settlement_mode == InstallmentPlan.SETTLEMENT_MONTHLY
+
+    # القسط في monthly أصغر: لا نسبة تاجر هناك، فلا رفع للمبلغ المكتوب.
+    # ويُشتقّ المحمول من الخطة نفسها لا من ثابت upfront.
+    held = (plan.collected_amount * PRICE / plan.total_payable
+            ).quantize(Decimal('0.01'))
+    # شهران من ثمن الطلب بالضبط — استقامة التحويل بين العبارتين.
+    assert held == (PRICE / plan.months * 2).quantize(Decimal('0.01'))
+    client = APIClient()
+    client.force_authenticate(user=buyer)
+    assert client.post('/api/reservations/%d/cancel/'
+                       % reservation.id).status_code == 200
+
+    assert balance(buyer) == held
+    reversal = InstallmentReversal.objects.get(plan=plan)
+    assert reversal.amount == ((PRICE - held) * plan.amount_at_qi / PRICE
+                               ).quantize(Decimal('0.01'))
+    paid_into_the_plan = (plan.collected_amount * plan.amount_at_qi
+                          / plan.total_payable).quantize(Decimal('0.01'))
+    assert plan.amount_at_qi - reversal.amount == paid_into_the_plan
+
+
+def test_two_refunds_never_return_the_collected_amount_twice(settings):
     """استرداد جزئي ثم إلغاء: بلا عدّاد لما أُعيد، كل استرداد يدفع كامل
     المحصَّل من جديد."""
     from core.wallet_utils import refund_to_buyer
     from django.db import transaction as db_transaction
 
+    settings.INSTALLMENT_PROVIDERS = {
+        'qicard': dict(PROVIDER_SETTINGS['qicard'], SETTLEMENT_MODE='monthly')}
+    reset_cache()
     buyer, seller = make_user('ins_t_buyer'), make_user('ins_t_seller')
     reservation, plan = collected_plan(buyer, seller, months_ago=2)
+    held = (plan.collected_amount * PRICE / plan.total_payable
+            ).quantize(Decimal('0.01'))
 
     with db_transaction.atomic():
         refund_to_buyer(reservation, Decimal('150000.00'))
     with db_transaction.atomic():
         refund_to_buyer(reservation, Decimal('150000.00'))
 
-    # 220,000 محصَّلة: 150,000 ثم 70,000 فقط، والباقي إرجاع للمموّل.
-    assert balance(buyer) == 2 * MONTHLY
+    # 150,000 ثم ما بقي من المحصَّل فقط، والباقي إرجاع للمموّل.
+    assert balance(buyer) == held
     plan.refresh_from_db()
-    assert plan.buyer_refunded_amount == 2 * MONTHLY
+    assert plan.buyer_refunded_amount == held
 
 
 def test_a_wallet_order_still_refunds_to_the_wallet(client):

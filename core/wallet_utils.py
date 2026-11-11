@@ -70,15 +70,19 @@ def refund_to_buyer(reservation, amount, item=None, reason=''):
 
     So a financed refund splits in two:
 
-      to the buyer      only what the financier has already pulled from them
-                        *and* handed the platform (InstallmentPlan.
-                        collected_amount, net of what earlier refunds already
-                        returned). That is the buyer's own money, sitting in
-                        the platform's account.
+      to the buyer      only the buyer's own money that is actually sitting in
+                        the platform's account — InstallmentPlan.
+                        buyer_money_held, net of what earlier refunds already
+                        returned. Zero in the upfront settlement mode, where
+                        the financier paid the platform once and then collects
+                        for itself: those installments never passed through
+                        the platform, and the financier refunds them when the
+                        plan is reversed.
       to the financier  the rest, as a reversal: stop collecting, take the
                         financing back. Requested here, sent after this
                         transaction commits — see installments.service.
-                        request_reversal.
+                        request_reversal, which converts it into the
+                        financier's own grossed-up terms.
 
     Returns a dict of the split, for the caller's logs and tests. Call inside
     transaction.atomic(), like every other money mover here.
@@ -104,7 +108,7 @@ def refund_to_buyer(reservation, amount, item=None, reason=''):
     from .models import InstallmentPlan
     locked_plan = InstallmentPlan.objects.select_for_update().get(pk=plan.pk)
     owed_to_buyer = max(
-        locked_plan.collected_amount - locked_plan.buyer_refunded_amount,
+        locked_plan.buyer_money_held - locked_plan.buyer_refunded_amount,
         Decimal('0.00'),
     )
     to_buyer = min(amount, owed_to_buyer)

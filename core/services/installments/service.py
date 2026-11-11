@@ -715,15 +715,6 @@ def live_plan_for(reservation):
             .order_by('-applied_at').first())
 
 
-def seller_fee_for(reservation):
-    """What the seller owes for having this sale financed — deducted from
-    their side at release, exactly like the platform's commission. Zero in the
-    monthly settlement mode, where the financier charges the merchant nothing.
-    """
-    plan = live_plan_for(reservation)
-    return plan.seller_fee_amount if plan else Decimal('0.00')
-
-
 def request_reversal(plan, amount, reason=''):
     """Records that `amount` must go back to the financier, and sends it once
     the surrounding transaction commits.
