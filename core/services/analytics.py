@@ -91,6 +91,14 @@ def _withdrawal_stats():
     return {'pending_count': agg['count'], 'pending_amount': agg['total']}
 
 
+def _installment_request_stats():
+    from core.models import InstallmentPlan
+    agg = InstallmentPlan.objects.filter(state=InstallmentPlan.STATE_REQUESTED).aggregate(
+        count=Count('id'), total=Coalesce(Sum('principal'), Decimal('0.00'))
+    )
+    return {'pending_count': agg['count'], 'pending_amount': agg['total']}
+
+
 def _live_now_stats():
     agg = LiveSession.objects.filter(status='live').aggregate(
         sessions=Count('id'), viewers=Coalesce(Sum('current_viewer_count'), 0)
@@ -219,6 +227,7 @@ def _compute_dashboard_data():
         'gmv': _gmv_stats(now),
         'disputes': _dispute_stats(now),
         'withdrawals': _withdrawal_stats(),
+        'installment_requests': _installment_request_stats(),
         'live_now': _live_now_stats(),
         'commissions': _representative_commission_stats(now),
         'active_stores': _active_stores_count(),

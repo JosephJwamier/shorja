@@ -2971,14 +2971,28 @@ class InstallmentPlan(models.Model):
     جدول أقساط لا على معادلة.
     """
 
+    # المسار اليدوي (QICARD_MODE=manual، الافتراضي): المشتري يرسل رقم حسابه
+    # فيُنشأ السطر `requested`، والإدارة تتحقّق وتفعّل الخطة في منصة كي كارد
+    # ثم توافق هنا فيصير `active` — أو ترفض فيصير `rejected`.
+    STATE_REQUESTED = 'requested'
+    STATE_REJECTED = 'rejected'
+    STATE_CANCELLED = 'cancelled'
+    # المسار الآلي (QICARD_MODE=api): عرضٌ، ثم «قيد التأكيد» أثناء نداء
+    # كي كارد — حالة وسيطة تحجز العرض لطلبٍ واحد فلا يُنشئ طلبان متزامنان
+    # خطّتين عند المموّل.
     STATE_QUOTED = 'quoted'
+    STATE_CONFIRMING = 'confirming'
     STATE_ACTIVE = 'active'
     STATE_SETTLED = 'settled'
     STATE_REVERSED = 'reversed'
     STATE_FAILED = 'failed'
     STATE_EXPIRED = 'expired'
     STATE_CHOICES = [
+        (STATE_REQUESTED, 'طلب — بانتظار مراجعة الإدارة'),
+        (STATE_REJECTED, 'رفضته الإدارة'),
+        (STATE_CANCELLED, 'أُلغي الطلب'),
         (STATE_QUOTED, 'عرض — بانتظار تأكيد المشتري'),
+        (STATE_CONFIRMING, 'قيد التأكيد مع المموّل'),
         (STATE_ACTIVE, 'نشطة — الاستقطاع جارٍ'),
         (STATE_SETTLED, 'مسدّدة بالكامل'),
         (STATE_REVERSED, 'ملغاة ومُرجَعة للمموّل'),
@@ -3052,11 +3066,25 @@ class InstallmentPlan(models.Model):
     buyer_refunded_amount = models.DecimalField(max_digits=12, decimal_places=2,
                                                 default=Decimal('0.00'))
 
+    # رقم حساب كي كارد كما أرسله المشتري — المسار اليدوي وحده يحفظه، لأن
+    # الإدارة تحتاجه لتتحقّق وتفعّل الخطة في منصة كي كارد. يُمحى لحظة
+    # القرار (موافقة أو رفض أو إلغاء) ولا يبقى منه إلا آخر أربعة أرقام؛
+    # ولا يظهر في أي استجابة API ولا في بريد ولا في لوج.
+    account_number = models.CharField(max_length=32, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,
+        blank=True, related_name='reviewed_installment_plans'
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    admin_notes = models.TextField(blank=True)
+
     card_last4 = models.CharField(max_length=4, blank=True)
     card_holder_name = models.CharField(max_length=120, blank=True)
     # رمز المموّل للبطاقة، بديل الرقم في كل نداء لاحق.
     card_token = models.CharField(max_length=255, blank=True)
 
+    # مرجع الخطة عند المموّل: يعود من نداء الإنشاء في المسار الآلي، وتُدخله
+    # الإدارة من منصة كي كارد عند الموافقة في المسار اليدوي.
     provider_plan_id = models.CharField(max_length=128, blank=True, db_index=True)
     last_provider_response = models.JSONField(null=True, blank=True)
     failure_reason = models.CharField(max_length=255, blank=True)
@@ -3102,8 +3130,18 @@ class InstallmentPlan(models.Model):
 
     @property
     def outstanding(self):
-        """ما لم يُستردّ بعد من أصل التمويل — سقف أي إرجاع للمموّل."""
-        return max(self.principal - self.reversed_amount, Decimal('0.00'))
+        """ما لم يُطلب إرجاعه بعد من أصل التمويل — سقف أي إرجاع جديد.
+
+        يُطرح كل سطر إرجاع لا المؤكَّد وحده: إرجاعٌ معلّق أو مرفوض ما زال
+        مطلوباً من المموّل، وتجاهله يجعل الاسترداد التالي يطلب المبلغ نفسه
+        مرّة ثانية فيتجاوز مجموع الطلبات أصل التمويل.
+        """
+        requested = self.reversals.aggregate(total=models.Sum('amount'))['total']
+        return max(self.principal - (requested or Decimal('0.00')), Decimal('0.00'))
+
+    @property
+    def account_mask(self):
+        return '****%s' % self.card_last4 if self.card_last4 else '—'
 
 
 class InstallmentCollection(models.Model):
@@ -3155,7 +3193,7 @@ class InstallmentReversal(models.Model):
     STATE_CONFIRMED = 'confirmed'
     STATE_FAILED = 'failed'
     STATE_CHOICES = [
-        (STATE_PENDING, 'مُرسَل للمموّل'),
+        (STATE_PENDING, 'مُرسَل للمموّل / بانتظار التنفيذ'),
         (STATE_CONFIRMED, 'أكّده المموّل'),
         (STATE_FAILED, 'فشل — تسوية يدوية'),
     ]

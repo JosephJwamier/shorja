@@ -31,8 +31,12 @@ from core.wallet_utils import release_reservation_payment
 
 pytestmark = pytest.mark.django_db
 
+# These tests drive the automated path (check -> confirm against Qi's API,
+# answered by the sandbox). The manual path, the default in production, is
+# covered in test_installments_manual.py.
 PROVIDER_SETTINGS = {
     'qicard': {
+        'MODE': 'api',
         'BASE_URL': 'https://api-test.qi.example/v1',
         'MERCHANT_ID': 'shorjeh',
         'API_KEY': 'test_key',

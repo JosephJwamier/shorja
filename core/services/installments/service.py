@@ -45,7 +45,7 @@ from core.models import (
 )
 
 from .base import InstallmentError, NotEligible
-from .cards import last4, validate
+from .cards import last4, validate, validate_account
 from .registry import default_provider, get_provider
 
 logger = logging.getLogger(__name__)
@@ -90,6 +90,9 @@ def options():
         'min_amount': str(terms.min_amount),
         'max_amount': str(terms.max_amount),
         'settlement_mode': terms.settlement_mode,
+        # يحدّد للتطبيق أيّ مسار يعرض: 'manual' = رقم الحساب ثم «سنتصل بك»،
+        # 'api' = فحص البطاقة والجدول ثم التأكيد الفوري.
+        'mode': provider.mode,
     }
 
 
@@ -208,14 +211,20 @@ def financed_amount(reservation):
             ).quantize(TWO_PLACES, ROUND_HALF_UP)
 
 
-def _assert_financeable(reservation, principal, provider, user=None):
-    """Everything about this order that can rule financing out, in one place."""
+def _assert_financeable(reservation, principal, provider, user=None,
+                        check_expiry=True):
+    """Everything about this order that can rule financing out, in one place.
+
+    `check_expiry=False` is for the admin's approval of a manual request: the
+    buyer asked in time, and the reservation's clock stopped while the request
+    waited for a phone call (see tasks.process_expired_reservations).
+    """
     if user is not None and reservation.buyer_id != user.id:
         raise InstallmentNotAllowed('not_buyer', 'هذا الحجز ليس لك')
     if reservation.status != 'pending':
         raise InstallmentNotAllowed(
             'not_pending', 'لا يمكن التقسيط — حالة الحجز %s' % reservation.status)
-    if timezone.now() > reservation.expires_at:
+    if check_expiry and timezone.now() > reservation.expires_at:
         raise InstallmentNotAllowed('expired', 'انتهت مدة الحجز')
     if not reservation.delivery_location_id:
         raise InstallmentNotAllowed('no_address', 'أضف عنوان التسليم قبل التقسيط')
@@ -250,6 +259,8 @@ def confirm(*, user, reference):
             .get(reference=reference, buyer=user))
     if plan.applied_at:
         return plan
+    if plan.state == InstallmentPlan.STATE_CONFIRMING:
+        raise InstallmentNotAllowed('in_progress', 'التأكيد قيد التنفيذ — انتظر لحظة')
     if plan.state != InstallmentPlan.STATE_QUOTED:
         raise InstallmentNotAllowed('stale_quote', 'انتهت صلاحية العرض — أعد الفحص')
     if timezone.now() > plan.expires_at:
@@ -271,7 +282,33 @@ def confirm(*, user, reference):
         raise InstallmentNotAllowed('terms_changed',
                                     'تغيّر المبلغ الإجمالي — أعد فحص التقسيط')
 
-    created = provider.create_plan(plan=plan)
+    # Claim the quote before the financier is called. Two requests racing
+    # here (a double tap, a retried POST) both passed the checks above; only
+    # the one whose UPDATE flips quoted -> confirming goes on to create a
+    # plan at Qi. Without this both did, and the loser then found the plan
+    # applied and returned quietly — leaving a second live plan at Qi, i.e.
+    # ten more months of salary deductions for nothing.
+    claimed = (InstallmentPlan.objects
+               .filter(pk=plan.pk, state=InstallmentPlan.STATE_QUOTED,
+                       applied_at__isnull=True)
+               .update(state=InstallmentPlan.STATE_CONFIRMING,
+                       updated_at=timezone.now()))
+    if not claimed:
+        plan.refresh_from_db()
+        if plan.applied_at:
+            return plan
+        raise InstallmentNotAllowed('in_progress', 'التأكيد قيد التنفيذ — انتظر لحظة')
+
+    try:
+        created = provider.create_plan(plan=plan)
+    except Exception:
+        # Nothing was created that we know of. Hand the quote back so the
+        # buyer can retry; the retry sends the same order_id, which is what
+        # lets Qi recognise it if the first call did land on their side.
+        (InstallmentPlan.objects
+         .filter(pk=plan.pk, state=InstallmentPlan.STATE_CONFIRMING)
+         .update(state=InstallmentPlan.STATE_QUOTED, updated_at=timezone.now()))
+        raise
 
     try:
         with transaction.atomic():
@@ -296,8 +333,6 @@ def _apply(plan, created, reservation):
     buyer's wallet and `complete_reservation` immediately takes it into escrow.
     The wallet is a ledger, not a stop — see the module docstring.
     """
-    from core.wallet_utils import complete_reservation
-
     plan.provider_plan_id = created.provider_plan_id
     plan.last_provider_response = created.raw
     if created.months:
@@ -308,6 +343,15 @@ def _apply(plan, created, reservation):
         plan.total_payable = _money(created.total_payable)
         plan.customer_fee_amount = max(plan.total_payable - plan.principal,
                                        Decimal('0.00'))
+    _fund_and_complete(plan, reservation)
+
+
+def _fund_and_complete(plan, reservation):
+    """Credit the financed amount, complete the reservation with it, and mark
+    the plan active. Shared by the API confirm and the admin's approval, so a
+    financed order reaches escrow the same way whichever path activated it.
+    Caller holds the plan's row lock inside transaction.atomic()."""
+    from core.wallet_utils import complete_reservation
 
     Transaction.objects.create(
         user=plan.buyer,
@@ -351,6 +395,214 @@ def _reverse_orphan(plan, created):
 
 
 # ---------------------------------------------------------------------------
+# The manual path — a person activates the plan on Qi's platform
+# ---------------------------------------------------------------------------
+#
+#   buyer   POST /installments/request/  (reservation + Qi account number)
+#           -> plan `requested`; the app says «سيتم الاتصال بك»
+#   admin   checks the account is eligible on Qi's platform, phones the buyer,
+#           asks for the code Qi just texted them, enters it on Qi's platform
+#           -> the plan is live at Qi
+#   admin   approves here -> the reservation completes exactly as a wallet
+#           purchase would (escrow, delivery, release) — `_fund_and_complete`
+#
+# No money moves and nothing is committed until the approval. The account
+# number is kept only while the request is open: the admin needs it for the
+# phone call, and nobody needs it after the decision.
+
+class InstallmentReviewError(Exception):
+    """An approval or rejection that cannot go through. The message is meant
+    for the admin and is shown as-is."""
+
+
+def review_hours():
+    try:
+        return max(int(getattr(settings, 'INSTALLMENT_REVIEW_HOURS', 72)), 1)
+    except (TypeError, ValueError):
+        return 72
+
+
+def open_request_for(reservation):
+    return (InstallmentPlan.objects
+            .filter(reservation=reservation, state=InstallmentPlan.STATE_REQUESTED)
+            .first())
+
+
+def request_manual(*, user, reservation, account_number):
+    """The buyer asks to pay this order in installments. Returns the plan.
+
+    Idempotent per reservation: asking again while a request is open updates
+    the account number on it instead of queueing a second phone call.
+    """
+    provider = default_provider()
+    if provider is None or not provider.is_configured or not provider.is_manual:
+        raise InstallmentNotAllowed('unavailable', 'التقسيط غير متاح حالياً')
+
+    number = validate_account(account_number)
+    principal = financed_amount(reservation)
+    _assert_financeable(reservation, principal, provider, user=user)
+
+    terms = provider.terms
+    customer_fee = _percent_of(principal, terms.customer_fee_percent)
+    total_payable = principal + customer_fee
+    merchant_fee = _percent_of(principal, terms.merchant_fee_percent)
+    values = dict(
+        provider=provider.name,
+        settlement_mode=terms.settlement_mode,
+        principal=principal,
+        months=terms.months,
+        customer_fee_percent=terms.customer_fee_percent,
+        customer_fee_amount=customer_fee,
+        total_payable=total_payable,
+        monthly_amount=_monthly(total_payable, terms.months),
+        merchant_fee_percent=terms.merchant_fee_percent,
+        merchant_fee_amount=merchant_fee,
+        seller_fee_amount=(merchant_fee * _seller_fee_share()).quantize(
+            TWO_PLACES, ROUND_HALF_UP),
+        platform_settlement=principal - merchant_fee,
+        account_number=number,
+        card_last4=last4(number),
+        expires_at=timezone.now() + timedelta(hours=review_hours()),
+    )
+
+    from core.models import Reservation
+    with transaction.atomic():
+        # The reservation's lock serialises two submits of the same form, so
+        # a double tap cannot queue two requests (MySQL ignores the partial
+        # unique constraints on this table, so the database will not).
+        Reservation.objects.select_for_update().get(pk=reservation.pk)
+        plan = open_request_for(reservation)
+        created = plan is None
+        if created:
+            plan = InstallmentPlan.objects.create(
+                reservation=reservation, buyer=user,
+                reference='INS-%s' % uuid.uuid4().hex[:20],
+                state=InstallmentPlan.STATE_REQUESTED, **values)
+        else:
+            for field, value in values.items():
+                setattr(plan, field, value)
+            plan.save()
+
+    if created:
+        transaction.on_commit(lambda: _notify('notify_installment_requested', plan))
+    logger.info('installment request %s for reservation %s (%s)',
+                plan.reference, reservation.pk, plan.account_mask)
+    return plan
+
+
+def approve_request(plan_id, *, reviewed_by, provider_reference='', notes=''):
+    """The admin activated the plan on Qi's platform; complete the order.
+
+    Everything happens under the plan's row lock and in one transaction, and
+    nothing here calls Qi — so a double click approves once, and an approval
+    that cannot complete (the reservation was cancelled, the stock went, the
+    price moved) changes nothing and says why.
+    """
+    provider_reference = (provider_reference or '').strip()
+    if not provider_reference:
+        # Without Qi's reference a later cancellation cannot be matched to the
+        # plan on their platform, and the buyer's deductions would carry on.
+        raise InstallmentReviewError('مرجع الخطة في كي كارد إلزامي للاعتماد')
+    with transaction.atomic():
+        plan = (InstallmentPlan.objects.select_for_update()
+                .select_related('reservation', 'reservation__item')
+                .get(pk=plan_id))
+        if plan.applied_at:
+            return plan
+        if plan.state != InstallmentPlan.STATE_REQUESTED:
+            raise InstallmentReviewError(
+                'هذا الطلب ليس بانتظار المراجعة (%s)' % plan.get_state_display())
+
+        reservation = plan.reservation
+        try:
+            _assert_financeable(reservation, plan.principal,
+                                get_provider(plan.provider), check_expiry=False)
+        except InstallmentNotAllowed as exc:
+            raise InstallmentReviewError(exc.message_ar)
+        if financed_amount(reservation) != plan.principal:
+            raise InstallmentReviewError(
+                'تغيّر المبلغ الإجمالي للحجز منذ الطلب (%s بدل %s) — ارفض الطلب '
+                'واطلب من المشتري إعادة الإرسال'
+                % (_display(financed_amount(reservation)), _display(plan.principal)))
+
+        plan.provider_plan_id = provider_reference[:128]
+        plan.reviewed_by = reviewed_by
+        plan.reviewed_at = timezone.now()
+        plan.admin_notes = notes or ''
+        plan.account_number = ''
+        try:
+            _fund_and_complete(plan, reservation)
+        except ValueError as exc:
+            raise InstallmentReviewError('تعذّر إكمال الحجز: %s' % exc)
+
+    transaction.on_commit(lambda: _notify('notify_installment_approved', plan))
+    return plan
+
+
+def reject_request(plan_id, *, reviewed_by, notes):
+    """Not eligible, unreachable, or the buyer changed their mind on the phone.
+
+    The reservation goes back to waiting for an ordinary payment. If its clock
+    ran out while the request was open, it gets a day — the wait was ours.
+    """
+    notes = (notes or '').strip()
+    if not notes:
+        raise InstallmentReviewError('سبب الرفض إلزامي')
+    from core.models import Reservation
+    with transaction.atomic():
+        plan = InstallmentPlan.objects.select_for_update().get(pk=plan_id)
+        if plan.state != InstallmentPlan.STATE_REQUESTED:
+            raise InstallmentReviewError(
+                'هذا الطلب ليس بانتظار المراجعة (%s)' % plan.get_state_display())
+        plan.state = InstallmentPlan.STATE_REJECTED
+        plan.failure_reason = notes[:255]
+        plan.admin_notes = notes
+        plan.reviewed_by = reviewed_by
+        plan.reviewed_at = timezone.now()
+        plan.account_number = ''
+        plan.save()
+
+        reservation = Reservation.objects.select_for_update().get(pk=plan.reservation_id)
+        grace = timezone.now() + timedelta(hours=24)
+        if reservation.status == 'pending' and reservation.expires_at < grace:
+            reservation.expires_at = grace
+            reservation.save(update_fields=['expires_at'])
+
+    transaction.on_commit(lambda: _notify('notify_installment_rejected', plan))
+    return plan
+
+
+def cancel_request(plan, reason=''):
+    """Withdraws an open request — the buyer changed their mind, or the
+    reservation itself was cancelled. Call inside transaction.atomic()."""
+    locked = InstallmentPlan.objects.select_for_update().get(pk=plan.pk)
+    if locked.state != InstallmentPlan.STATE_REQUESTED:
+        return locked
+    locked.state = InstallmentPlan.STATE_CANCELLED
+    locked.failure_reason = (reason or 'ألغاه المشتري')[:255]
+    locked.account_number = ''
+    locked.save()
+    return locked
+
+
+def cancel_open_requests(reservation, reason):
+    for plan in InstallmentPlan.objects.filter(
+            reservation=reservation, state=InstallmentPlan.STATE_REQUESTED):
+        cancel_request(plan, reason)
+
+
+def _notify(name, plan):
+    """Never allowed to fail the money movement it reports."""
+    from core import notifications
+    try:
+        plan = InstallmentPlan.objects.select_related(
+            'buyer', 'reservation', 'reservation__item').get(pk=plan.pk)
+        getattr(notifications, name)(plan)
+    except Exception:
+        logger.exception('installment notification %s failed for %s', name, plan.reference)
+
+
+# ---------------------------------------------------------------------------
 # Collections — what the financier has actually taken
 # ---------------------------------------------------------------------------
 
@@ -362,6 +614,9 @@ def sync_plan(plan):
     re-listing each converge on the same rows instead of double-counting.
     """
     provider = get_provider(plan.provider)
+    if provider.is_manual:
+        raise InstallmentError('المسار اليدوي لا يزامن مع كي كارد — '
+                               'الحالة تُدار من لوحة الإدارة')
     status = provider.fetch_plan(plan=plan)
 
     with transaction.atomic():
@@ -379,10 +634,16 @@ def sync_plan(plan):
         locked.collected_amount = sum(
             (c.amount for c in locked.collections.all()), Decimal('0.00'))
         locked.last_provider_response = status.raw
-        # A reversed plan stays reversed: the financier may still report the
-        # installments it took before the cancellation, and that is history,
-        # not a reason to call the plan active again.
-        if locked.state != InstallmentPlan.STATE_REVERSED:
+        # Only a live plan takes its state from the financier. A reversed plan
+        # stays reversed (Qi may still list what it took before the
+        # cancellation — that is history). And a failed or expired one must
+        # never come back: a plan that failed after creation was never paid
+        # into escrow, so turning it 'active' would make live_plan_for() call
+        # an unpaid reservation financed — the seller would be charged the
+        # installment fee and a later refund would be sent to Qi.
+        if locked.is_live and status.state in (InstallmentPlan.STATE_ACTIVE,
+                                               InstallmentPlan.STATE_SETTLED,
+                                               InstallmentPlan.STATE_REVERSED):
             locked.state = status.state
         locked.save(update_fields=['collected_amount', 'state',
                                    'last_provider_response', 'updated_at'])
@@ -442,8 +703,38 @@ def request_reversal(plan, amount, reason=''):
         return None
     reversal = InstallmentReversal.objects.create(
         plan=locked, amount=amount, reason=reason[:255])
-    transaction.on_commit(lambda: execute_reversal(reversal.pk))
+    if _is_manual(locked):
+        # No API to call: the row waits in the admin's queue until someone
+        # cancels the plan on Qi's platform and marks it done
+        # (mark_reversal_done).
+        logger.info('installment reversal %s queued for manual handling', reversal.pk)
+    else:
+        transaction.on_commit(lambda: execute_reversal(reversal.pk))
     return reversal
+
+
+def mark_reversal_done(reversal_id, *, reviewed_by=None, provider_reference=''):
+    """The admin cancelled the plan (or the refunded part of it) on Qi's own
+    platform. Records it exactly as an accepted API reversal would be."""
+    with transaction.atomic():
+        row = (InstallmentReversal.objects.select_for_update()
+               .select_related('plan').get(pk=reversal_id))
+        if row.state == InstallmentReversal.STATE_CONFIRMED:
+            return row
+        plan = InstallmentPlan.objects.select_for_update().get(pk=row.plan_id)
+        row.state = InstallmentReversal.STATE_CONFIRMED
+        row.provider_reference = (provider_reference or row.provider_reference)[:128]
+        row.failure_reason = ''
+        row.raw = {'manual': True,
+                   'by': getattr(reviewed_by, 'username', None),
+                   'at': timezone.now().isoformat()}
+        row.save(update_fields=['state', 'provider_reference', 'failure_reason',
+                                'raw', 'updated_at'])
+        plan.reversed_amount += row.amount
+        if plan.reversed_amount >= plan.principal:
+            plan.state = InstallmentPlan.STATE_REVERSED
+        plan.save(update_fields=['reversed_amount', 'state', 'updated_at'])
+    return row
 
 
 def execute_reversal(reversal_id):
@@ -461,6 +752,8 @@ def execute_reversal(reversal_id):
         return reversal
 
     plan = reversal.plan
+    if _is_manual(plan):
+        return reversal
     try:
         provider = get_provider(plan.provider)
         result = provider.reverse_plan(plan=plan, amount=reversal.amount,
@@ -499,6 +792,19 @@ def execute_reversal(reversal_id):
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+def _is_manual(plan):
+    """A plan a person activated on Qi's platform is unwound by a person too.
+
+    Read from the plan, not from settings: every manual plan carries
+    `reviewed_at` (or is still a request), so a plan approved by hand stays a
+    manual plan after QICARD_MODE later flips to api — and an API plan is
+    never parked in the manual queue when the mode flips back.
+    """
+    return plan.reviewed_at is not None or plan.state in (
+        InstallmentPlan.STATE_REQUESTED, InstallmentPlan.STATE_REJECTED,
+        InstallmentPlan.STATE_CANCELLED)
+
 
 def _money(value):
     return Decimal(str(value or '0')).quantize(TWO_PLACES, ROUND_HALF_UP)

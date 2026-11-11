@@ -445,6 +445,9 @@ REST_FRAMEWORK = {
         # أوسع — وإلا حُبس من أخطأ الرمز مرّة.
         'otp_send': '10/hour',
         'otp_verify': '30/hour',     # per email — a 6-digit code needs this
+        # فحص التقسيط يُجيب «هذه بطاقة كي كارد حقيقية» لأي رقم؛ بلا حدّ يصير
+        # أداة لتجربة الأرقام. عشرة في الساعة أكثر مما يحتاجه مشترٍ أخطأ.
+        'installments': '10/hour',   # per user: installments/check|request
     },
 }
 
@@ -966,6 +969,12 @@ APP_DEEP_LINK_SCHEME = os.environ.get('APP_DEEP_LINK_SCHEME', 'balla')
 # =============================================================================
 INSTALLMENT_PROVIDERS = {
     'qicard': {
+        # manual (الافتراضي): المشتري يرسل رقم حسابه، والإدارة تتحقّق وتتصل
+        # به وتفعّل الخطة في منصة كي كارد ثم توافق من لوحة الإدارة.
+        # api: الفحص والتأكيد الآلي عبر API كي كارد — بانتظار وثيقتهم.
+        'MODE': os.environ.get('QICARD_MODE', 'manual'),
+        # 0 يُخفي التقسيط من التطبيق كلياً.
+        'ENABLED': os.environ.get('QICARD_ENABLED', '1'),
         'BASE_URL': os.environ.get('QICARD_BASE_URL', ''),
         'MERCHANT_ID': os.environ.get('QICARD_MERCHANT_ID', ''),
         'CLIENT_ID': os.environ.get('QICARD_CLIENT_ID', ''),
@@ -991,6 +1000,10 @@ INSTALLMENT_PROVIDERS = {
 # و0.5 مثلاً = المنصة تمتصّ نصفها من عمولتها لتشجيع التجار على التقسيط في
 # فترة الإطلاق. تُجمَّد على الخطة لحظة التأكيد، فتغييرها لا يمسّ خطّة جارية.
 INSTALLMENT_SELLER_FEE_SHARE = os.environ.get('INSTALLMENT_SELLER_FEE_SHARE', '1')
+
+# المدّة المتوقّعة لمراجعة طلب تقسيط يدوي (اتصال الإدارة بالمشتري). للعرض
+# فقط: الحجز لا ينتهي ما دام طلبه مفتوحاً، والرفض يمنحه يوماً بعدها.
+INSTALLMENT_REVIEW_HOURS = int(os.environ.get('INSTALLMENT_REVIEW_HOURS', '72'))
 
 # =============================================================================
 # Platform commission — what الشورجة keeps from each sale, taken from the

@@ -30,10 +30,16 @@ def process_expired_reservations():
     from .models import ItemVariant, Reservation, Transaction
 
     now = timezone.now()
+    # A reservation with an open installment request is not expiring: the
+    # buyer chose a payment in time and is waiting for our phone call. The
+    # admin's rejection gives the clock back (installments.service.
+    # reject_request).
     expired_ids = list(Reservation.objects.filter(
         status='pending',
         expires_at__lt=now,
         auction__isnull=True
+    ).exclude(
+        installment_plans__state='requested'
     ).values_list('id', flat=True))
 
     processed_count = 0

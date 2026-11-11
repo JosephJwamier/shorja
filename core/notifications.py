@@ -1077,3 +1077,70 @@ def notify_seller_to_hand_over(reservation):
     except WevlixError as e:
         logger.warning('handover reminder WhatsApp failed for %s: %s',
                        reservation.id, e)
+
+
+# =============================================================================
+# التقسيط اليدوي عبر كي كارد
+# -----------------------------------------------------------------------------
+# رقم الحساب لا يظهر في أي من هذه الرسائل: البريد والإشعار يخرجان من
+# خادمنا إلى أطراف لا نتحكّم بها. الإدارة تقرؤه من لوحة الإدارة وحدها.
+# =============================================================================
+
+def notify_installment_requested(plan):
+    """طلب تقسيط جديد: الإدارة تتصل بالمشتري، والمشتري يعرف أن ذلك قادم."""
+    reservation = plan.reservation
+    item_title = bidi_isolate(reservation.item.title)
+
+    subject = f"طلب تقسيط جديد — حجز #{reservation.id}"
+    message = f"""
+    طلب تقسيط جديد عبر كي كارد بانتظار المراجعة:
+
+    الحجز: #{reservation.id} — {item_title}
+    المشتري: {plan.buyer.username}
+    المبلغ المموَّل: {plan.principal} IQD
+    القسط الشهري: {plan.monthly_amount} IQD × {plan.months}
+    الحساب: {plan.account_mask}
+
+    افتح لوحة الإدارة ← خطط التقسيط ← «مراجعة» لرؤية رقم الحساب الكامل
+    ورقم هاتف المشتري.
+    """
+    for admin_email in getattr(settings, 'ADMIN_EMAILS', []):
+        NotificationService.send_email(admin_email, subject, message)
+
+    notify_push(
+        plan.buyer,
+        'استلمنا طلب التقسيط',
+        f'سيتم الاتصال بك لإكمال إجراءات تقسيط "{item_title}" عبر كي كارد.',
+        data={'type': 'installment_requested',
+              'reservation_id': str(reservation.id),
+              'reference': plan.reference},
+    )
+
+
+def notify_installment_approved(plan):
+    """فُعّل التقسيط واكتمل الحجز. إشعار اكتمال الحجز العادي للطرفين يُرسَل
+    معه — البائع لا يهمّه من موّل البيعة."""
+    reservation = plan.reservation
+    notify_reservation_completed(reservation)
+    notify_push(
+        plan.buyer,
+        'تم تفعيل التقسيط',
+        f'اكتمل حجزك لـ "{bidi_isolate(reservation.item.title)}" بالتقسيط — '
+        f'{plan.monthly_amount} IQD شهرياً لمدة {plan.months} أشهر.',
+        data={'type': 'installment_approved',
+              'reservation_id': str(reservation.id),
+              'reference': plan.reference},
+    )
+
+
+def notify_installment_rejected(plan):
+    reservation = plan.reservation
+    notify_push(
+        plan.buyer,
+        'تعذّر تفعيل التقسيط',
+        f'لم يُفعَّل التقسيط لحجز "{bidi_isolate(reservation.item.title)}": '
+        f'{plan.failure_reason}. يمكنك إكمال الحجز بطريقة دفع أخرى.',
+        data={'type': 'installment_rejected',
+              'reservation_id': str(reservation.id),
+              'reference': plan.reference},
+    )
