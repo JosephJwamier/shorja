@@ -76,6 +76,24 @@ def validate(raw, *, lengths=None, require_luhn=None):
     return number
 
 
+# رقم حساب كي كارد في المسار اليدوي. لا Luhn هنا: قد يكون رقم بطاقة أو رقم
+# حساب، والإدارة تتحقّق منه مع كي كارد قبل أي شيء — فرفض رقم صحيح بقاعدة
+# لا تنطبق عليه أسوأ من رقم خاطئ تكتشفه الإدارة بمكالمة.
+ACCOUNT_MIN_LENGTH = 10
+ACCOUNT_MAX_LENGTH = 20
+
+
+def validate_account(raw):
+    """Returns the normalized account number, or raises [InvalidCardNumber]."""
+    number = normalize(raw)
+    if not number.isdigit():
+        raise InvalidCardNumber("رقم الحساب يجب أن يكون أرقاماً فقط")
+    if not ACCOUNT_MIN_LENGTH <= len(number) <= ACCOUNT_MAX_LENGTH:
+        raise InvalidCardNumber("رقم الحساب يجب أن يكون بين %d و%d رقماً"
+                                % (ACCOUNT_MIN_LENGTH, ACCOUNT_MAX_LENGTH))
+    return number
+
+
 def last4(number):
     return normalize(number)[-4:]
 
@@ -109,7 +127,9 @@ def scrub_sentry_event(event, hint=None):
         data = (event.get("request") or {}).get("data")
         if isinstance(data, dict):
             for key in list(data):
-                if "card_number" in key.lower() or "card" == key.lower():
+                lowered = key.lower()
+                if ("card_number" in lowered or lowered == "card"
+                        or "account_number" in lowered):
                     data[key] = "[redacted]"
     except Exception:  # pragma: no cover - never break error reporting
         pass

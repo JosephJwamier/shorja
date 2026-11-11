@@ -1561,31 +1561,108 @@ class InstallmentCollectionInline(TabularInline):
 
 @admin.register(InstallmentPlan)
 class InstallmentPlanAdmin(ModelAdmin):
-    """خطط التقسيط — للقراءة لا للتحرير.
+    """خطط التقسيط وطلباته.
 
-    كل رقم هنا مجمَّد لحظة التأكيد أو آتٍ من المموّل، وتعديله بيدٍ يفصل
-    السطر عمّا تحمله كي كارد فعلاً — وهو السطر نفسه الذي يُحسب منه ما
-    يُعاد للمشتري عند الإلغاء. الزرّ الوحيد المسموح هو إعادة السؤال
-    (مزامنة)، وهي قراءة موثّقة من المموّل لا كتابة.
+    في المسار اليدوي هذا هو مكان العمل: كل سطر «بانتظار مراجعة الإدارة»
+    مشترٍ ينتظر مكالمة. زرّ «مراجعة» يفتح رقم الحساب وتفاصيل الحجز ورقم
+    الهاتف، والموافقة أو الرفض يمرّان من services.installments.service
+    وحدها — لا تعديل حقول، لأن الموافقة هي التي تُكمل الحجز وتحرّك المال.
     """
-    list_display = ('reference', 'buyer', 'state', 'principal', 'months',
-                    'monthly_amount', 'collected_amount', 'card_mask',
-                    'settlement_mode', 'created_at')
-    list_filter = ('provider', 'state', 'settlement_mode')
+    list_display = ('reference', 'reservation_link', 'buyer', 'state',
+                    'principal', 'qi_amount', 'monthly_amount', 'months', 'card_mask',
+                    'created_at', 'review_link')
+    list_filter = ('state', 'provider', 'settlement_mode')
     search_fields = ('reference', 'provider_plan_id', 'buyer__username',
-                     'card_last4', 'reservation__id')
-    raw_id_fields = ('reservation', 'buyer')
+                     'buyer__phone', 'card_last4', 'reservation__id')
+    raw_id_fields = ('reservation', 'buyer', 'reviewed_by')
     list_select_related = ('buyer', 'reservation')
     date_hierarchy = 'created_at'
-    readonly_fields = tuple(f.name for f in InstallmentPlan._meta.fields)
+    # The full account number is shown on the review page only, while the
+    # request is open — never in the generic change form.
+    exclude = ('account_number', 'card_token')
+    readonly_fields = tuple(f.name for f in InstallmentPlan._meta.fields
+                            if f.name not in ('account_number', 'card_token'))
     inlines = [InstallmentCollectionInline]
     actions = ['sync_with_provider']
 
-    @admin.display(description='البطاقة')
+    @admin.display(description='الحساب')
     def card_mask(self, obj):
-        return '****%s' % obj.card_last4 if obj.card_last4 else '—'
+        return obj.account_mask
 
-    @admin.display(description='إعادة السؤال عن الحالة من المموّل')
+    @admin.display(description='الحجز')
+    def reservation_link(self, obj):
+        url = reverse('admin:core_reservation_change', args=[obj.reservation_id])
+        return format_html('<a href="{}">#{}</a>', url, obj.reservation_id)
+
+    @admin.display(description='')
+    def review_link(self, obj):
+        if obj.state != InstallmentPlan.STATE_REQUESTED:
+            return '—'
+        url = reverse('admin:core_installmentplan_review', args=[obj.pk])
+        return format_html('<a class="button" href="{}">مراجعة</a>', url)
+
+    def get_urls(self):
+        custom = [
+            path('<int:pk>/review/', self.admin_site.admin_view(self.review_view),
+                 name='core_installmentplan_review'),
+        ]
+        return custom + super().get_urls()
+
+    def review_view(self, request, pk):
+        from .delivery_utils import compute_delivery_fee
+        from .services.installments.service import (
+            InstallmentReviewError, approve_request, financed_amount, reject_request,
+        )
+        plan = get_object_or_404(
+            InstallmentPlan.objects.select_related(
+                'buyer', 'reservation', 'reservation__item',
+                'reservation__delivery_location', 'reviewed_by'),
+            pk=pk)
+        if not request.user.has_perm('core.change_installmentplan'):
+            raise PermissionDenied
+
+        if request.method == 'POST' and plan.state == InstallmentPlan.STATE_REQUESTED:
+            decision = request.POST.get('decision')
+            notes = request.POST.get('admin_notes', '').strip()
+            try:
+                if decision == 'approve':
+                    approve_request(plan.pk, reviewed_by=request.user,
+                                    provider_reference=request.POST.get('provider_reference', ''),
+                                    notes=notes)
+                    messages.success(request, 'فُعّل التقسيط واكتمل الحجز #%d.'
+                                     % plan.reservation_id)
+                    return redirect('admin:core_installmentplan_changelist')
+                elif decision == 'reject':
+                    reject_request(plan.pk, reviewed_by=request.user, notes=notes)
+                    messages.success(request, 'رُفض طلب التقسيط للحجز #%d وأُبلغ المشتري.'
+                                     % plan.reservation_id)
+                    return redirect('admin:core_installmentplan_changelist')
+                else:
+                    messages.error(request, 'إجراء غير معروف.')
+            except InstallmentReviewError as exc:
+                messages.error(request, str(exc))
+            plan.refresh_from_db()
+
+        reservation = plan.reservation
+        variant = reservation.stock_variant
+        stock = variant.quantity if variant is not None else None
+        context = dict(
+            self.admin_site.each_context(request),
+            title='مراجعة طلب تقسيط — حجز #%d' % reservation.id,
+            plan=plan,
+            reservation=reservation,
+            location=reservation.delivery_location,
+            delivery_fee=compute_delivery_fee(reservation),
+            current_amount=financed_amount(reservation),
+            amount_changed=financed_amount(reservation) != plan.principal,
+            stock=stock,
+            stock_short=(stock is not None and not reservation.representative_id
+                         and stock < reservation.quantity),
+            opts=self.model._meta,
+        )
+        return TemplateResponse(request, 'admin/core/installmentplan/review.html', context)
+
+    @admin.display(description='إعادة السؤال عن الحالة من المموّل (المسار الآلي)')
     def sync_with_provider(self, request, queryset):
         from .services.installments.base import InstallmentError
         from .services.installments.service import sync_plan
@@ -1605,29 +1682,63 @@ class InstallmentPlanAdmin(ModelAdmin):
         return False
 
 
+@admin.register(InstallmentCollection)
+class InstallmentCollectionAdmin(ModelAdmin):
+    """الأقساط التي أبلغ المموّل عن استقطاعها — للقراءة فقط. تُعرض أيضاً
+    داخل صفحة الخطة؛ التسجيل هنا للبحث بها مباشرة."""
+    list_display = ('plan', 'sequence', 'amount', 'collected_at', 'provider_reference')
+    search_fields = ('plan__reference', 'provider_reference')
+    raw_id_fields = ('plan',)
+    list_select_related = ('plan',)
+    readonly_fields = tuple(f.name for f in InstallmentCollection._meta.fields)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
 @admin.register(InstallmentReversal)
 class InstallmentReversalAdmin(ModelAdmin):
     """طابور التسوية اليدوية.
 
-    كل سطر `failed` هنا يعني: طلب أُلغي، والمموّل ما زال يستقطع من راتب
-    المشتري. هذا هو المكان الذي يُعرف منه ذلك — ولهذا يُفلتَر على الحالة
-    افتراضياً — وإعادة الإرسال هي الإجراء الوحيد المتاح.
+    كل سطر غير مؤكَّد هنا يعني: طلب أُلغي أو استُرد، والمموّل ما زال يستقطع
+    من راتب المشتري. في المسار اليدوي يبقى السطر «بانتظار التنفيذ» إلى أن
+    تُلغى الخطة (أو جزؤها) في منصة كي كارد بمرجعها، ثم يُعلَّم «تمّ يدوياً».
+    في المسار الآلي سطر `failed` يُعاد إرساله.
     """
-    list_display = ('plan', 'amount', 'state', 'reason', 'failure_reason',
-                    'created_at')
+    list_display = ('plan', 'qi_reference', 'amount', 'state', 'reason',
+                    'failure_reason', 'created_at')
+
+    @admin.display(description='مرجع كي كارد')
+    def qi_reference(self, obj):
+        return obj.plan.provider_plan_id or '—'
     list_filter = ('state',)
     search_fields = ('plan__reference', 'provider_reference')
     raw_id_fields = ('plan',)
     list_select_related = ('plan',)
     readonly_fields = tuple(f.name for f in InstallmentReversal._meta.fields)
-    actions = ['retry_reversal']
+    actions = ['mark_done_manually', 'retry_reversal']
+
+    @admin.display(description='تمّ الإلغاء يدوياً في منصة كي كارد')
+    def mark_done_manually(self, request, queryset):
+        from .models import InstallmentReversal as Reversal
+        from .services.installments.service import mark_reversal_done
+        done = 0
+        for row in queryset.exclude(state=Reversal.STATE_CONFIRMED):
+            mark_reversal_done(row.pk, reviewed_by=request.user)
+            done += 1
+        self.message_user(request, 'سُجّل %d إرجاع كمُنفَّذ يدوياً' % done)
 
     @admin.display(description='إعادة إرسال الإرجاع للمموّل')
     def retry_reversal(self, request, queryset):
         from .models import InstallmentReversal as Reversal
-        from .services.installments.service import execute_reversal
+        from .services.installments.service import _is_manual, execute_reversal
         retried = 0
-        for row in queryset.filter(state=Reversal.STATE_FAILED):
+        for row in queryset.filter(state=Reversal.STATE_FAILED).select_related('plan'):
+            if _is_manual(row.plan):
+                continue  # no API to resend to — use mark_done_manually
             # Back to pending so the same guard that protects a first attempt
             # protects the retry: execute_reversal only acts on pending rows.
             Reversal.objects.filter(pk=row.pk).update(state=Reversal.STATE_PENDING)

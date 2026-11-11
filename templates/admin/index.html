@@ -68,6 +68,13 @@
     </div>
 
     <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-5">
+      <div class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">طلبات تقسيط بانتظار الاتصال</div>
+      <div class="text-2xl font-semibold">{{ dashboard.installment_requests.pending_count }}</div>
+      <div class="text-xs mt-1 text-font-subtle-light dark:text-font-subtle-dark">بقيمة {{ dashboard.installment_requests.pending_amount }}</div>
+      <a href="{% url 'admin:core_installmentplan_changelist' %}?state__exact=requested" class="text-xs text-primary-600 dark:text-primary-400">مراجعة الطلبات →</a>
+    </div>
+
+    <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-5">
       <div class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">بث مباشر الآن</div>
       <div class="text-2xl font-semibold">{{ dashboard.live_now.sessions }}</div>
       <div class="text-xs mt-1 text-font-subtle-light dark:text-font-subtle-dark">{{ dashboard.live_now.viewers }} مشاهد</div>

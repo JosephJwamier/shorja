@@ -16,7 +16,7 @@ Two axes, because one is not enough here:
 Rates live in settings.REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] under the
 scope names used here. DRF stores the counters in the default cache (Redis).
 """
-from rest_framework.throttling import SimpleRateThrottle
+from rest_framework.throttling import SimpleRateThrottle, UserRateThrottle
 
 
 class _RequestFieldThrottle(SimpleRateThrottle):
@@ -46,3 +46,10 @@ class PasswordResetEmailThrottle(_RequestFieldThrottle):
     step is a 6-digit code, so this is what makes guessing infeasible."""
     scope = 'auth_reset_email'
     field = 'email'
+
+
+class InstallmentThrottle(UserRateThrottle):
+    """Per buyer, on every installment call that carries a card or account
+    number. Without it the eligibility check is an oracle: try numbers against
+    one pending reservation and learn which are real Qi cards, and whose."""
+    scope = 'installments'

@@ -359,6 +359,23 @@ def release_reservation_payment(reservation, amount=None):
             from ledger.services import record_installment_fee
             record_installment_fee(reservation, installment_fee)
 
+    # رسم المنصة على البيعة المقسّطة: دفعه الزبون ضمن أقساطه، ووصل المنصة
+    # من كي كارد فوق ثمن الطلب (InstallmentPlan.platform_settlement) — فلا
+    # يُخصم من أحد هنا، يُقيَّد لحساب المنصة فقط، وعند التحرير لا قبله:
+    # طلبٌ أُلغي قبل التحرير يعود مبلغه كاملاً لكي كارد ولا رسم فيه.
+    if installment_plan is not None and installment_plan.platform_fee_amount > 0:
+        platform_installment_fee = (installment_plan.platform_fee_amount * payout_scale
+                                    ).quantize(Decimal('0.01'))
+        if platform_installment_fee > 0:
+            from .services.commission import platform_account
+            credit_earnings(
+                user=platform_account(),
+                amount=platform_installment_fee,
+                transaction_type='installment_fee',
+                item=reservation.item,
+                reservation=reservation,
+            )
+
     if reservation.representative and reservation.commission_amount:
         seller_net = charged - reservation.commission_amount
 

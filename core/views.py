@@ -4094,6 +4094,17 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 'message': 'Reservation has expired'
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        # An open installment request means the admin may be activating the
+        # plan at Qi right now. Paying from the wallet as well would leave a
+        # live salary deduction behind an order that is already paid.
+        if reservation.installment_plans.filter(state='requested').exists():
+            return Response({
+                'success': False,
+                'code': 'installment_requested',
+                'message': 'لديك طلب تقسيط قيد المراجعة لهذا الحجز — ألغِه أولاً '
+                           'إن أردت الدفع بطريقة أخرى'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         if not reservation.delivery_location_id:
             delivery_location_id = request.data.get('delivery_location_id')
             if not delivery_location_id:
@@ -4534,6 +4545,11 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
                 reservation.status = 'cancelled'
                 reservation.save(update_fields=['status'])
+                # An installment request still waiting for the admin's call
+                # dies with the order — otherwise the admin could activate a
+                # plan at Qi for a reservation that no longer exists.
+                from .services.installments.service import cancel_open_requests
+                cancel_open_requests(reservation, 'أُلغي الحجز')
                 # A represented sale booked its commission as a pending row
                 # at creation; nothing will ever release it now.
                 Transaction.objects.filter(

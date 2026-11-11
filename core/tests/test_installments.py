@@ -31,8 +31,12 @@ from core.wallet_utils import release_reservation_payment
 
 pytestmark = pytest.mark.django_db
 
+# These tests drive the automated path (check -> confirm against Qi's API,
+# answered by the sandbox). The manual path, the default in production, is
+# covered in test_installments_manual.py.
 PROVIDER_SETTINGS = {
     'qicard': {
+        'MODE': 'api',
         'BASE_URL': 'https://api-test.qi.example/v1',
         'MERCHANT_ID': 'shorjeh',
         'API_KEY': 'test_key',
@@ -47,12 +51,19 @@ PROVIDER_SETTINGS = {
 }
 
 PRICE = Decimal('1000000.00')
+# The customer carries every fee (service.pricing): the amount written to Qi is
+# grossed up so that after Qi keeps 5% the platform is left with the order
+# plus its 2% — 1,020,000 / 0.95 rounded up — and Qi adds its 10% on top.
+QI_AMOUNT = Decimal('1073685.00')
+TOTAL_PAYABLE = Decimal('1181053.50')
+MONTHLY = Decimal('118106')
+PLATFORM_FEE = Decimal('20000.00')
 
 
 @pytest.fixture(autouse=True)
 def configured(settings):
     settings.INSTALLMENT_PROVIDERS = PROVIDER_SETTINGS
-    settings.INSTALLMENT_SELLER_FEE_SHARE = '1'
+    settings.INSTALLMENT_PLATFORM_FEE_PERCENT = '2'
     # المزوّد التجريبي مربوط بـ DEBUG عن قصد (QiCardProvider.is_configured):
     # ليستحيل أن يبقى مفتوحاً في الإنتاج سهواً.
     settings.DEBUG = True
@@ -152,9 +163,10 @@ def test_options_carry_the_negotiated_terms():
 
 def test_price_preview_is_the_monthly_figure():
     preview = price_preview(PRICE)
-    # 10% من المشتري فوق السعر، مقسّمة على عشرة أشهر.
-    assert preview['total_payable'] == '1100000.00'
-    assert preview['monthly_amount'] == '110000'
+    # الزبون يحمل الرسوم كلها: 10% و5% لكي كارد و2% للمنصة.
+    assert preview['total_payable'] == str(TOTAL_PAYABLE)
+    assert preview['monthly_amount'] == str(MONTHLY)
+    assert preview['fees_amount'] == str(TOTAL_PAYABLE - PRICE)
 
 
 def test_price_preview_is_none_below_the_floor():
@@ -172,12 +184,16 @@ def test_a_quote_prices_the_whole_schedule():
 
     assert plan.state == InstallmentPlan.STATE_QUOTED
     assert plan.principal == PRICE
-    assert plan.customer_fee_amount == Decimal('100000.00')
-    assert plan.total_payable == Decimal('1100000.00')
-    assert plan.monthly_amount == Decimal('110000')
-    assert plan.merchant_fee_amount == Decimal('50000.00')
-    assert plan.seller_fee_amount == Decimal('50000.00')
-    assert plan.platform_settlement == Decimal('950000.00')
+    assert plan.qi_amount == QI_AMOUNT
+    assert plan.customer_fee_amount == Decimal('107368.50')   # 10% of QI_AMOUNT
+    assert plan.total_payable == TOTAL_PAYABLE
+    assert plan.monthly_amount == MONTHLY
+    assert plan.merchant_fee_amount == Decimal('53684.25')    # 5% of QI_AMOUNT
+    assert plan.platform_fee_amount == PLATFORM_FEE
+    assert plan.seller_fee_amount == Decimal('0.00')
+    # What Qi pays out covers the seller's whole order and the platform's 2%.
+    assert plan.platform_settlement == Decimal('1020000.75')
+    assert plan.platform_settlement >= PRICE + PLATFORM_FEE
     assert plan.applied_at is None
 
 
@@ -318,9 +334,9 @@ def test_a_plan_created_at_the_financier_is_reversed_if_the_order_fails():
     assert plan.is_live is False
     assert plan.failure_reason
     reversal = InstallmentReversal.objects.get(plan=plan)
-    assert reversal.amount == PRICE
+    assert reversal.amount == QI_AMOUNT
     assert reversal.state == InstallmentReversal.STATE_CONFIRMED
-    assert plan.reversed_amount == PRICE
+    assert plan.reversed_amount == QI_AMOUNT
 
 
 def test_an_auction_win_cannot_be_financed():
@@ -356,28 +372,38 @@ def test_a_small_order_is_refused():
 # من يحمل رسم المموّل
 # ---------------------------------------------------------------------------
 
-def test_the_seller_carries_the_financier_fee_at_release():
+def test_the_seller_is_paid_the_whole_order_and_the_platform_its_fee():
+    """الزبون يحمل الرسوم كلها: البائع يتقاضى مليوناً كاملاً، والمنصة 2%
+    — المبلغ الذي سدّدته كي كارد فوق ثمن الطلب."""
     buyer, seller = make_user('ins_f_buyer'), make_user('ins_f_seller')
     reservation, plan = financed(buyer, seller)
 
     from core.services.commission import platform_account
     release_reservation_payment(reservation)
 
-    # 1,000,000 ناقص 5% رسم تقسيط = 950,000 للبائع، والرسم لحساب المنصة
-    # لأنها هي من دفعته (خُصم من تسويتها مع كي كارد).
-    assert balance(seller) == Decimal('950000.00')
-    assert balance(platform_account()) == Decimal('50000.00')
+    assert balance(seller) == PRICE
+    assert balance(platform_account()) == PLATFORM_FEE
 
 
-def test_the_platform_can_absorb_part_of_the_fee(settings):
-    settings.INSTALLMENT_SELLER_FEE_SHARE = '0.5'
-    reset_cache()
+def test_the_platform_fee_is_a_setting(settings):
+    settings.INSTALLMENT_PLATFORM_FEE_PERCENT = '0'
     buyer, seller = make_user('ins_sh_buyer'), make_user('ins_sh_seller')
     reservation, plan = financed(buyer, seller)
 
-    assert plan.seller_fee_amount == Decimal('25000.00')
+    # Only Qi's 5% left to cover: 1,000,000 / 0.95, rounded up.
+    assert plan.qi_amount == Decimal('1052632.00')
+    assert plan.platform_fee_amount == Decimal('0.00')
     release_reservation_payment(reservation)
-    assert balance(seller) == Decimal('975000.00')
+    assert balance(seller) == PRICE
+
+
+def test_an_order_cancelled_before_release_earns_the_platform_nothing(client):
+    from core.services.commission import platform_account
+    buyer, seller = make_user('ins_nr_buyer'), make_user('ins_nr_seller')
+    reservation, plan = financed(buyer, seller)
+    client.force_authenticate(user=buyer)
+    assert client.post('/api/reservations/%d/cancel/' % reservation.id).status_code == 200
+    assert balance(platform_account()) == Decimal('0.00')
 
 
 def test_a_wallet_sale_pays_no_installment_fee():
@@ -402,6 +428,8 @@ def test_the_monthly_mode_charges_the_merchant_nothing(settings):
     assert plan.settlement_mode == InstallmentPlan.SETTLEMENT_MONTHLY
     assert plan.merchant_fee_amount == Decimal('0.00')
     assert plan.seller_fee_amount == Decimal('0.00')
+    # Nothing for Qi to keep, so only the platform's 2% is added.
+    assert plan.qi_amount == PRICE + PLATFORM_FEE
     release_reservation_payment(reservation)
     assert balance(seller) == PRICE
 
@@ -423,7 +451,7 @@ def test_syncing_records_what_the_financier_took():
     _, plan = collected_plan(buyer, seller, months_ago=2)
 
     assert plan.collections.count() == 2
-    assert plan.collected_amount == Decimal('220000.00')
+    assert plan.collected_amount == 2 * MONTHLY
     assert plan.state == InstallmentPlan.STATE_ACTIVE
 
 
@@ -437,7 +465,7 @@ def test_syncing_twice_records_each_installment_once():
 
     assert InstallmentCollection.objects.filter(plan=plan).count() == 3
     plan.refresh_from_db()
-    assert plan.collected_amount == Decimal('330000.00')
+    assert plan.collected_amount == 3 * MONTHLY
 
 
 def test_a_fully_collected_plan_is_settled():
@@ -464,7 +492,7 @@ def test_cancelling_a_financed_order_does_not_pay_the_buyer(client):
     assert not Transaction.objects.filter(user=buyer,
                                           transaction_type='refund').exists()
     reversal = InstallmentReversal.objects.get(plan=plan)
-    assert reversal.amount == PRICE
+    assert reversal.amount == QI_AMOUNT
     assert reversal.state == InstallmentReversal.STATE_PENDING
 
 
@@ -482,7 +510,7 @@ def test_the_reversal_closes_the_plan_once_the_financier_accepts():
     plan.refresh_from_db()
     assert reversal.state == InstallmentReversal.STATE_CONFIRMED
     assert plan.state == InstallmentPlan.STATE_REVERSED
-    assert plan.reversed_amount == PRICE
+    assert plan.reversed_amount == QI_AMOUNT
 
 
 def test_a_refused_reversal_waits_for_a_human_instead_of_paying_the_buyer():
@@ -519,9 +547,10 @@ def test_what_the_buyer_already_paid_comes_back_to_them(client):
     response = client.post('/api/reservations/%d/cancel/' % reservation.id)
     assert response.status_code == 200, response.data
 
-    assert balance(buyer) == Decimal('220000.00')
+    assert balance(buyer) == 2 * MONTHLY
     reversal = InstallmentReversal.objects.get(plan=plan)
-    assert reversal.amount == PRICE - Decimal('220000.00')
+    # The rest of the order goes back to Qi, in Qi's terms (grossed up).
+    assert reversal.amount == ((PRICE - 2 * MONTHLY) * QI_AMOUNT / PRICE).quantize(Decimal('0.01'))
 
 
 def test_two_refunds_never_return_the_collected_amount_twice():
@@ -539,9 +568,9 @@ def test_two_refunds_never_return_the_collected_amount_twice():
         refund_to_buyer(reservation, Decimal('150000.00'))
 
     # 220,000 محصَّلة: 150,000 ثم 70,000 فقط، والباقي إرجاع للمموّل.
-    assert balance(buyer) == Decimal('220000.00')
+    assert balance(buyer) == 2 * MONTHLY
     plan.refresh_from_db()
-    assert plan.buyer_refunded_amount == Decimal('220000.00')
+    assert plan.buyer_refunded_amount == 2 * MONTHLY
 
 
 def test_a_wallet_order_still_refunds_to_the_wallet(client):
@@ -574,7 +603,7 @@ def test_check_then_confirm_over_http(client):
                          'card_number': GOOD_CARD}, format='json')
     assert check.status_code == 200, check.data
     assert check.data['eligible'] is True
-    assert check.data['data']['monthly_amount'] == '110000.00'
+    assert check.data['data']['monthly_amount'] == '118106.00'
 
     reference = check.data['data']['reference']
     done = client.post('/api/installments/confirm/', {'reference': reference},
@@ -651,7 +680,7 @@ def test_the_reservation_payload_shows_the_financing():
     from core.serializers import ReservationSerializer
     data = ReservationSerializer(reservation).data['installment']
     assert data['months'] == 10
-    assert data['monthly_amount'] == '110000.00'
+    assert data['monthly_amount'] == '118106.00'
     assert data['card_last4'] == GOOD_CARD[-4:]
 
 
@@ -682,7 +711,7 @@ def test_the_webhook_reads_only_the_reference(client):
     assert response.status_code == 200
 
     plan.refresh_from_db()
-    assert plan.collected_amount == Decimal('220000.00')
+    assert plan.collected_amount == 2 * MONTHLY
 
 
 def test_an_unknown_reference_is_acknowledged_and_ignored(client):

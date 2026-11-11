@@ -104,10 +104,23 @@ class QiCardProvider(InstallmentProvider):
         self.sandbox = _flag(config.get("SANDBOX"))
         self.card_lengths = card_lengths_from(config)
         self.require_luhn = require_luhn_from(config)
+        # manual: المشتري يرسل رقم حسابه، والإدارة تتحقّق وتفعّل الخطة في
+        # منصة كي كارد ثم توافق في لوحة الإدارة — لا نداء API لكي كارد.
+        # api: الفحص والإنشاء والإرجاع عبر API كي كارد (بانتظار وثيقتهم).
+        mode = str(config.get("MODE") or "manual").strip().lower()
+        self.mode = mode if mode in ("manual", "api") else "manual"
 
     # -- configuration ---------------------------------------------------
     @property
+    def is_manual(self):
+        return self.mode == "manual"
+
+    @property
     def is_configured(self):
+        if self.is_manual:
+            # لا بيانات اعتماد يحتاجها المسار اليدوي — الإدارة هي الطرف
+            # الذي يكلّم كي كارد. ENABLED=0 يُخفي التقسيط من التطبيق.
+            return bool(self.config) and _flag(self.config.get("ENABLED", "1"))
         if self.sandbox:
             # Deliberate: the sandbox is for development and QA, and it must
             # be impossible to leave it switched on by accident in a
@@ -193,7 +206,11 @@ class QiCardProvider(InstallmentProvider):
         body = {
             "merchant_id": self.merchant_id,
             "order_id": plan.reference,
-            "amount": float(plan.principal),
+            # What is written to Qi is the grossed-up amount (the customer
+            # carries Qi's merchant fee and the platform's fee) — see
+            # service.pricing. Older plans carry no qi_amount: amount_at_qi
+            # falls back to the order total they were priced on.
+            "amount": float(plan.amount_at_qi),
             "currency": "IQD",
             "months": plan.months,
             "settlement_mode": plan.settlement_mode,

@@ -1,11 +1,22 @@
 """HTTP surface for installments.
 
-Four endpoints, none of them financier-specific:
+None of them financier-specific:
 
-    GET  /api/installments/options/          what the app may offer, and the terms
+    GET  /api/installments/options/          what the app may offer, the terms
+                                             and which path (`mode`) to show
+
+  manual path (QICARD_MODE=manual, the default) — a person talks to Qi:
+    POST /api/installments/request/          order + Qi account number -> a
+                                             request the admin phones about
+    POST /api/installments/<ref>/cancel/     the buyer withdraws that request
+
+  api path (QICARD_MODE=api) — waiting on Qi's API spec:
     POST /api/installments/check/            card + order -> eligibility and schedule
     POST /api/installments/confirm/          commit the plan, complete the order
     POST /api/installments/webhook/<name>/   financier callback
+
+In the manual path the admin approves in the admin (InstallmentPlanAdmin
+.review_view), and that approval is what completes the reservation.
 
 The flow is two calls on purpose. `check` is the only request that carries a
 card number: it answers with a schedule and a `reference`, and `confirm` sends
@@ -22,7 +33,8 @@ financier over an authenticated channel. See services/installments/service.py.
 import logging
 
 from rest_framework import serializers, status
-from rest_framework.decorators import api_view, permission_classes
+from django.db import transaction
+from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -33,8 +45,10 @@ from .services.installments.base import InstallmentError, NotEligible
 from .services.installments.cards import InvalidCardNumber
 from .services.installments.registry import get_provider
 from .services.installments.service import (
-    InstallmentNotAllowed, confirm, options, quote, plan_for_webhook, sync_plan,
+    InstallmentNotAllowed, cancel_request, confirm, options, quote,
+    plan_for_webhook, request_manual, sync_plan,
 )
+from .throttling import InstallmentThrottle
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +61,14 @@ class CheckSerializer(serializers.Serializer):
     # Attached before the quote when the reservation has no address yet (an
     # auction win, a live-stream reserve), because the delivery fee is part of
     # what gets financed and cannot be computed without one.
+    delivery_location_id = serializers.IntegerField(required=False)
+
+
+class RequestSerializer(serializers.Serializer):
+    reservation_id = serializers.IntegerField()
+    # رقم حساب كي كارد. يُحفظ إلى أن تقرّر الإدارة ثم يُمحى — انظر
+    # InstallmentPlan.account_number. لا يُعاد في أي استجابة.
+    account_number = serializers.CharField(max_length=32, trim_whitespace=True)
     delivery_location_id = serializers.IntegerField(required=False)
 
 
@@ -73,8 +95,90 @@ def installment_options(request):
     return Response({'success': True, 'data': options()})
 
 
+def _attach_location(request, reservation, location_id):
+    """Attaches the delivery address the app picked, when the reservation has
+    none yet. Returns an error Response, or None."""
+    if not location_id or reservation.delivery_location_id:
+        return None
+    try:
+        reservation.delivery_location = Location.objects.get(
+            id=location_id, user=request.user)
+    except Location.DoesNotExist:
+        return Response({'success': False,
+                         'message': 'عنوان التسليم غير موجود أو ليس لك'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    reservation.save(update_fields=['delivery_location'])
+    return None
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@throttle_classes([InstallmentThrottle])
+def request_installment(request):
+    """The buyer asks to pay this order in installments (manual path).
+
+    Nothing is committed and no money moves: the answer is "we will call
+    you". The reservation stays `pending` — and stops expiring — until the
+    admin approves (the order completes) or rejects (it waits for an
+    ordinary payment again).
+    """
+    serializer = RequestSerializer(data=request.data)
+    if not serializer.is_valid():
+        errors = dict(serializer.errors)
+        errors.pop('account_number', None)
+        return Response({'success': False, 'errors': errors},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    data = serializer.validated_data
+    try:
+        reservation = Reservation.objects.select_related('item').get(
+            pk=data['reservation_id'], buyer=request.user)
+    except Reservation.DoesNotExist:
+        return Response({'success': False, 'message': 'الحجز غير موجود'},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    error = _attach_location(request, reservation, data.get('delivery_location_id'))
+    if error is not None:
+        return error
+
+    try:
+        plan = request_manual(user=request.user, reservation=reservation,
+                              account_number=data['account_number'])
+    except InvalidCardNumber as exc:
+        return _refusal(str(exc), code='invalid_account')
+    except InstallmentNotAllowed as exc:
+        return _refusal(exc.message_ar, code=exc.code)
+
+    return Response({'success': True, 'eligible': True,
+                     'message': 'استلمنا طلبك — سيتم الاتصال بك لإكمال إجراءات التقسيط',
+                     'data': InstallmentPlanSerializer(plan).data},
+                    status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def cancel_installment_request(request, reference):
+    """The buyer withdraws an open request — to pay another way, or not at
+    all. Only a request still waiting for the admin can be withdrawn."""
+    plan = InstallmentPlan.objects.filter(reference=reference,
+                                          buyer=request.user).first()
+    if plan is None:
+        return Response({'success': False, 'message': 'طلب التقسيط غير موجود'},
+                        status=status.HTTP_404_NOT_FOUND)
+    if plan.state != InstallmentPlan.STATE_REQUESTED:
+        return Response({'success': False, 'code': 'not_open',
+                         'message': 'لا يمكن إلغاء هذا الطلب — %s' % plan.get_state_display()},
+                        status=status.HTTP_400_BAD_REQUEST)
+    with transaction.atomic():
+        plan = cancel_request(plan)
+    return Response({'success': True, 'message': 'أُلغي طلب التقسيط',
+                     'data': InstallmentPlanSerializer(plan).data},
+                    status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@throttle_classes([InstallmentThrottle])
 def check_installment(request):
     """Is this card good for this order, and on what schedule?
 
@@ -98,16 +202,9 @@ def check_installment(request):
         return Response({'success': False, 'message': 'الحجز غير موجود'},
                         status=status.HTTP_404_NOT_FOUND)
 
-    location_id = data.get('delivery_location_id')
-    if location_id and not reservation.delivery_location_id:
-        try:
-            reservation.delivery_location = Location.objects.get(
-                id=location_id, user=request.user)
-        except Location.DoesNotExist:
-            return Response({'success': False,
-                             'message': 'عنوان التسليم غير موجود أو ليس لك'},
-                            status=status.HTTP_400_BAD_REQUEST)
-        reservation.save(update_fields=['delivery_location'])
+    error = _attach_location(request, reservation, data.get('delivery_location_id'))
+    if error is not None:
+        return error
 
     try:
         plan = quote(user=request.user, reservation=reservation,

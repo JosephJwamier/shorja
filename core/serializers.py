@@ -3103,23 +3103,28 @@ class StoreReviewCreateSerializer(serializers.ModelSerializer):
 class InstallmentPlanSerializer(serializers.ModelSerializer):
     """What the buyer is agreeing to, or already agreed to.
 
-    `card_last4` and `card_holder_name` are the whole of what the platform
-    knows about the card — see services/installments/cards.py. The financier's
-    token is deliberately not exposed: the app never needs it, and a value
-    that can authorise a deduction has no business in a response body.
+    `card_last4` is all the app is ever told about the card or account. The
+    holder's name is not returned: the eligibility check answers for any
+    number typed in, so echoing the name would let anyone with a pending
+    reservation look up who owns a Qi card. The financier's token and the
+    manual path's full account number are never exposed either.
     """
 
     collected_count = serializers.SerializerMethodField()
     state_label = serializers.CharField(source='get_state_display', read_only=True)
+    # Everything the buyer pays above the order total: Qi's two fees and the
+    # platform's, shown to them as one "رسوم التقسيط" line.
+    fees_amount = serializers.DecimalField(max_digits=12, decimal_places=2,
+                                           read_only=True)
 
     class Meta:
         model = InstallmentPlan
         fields = [
             'reference', 'provider', 'state', 'state_label',
             'principal', 'months', 'monthly_amount', 'total_payable',
-            'customer_fee_percent', 'customer_fee_amount',
+            'customer_fee_percent', 'customer_fee_amount', 'fees_amount',
             'collected_amount', 'collected_count',
-            'card_last4', 'card_holder_name',
+            'card_last4', 'failure_reason',
             'expires_at', 'applied_at', 'created_at',
         ]
         read_only_fields = fields
@@ -3135,8 +3140,11 @@ def _reservation_installment(obj):
     the reservations list: one more related read per row, for four values the
     card actually shows (مقسّطة، القسط الشهري، عدد الأقساط، آخر أربعة أرقام).
     """
+    # 'requested' too: between "سيتم الاتصال بك" and the admin's decision the
+    # order card has to say the request is in, or the buyer pays twice.
     plan = next(
-        (p for p in obj.installment_plans.all() if p.state in ('active', 'settled')),
+        (p for p in obj.installment_plans.all()
+         if p.state in ('active', 'settled', 'requested')),
         None,
     )
     if plan is None:

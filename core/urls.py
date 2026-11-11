@@ -87,6 +87,11 @@ urlpatterns = [
     # يحمل مرجع العرض فقط. انظر installment_views.
     path('installments/options/', installment_views.installment_options,
          name='installment-options'),
+    path('installments/request/', installment_views.request_installment,
+         name='installment-request'),
+    path('installments/<str:reference>/cancel/',
+         installment_views.cancel_installment_request,
+         name='installment-cancel'),
     path('installments/check/', installment_views.check_installment,
          name='installment-check'),
     path('installments/confirm/', installment_views.confirm_installment,

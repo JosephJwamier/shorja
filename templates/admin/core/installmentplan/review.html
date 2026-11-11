@@ -1,0 +1,177 @@
+{% extends "admin/base_site.html" %}
+{% load i18n l10n %}
+
+{% block content %}
+{% comment %}Unlocalised: the Arabic locale renders 1073685.00 as "1073685,00",
+and these are figures an admin types into Qi's platform by hand.{% endcomment %}
+{% localize off %}
+<div class="flex flex-col gap-6 max-w-3xl">
+
+  <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-6">
+    <h1 class="text-lg font-semibold mb-1">طلب تقسيط — حجز #{{ reservation.id }}</h1>
+    <p class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-4">
+      {{ plan.reference }} · {{ plan.get_state_display }} · أُرسل {{ plan.created_at }}
+    </p>
+
+    <h2 class="text-sm font-semibold mb-3">المشتري</h2>
+    <dl class="grid grid-cols-2 gap-4 text-sm mb-6">
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">الاسم</dt>
+        <dd><a class="text-primary-600 dark:text-primary-400" href="{% url 'admin:core_user_change' plan.buyer_id %}">{{ plan.buyer.get_full_name|default:plan.buyer.username }}</a></dd>
+      </div>
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">الهاتف</dt>
+        <dd dir="ltr" class="font-semibold text-right">{{ plan.buyer.phone|default:"—" }}</dd>
+      </div>
+      <div class="col-span-2">
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">رقم حساب كي كارد</dt>
+        <dd dir="ltr" class="text-right">
+          {% if plan.account_number %}
+            <span class="font-mono text-lg font-semibold tracking-wider select-all">{{ plan.account_number }}</span>
+          {% else %}
+            <span class="font-mono">{{ plan.account_mask }}</span>
+            <span class="text-xs text-font-subtle-light dark:text-font-subtle-dark">(مُحي الرقم بعد القرار)</span>
+          {% endif %}
+        </dd>
+      </div>
+    </dl>
+
+    <h2 class="text-sm font-semibold mb-3">الحجز</h2>
+    <dl class="grid grid-cols-2 gap-4 text-sm mb-6">
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">المنتج</dt>
+        <dd><a class="text-primary-600 dark:text-primary-400" href="{% url 'admin:core_reservation_change' reservation.id %}">{{ reservation.item.title }}</a> × {{ reservation.quantity }}</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">حالة الحجز</dt>
+        <dd>{{ reservation.get_status_display }}</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">المخزون المتاح الآن</dt>
+        <dd {% if stock_short %}style="color:#AC3A31;font-weight:600;"{% endif %}>
+          {{ stock|default_if_none:"—" }}{% if stock_short %} — أقل من الكمية المطلوبة{% endif %}
+        </dd>
+      </div>
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">عنوان التسليم</dt>
+        <dd>
+          {% if location %}
+            {{ location.city }} — {{ location.address_line1 }}<br>
+            <span class="text-xs">{{ location.contact_person }} · <span dir="ltr">{{ location.contact_phone }}</span></span>
+          {% else %}—{% endif %}
+        </dd>
+      </div>
+    </dl>
+
+    <h2 class="text-sm font-semibold mb-3">ما يُفعَّل في منصة كي كارد</h2>
+    <div class="rounded-default p-4 mb-4" style="background:#2E7D5714;border:1px solid #2E7D5755;">
+      <div class="text-xs mb-1">المبلغ الذي يُكتب في منصة كي كارد</div>
+      <div dir="ltr" class="text-2xl font-bold text-right select-all">{{ plan.amount_at_qi|floatformat:"0u" }}</div>
+      <div class="text-xs mt-1">الزبون يدفع {{ plan.total_payable }} IQD ({{ plan.monthly_amount }} × {{ plan.months }}) — كي كارد تضيف {{ plan.customer_fee_percent }}% فوق هذا المبلغ.</div>
+    </div>
+    <dl class="grid grid-cols-2 gap-4 text-sm">
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">ثمن الطلب (السعر + التوصيل) — يصل البائع كاملاً</dt>
+        <dd class="font-semibold">{{ plan.principal }} IQD</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">منها أجرة التوصيل</dt>
+        <dd>{{ delivery_fee }} IQD</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">تخصمه كي كارد ({{ plan.merchant_fee_percent }}% من المكتوب)</dt>
+        <dd>{{ plan.merchant_fee_amount }} IQD</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">تسدّده كي كارد للمنصة</dt>
+        <dd>{{ plan.platform_settlement }} IQD</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">رسم المنصة ({{ plan.platform_fee_percent }}%)</dt>
+        <dd>{{ plan.platform_fee_amount }} IQD</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">رسوم التقسيط على الزبون إجمالاً</dt>
+        <dd>{{ plan.fees_amount }} IQD</dd>
+      </div>
+    </dl>
+    {% if amount_changed %}
+      <p class="text-sm mt-4" style="color:#AC3A31;font-weight:600;">
+        تغيّر مبلغ الحجز منذ الطلب: الآن {{ current_amount }} IQD. لا تفعّل الخطة في كي كارد —
+        ارفض الطلب ليعيد المشتري الإرسال بالمبلغ الصحيح.
+      </p>
+    {% endif %}
+  </div>
+
+  <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-6">
+    <h2 class="text-sm font-semibold mb-4">القرار</h2>
+
+    {% if plan.state != 'requested' %}
+      <p class="text-sm text-font-subtle-light dark:text-font-subtle-dark">
+        تمت مراجعة هذا الطلب: {{ plan.get_state_display }}
+        {% if plan.reviewed_by %} بواسطة {{ plan.reviewed_by.username }}{% endif %}
+        {% if plan.reviewed_at %} بتاريخ {{ plan.reviewed_at }}{% endif %}.
+      </p>
+      {% if plan.provider_plan_id %}<p class="text-sm mt-2">مرجع كي كارد: <span class="font-mono">{{ plan.provider_plan_id }}</span></p>{% endif %}
+      {% if plan.admin_notes %}<p class="text-sm mt-2">{{ plan.admin_notes }}</p>{% endif %}
+    {% else %}
+      <ol class="text-sm list-decimal pr-5 mb-5 flex flex-col gap-1">
+        <li>تحقّق في منصة كي كارد أن الحساب أعلاه مؤهّل للتقسيط بمبلغ <b dir="ltr">{{ plan.amount_at_qi|floatformat:"0u" }}</b> — اكتب هذا المبلغ لا ثمن الطلب.</li>
+        <li>اتصل بالمشتري واطلب منه الرمز الذي أرسلته كي كارد إليه.</li>
+        <li>أدخل الرمز في منصة كي كارد لتفعيل الخطة.</li>
+        <li>بعد التفعيل فقط: أدخل مرجع الخطة من كي كارد واضغط «فُعّل — اعتماد الحجز».</li>
+      </ol>
+      <form method="post" id="review-form">
+        {% csrf_token %}
+        <div class="flex flex-col gap-4">
+          <div>
+            <label class="block text-sm font-medium mb-2" for="provider_reference">مرجع الخطة في كي كارد (مطلوب للاعتماد)</label>
+            <input type="text" name="provider_reference" id="provider_reference" dir="ltr"
+                   class="w-full rounded-default border border-base-200 dark:border-base-700 bg-base-50 dark:bg-base-900 px-3 py-2 text-sm font-mono">
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2" for="admin_notes">ملاحظات (إلزامية عند الرفض — تصل المشتري)</label>
+            <textarea name="admin_notes" id="admin_notes" rows="3"
+                      class="w-full rounded-default border border-base-200 dark:border-base-700 bg-base-50 dark:bg-base-900 px-3 py-2 text-sm"></textarea>
+          </div>
+          <div class="flex gap-3">
+            <button type="submit" name="decision" value="approve"
+                    class="px-5 py-2.5 rounded-default text-white text-sm font-semibold"
+                    style="background:#2E7D57;">
+              فُعّل — اعتماد الحجز
+            </button>
+            <button type="submit" name="decision" value="reject"
+                    class="px-5 py-2.5 rounded-default text-white text-sm font-semibold"
+                    style="background:#AC3A31;">
+              رفض الطلب
+            </button>
+          </div>
+        </div>
+      </form>
+      <script>
+        (function () {
+          document.getElementById('review-form').addEventListener('submit', function (e) {
+            var clicked = e.submitter && e.submitter.value;
+            if (clicked === 'reject' && !document.getElementById('admin_notes').value.trim()) {
+              e.preventDefault();
+              alert('سبب الرفض إلزامي.');
+              return;
+            }
+            if (clicked === 'approve' && !document.getElementById('provider_reference').value.trim()) {
+              e.preventDefault();
+              alert('أدخل مرجع الخطة من كي كارد — بدونه لا يمكن إلغاؤها لاحقاً إن أُلغي الطلب.');
+              return;
+            }
+            var msg = clicked === 'approve'
+              ? 'هل فُعّلت الخطة فعلاً في منصة كي كارد؟ الاعتماد يُكمل الحجز فوراً.'
+              : 'تأكيد رفض الطلب؟';
+            if (!confirm(msg)) e.preventDefault();
+          });
+        })();
+      </script>
+    {% endif %}
+  </div>
+
+</div>
+{% endlocalize %}
+{% endblock %}

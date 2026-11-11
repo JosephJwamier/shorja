@@ -2971,14 +2971,28 @@ class InstallmentPlan(models.Model):
     جدول أقساط لا على معادلة.
     """
 
+    # المسار اليدوي (QICARD_MODE=manual، الافتراضي): المشتري يرسل رقم حسابه
+    # فيُنشأ السطر `requested`، والإدارة تتحقّق وتفعّل الخطة في منصة كي كارد
+    # ثم توافق هنا فيصير `active` — أو ترفض فيصير `rejected`.
+    STATE_REQUESTED = 'requested'
+    STATE_REJECTED = 'rejected'
+    STATE_CANCELLED = 'cancelled'
+    # المسار الآلي (QICARD_MODE=api): عرضٌ، ثم «قيد التأكيد» أثناء نداء
+    # كي كارد — حالة وسيطة تحجز العرض لطلبٍ واحد فلا يُنشئ طلبان متزامنان
+    # خطّتين عند المموّل.
     STATE_QUOTED = 'quoted'
+    STATE_CONFIRMING = 'confirming'
     STATE_ACTIVE = 'active'
     STATE_SETTLED = 'settled'
     STATE_REVERSED = 'reversed'
     STATE_FAILED = 'failed'
     STATE_EXPIRED = 'expired'
     STATE_CHOICES = [
+        (STATE_REQUESTED, 'طلب — بانتظار مراجعة الإدارة'),
+        (STATE_REJECTED, 'رفضته الإدارة'),
+        (STATE_CANCELLED, 'أُلغي الطلب'),
         (STATE_QUOTED, 'عرض — بانتظار تأكيد المشتري'),
+        (STATE_CONFIRMING, 'قيد التأكيد مع المموّل'),
         (STATE_ACTIVE, 'نشطة — الاستقطاع جارٍ'),
         (STATE_SETTLED, 'مسدّدة بالكامل'),
         (STATE_REVERSED, 'ملغاة ومُرجَعة للمموّل'),
@@ -3033,11 +3047,27 @@ class InstallmentPlan(models.Model):
                                                default=Decimal('0.00'))
     merchant_fee_amount = models.DecimalField(max_digits=12, decimal_places=2,
                                               default=Decimal('0.00'))
-    # الجزء الذي يُخصم من حصّة البائع عند التحرير. الباقي تمتصّه المنصة —
-    # حصّة محدَّدة بـ settings.INSTALLMENT_SELLER_FEE_SHARE ومجمَّدة هنا.
+    # ما يُخصم من حصّة البائع عند التحرير. صفر في كل خطة جديدة: الزبون صار
+    # يحمل نسبة المموّل من التاجر (انظر qi_amount)؛ يبقى الحقل لخطط قديمة
+    # حُسبت حين كان البائع يحملها.
     seller_fee_amount = models.DecimalField(max_digits=12, decimal_places=2,
                                             default=Decimal('0.00'))
     platform_settlement = models.DecimalField(max_digits=12, decimal_places=2,
+                                              default=Decimal('0.00'))
+
+    # المبلغ الذي يُكتب في كي كارد. أكبر من principal لأن الزبون يحمل كل
+    # الرسوم: كي كارد تخصم نسبة التاجر منه، فيُرفع بحيث يبقى للمنصة بعد
+    # الخصم principal + رسم المنصة بالضبط:
+    #     qi_amount = (principal + platform_fee) ÷ (1 − merchant_fee%)
+    # ونسبة الزبون تُضاف فوقه (total_payable). صفر في خطط قديمة — هناك كان
+    # المبلغ المكتوب هو principal نفسه (انظر amount_at_qi).
+    qi_amount = models.DecimalField(max_digits=12, decimal_places=2,
+                                    default=Decimal('0.00'))
+    # رسم المنصة على البيعة المقسّطة — نسبة من principal يدفعها الزبون ضمن
+    # أقساطه، وتُقيَّد لحساب المنصة عند تحرير المبلغ للبائع.
+    platform_fee_percent = models.DecimalField(max_digits=5, decimal_places=2,
+                                               default=Decimal('0.00'))
+    platform_fee_amount = models.DecimalField(max_digits=12, decimal_places=2,
                                               default=Decimal('0.00'))
 
     # ما استُقطع من المشتري ووصل حساب المنصة فعلاً (مجموع InstallmentCollection).
@@ -3052,11 +3082,25 @@ class InstallmentPlan(models.Model):
     buyer_refunded_amount = models.DecimalField(max_digits=12, decimal_places=2,
                                                 default=Decimal('0.00'))
 
+    # رقم حساب كي كارد كما أرسله المشتري — المسار اليدوي وحده يحفظه، لأن
+    # الإدارة تحتاجه لتتحقّق وتفعّل الخطة في منصة كي كارد. يُمحى لحظة
+    # القرار (موافقة أو رفض أو إلغاء) ولا يبقى منه إلا آخر أربعة أرقام؛
+    # ولا يظهر في أي استجابة API ولا في بريد ولا في لوج.
+    account_number = models.CharField(max_length=32, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,
+        blank=True, related_name='reviewed_installment_plans'
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    admin_notes = models.TextField(blank=True)
+
     card_last4 = models.CharField(max_length=4, blank=True)
     card_holder_name = models.CharField(max_length=120, blank=True)
     # رمز المموّل للبطاقة، بديل الرقم في كل نداء لاحق.
     card_token = models.CharField(max_length=255, blank=True)
 
+    # مرجع الخطة عند المموّل: يعود من نداء الإنشاء في المسار الآلي، وتُدخله
+    # الإدارة من منصة كي كارد عند الموافقة في المسار اليدوي.
     provider_plan_id = models.CharField(max_length=128, blank=True, db_index=True)
     last_provider_response = models.JSONField(null=True, blank=True)
     failure_reason = models.CharField(max_length=255, blank=True)
@@ -3101,9 +3145,29 @@ class InstallmentPlan(models.Model):
         return self.state in (self.STATE_ACTIVE, self.STATE_SETTLED)
 
     @property
+    def amount_at_qi(self):
+        """ما كُتب في كي كارد — أساس أي إرجاع لها."""
+        return self.qi_amount or self.principal
+
+    @property
+    def fees_amount(self):
+        """كل ما يدفعه الزبون فوق ثمن الطلب: نسبتا كي كارد ورسم المنصة."""
+        return max(self.total_payable - self.principal, Decimal('0.00'))
+
+    @property
     def outstanding(self):
-        """ما لم يُستردّ بعد من أصل التمويل — سقف أي إرجاع للمموّل."""
-        return max(self.principal - self.reversed_amount, Decimal('0.00'))
+        """ما لم يُطلب إرجاعه بعد من أصل التمويل — سقف أي إرجاع جديد.
+
+        يُطرح كل سطر إرجاع لا المؤكَّد وحده: إرجاعٌ معلّق أو مرفوض ما زال
+        مطلوباً من المموّل، وتجاهله يجعل الاسترداد التالي يطلب المبلغ نفسه
+        مرّة ثانية فيتجاوز مجموع الطلبات أصل التمويل.
+        """
+        requested = self.reversals.aggregate(total=models.Sum('amount'))['total']
+        return max(self.amount_at_qi - (requested or Decimal('0.00')), Decimal('0.00'))
+
+    @property
+    def account_mask(self):
+        return '****%s' % self.card_last4 if self.card_last4 else '—'
 
 
 class InstallmentCollection(models.Model):
@@ -3155,7 +3219,7 @@ class InstallmentReversal(models.Model):
     STATE_CONFIRMED = 'confirmed'
     STATE_FAILED = 'failed'
     STATE_CHOICES = [
-        (STATE_PENDING, 'مُرسَل للمموّل'),
+        (STATE_PENDING, 'مُرسَل للمموّل / بانتظار التنفيذ'),
         (STATE_CONFIRMED, 'أكّده المموّل'),
         (STATE_FAILED, 'فشل — تسوية يدوية'),
     ]
