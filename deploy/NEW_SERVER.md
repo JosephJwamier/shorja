@@ -13,21 +13,23 @@
 | | محفوظ أين | ينجو من ضياع الخادم؟ |
 |---|---|---|
 | قاعدة البيانات | `backup.sh` ← R2 كل ليلة | **نعم** |
-| **صور المنتجات والمتاجر** (`media`) | قرص الخادم فقط | **لا** |
+| صور المنتجات والمتاجر (`media`) | `backup.sh` ← R2 كل ليلة | **نعم** |
 | `.env` بأسراره | قرص الخادم فقط | **لا** |
 | `assetlinks.json` | داخل حجم `static` | **لا** |
 | شهادات Caddy | حجم `caddy_data` | لا — وتُعاد تلقائياً |
 | الريلز | R2 | نعم |
 
-> **الصور ليست في أي نسخة احتياطية.** `MEDIA_ROOT` قرصٌ محلي
-> (`settings.py`: `FileSystemStorage`)، و`backup.sh` يرفع تفريغ MySQL وحده —
-> لا سطر فيه يذكر `media`. فلو مات الخادم فجأةً اليوم: القاعدة تنجو، وكل
-> صورة رفعها تاجر تضيع، وتبقى صفوفٌ في القاعدة تشير إلى ملفات غير موجودة.
-> وهذا ليس خطر النقل وحده — هو خطرٌ قائم كل ليلة. النقل المخطَّط له فرصة
-> لنقلها بيدك؛ العطل المفاجئ ليس كذلك.
+> **الصور صارت داخل النسخة الليلية** (2026-11-12). `backup.sh` يرفعها
+> مرآةً ملفاً بملف إلى `r2:shorjeh-backups/media/` — يُضاف إليها ولا يُحذف
+> منها. فخادمٌ يُفقد الليلة لا تُفقد معه صورة، واسترجاعها أمر `rclone` واحد
+> في الخطوة ٥ لا نقلٌ يدويّ للحجم. (وبقيت تُخدَم من القرص المحلي كما كانت:
+> لماذا، في رأس `backup.sh`.)
 >
-> الخطوة ٢ تنقلها. وبعد أن تستقرّ، عالِج السبب: إمّا أن ترفع `media` إلى R2
-> في `backup.sh`، أو أن تنقل التخزين الافتراضي إلى R2 كما فعلت الريلز.
+> **وما زال بلا نسخة: `.env`.** فيه كل الأسرار — كلمة قاعدة البيانات،
+> ومفاتيح R2، وسرّ TURN — ولا شيء يحفظه خارج قرص الخادم. ولا ينبغي أن
+> يُرفع إلى دلو النسخ نفسه: توكنٌ يحرس النسخ لا يُخزَّن داخلها، وإلّا فتحَ
+> من سرق الخادم كلَّ شيء مرّةً واحدة. فاحتفظ بنسخته عندك أنت — وهي أول ما
+> تأخذه في الخطوة ٢.
 
 ولا يُنقل تلقائياً أيضاً، وكلّه خارج الخادم:
 
@@ -72,12 +74,16 @@ docker compose -f deploy/docker-compose.yml exec -T db \
   | gzip -9 > /tmp/balla-final.sql.gz
 ```
 
-الصور — عبر حاوية تحمل الحجم أصلاً، فلا تحتاج أن تخمّن اسمه:
+الصور — لا تُنزَّل إلى جهازك: المرآة الليلية تحملها أصلاً. شغّل النسخة
+مرّةً أخيرة هنا لتلحق بها صور اليوم:
 
 ```bash
-docker compose -f deploy/docker-compose.yml run --rm --no-deps -T \
-  -v /tmp:/out web tar czf /out/media.tgz -C /app/media .
+bash deploy/backup.sh
 ```
+
+يرفع تفريغاً جديداً إلى `daily/` والجديد من الصور إلى `media/`. ولأنه يقرأ
+الحجم بـ`--volumes-from` من حاوية `web` لا من مسارٍ على القرص، يعمل
+والحاويات متوقّفة كما أوقفتها قبل سطور.
 
 و`assetlinks.json` إن كنت قد أنشأته:
 
@@ -86,11 +92,10 @@ docker compose -f deploy/docker-compose.yml run --rm --no-deps -T \
   -v /tmp:/out web cat /app/staticfiles/wellknown/assetlinks.json > /tmp/assetlinks.json
 ```
 
-ثم أنزل الثلاثة و`.env` إلى جهازك:
+ثم أنزل الاثنين و`.env` إلى جهازك:
 
 ```bash
 scp -i ~/.ssh/<مفتاحك> <مستخدم>@<IP القديم>:/tmp/balla-final.sql.gz .
-scp -i ~/.ssh/<مفتاحك> <مستخدم>@<IP القديم>:/tmp/media.tgz .
 scp -i ~/.ssh/<مفتاحك> <مستخدم>@<IP القديم>:/tmp/assetlinks.json .
 scp -i ~/.ssh/<مفتاحك> <مستخدم>@<IP القديم>:~/balla/.env .
 ```
@@ -184,11 +189,26 @@ gunzip -c /tmp/balla-final.sql.gz | docker compose -f deploy/docker-compose.yml 
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-ثم الصور:
+ثم الصور — من المرآة في R2، لا من ملفٍّ نقلته بيدك.
+
+يتطلّب هذا `rclone` مُعدّاً على الخادم الجديد، فنفّذ أول نقطة من **الخطوة ٨**
+(تثبيت `rclone` و`rclone config`) قبل هذا الأمر:
 
 ```bash
-docker compose -f deploy/docker-compose.yml run --rm --no-deps -T \
-  -v /tmp:/in web tar xzf /in/media.tgz -C /app/media
+docker run --rm \
+  --volumes-from "$(docker compose -f deploy/docker-compose.yml ps -aq web | head -n1)" \
+  -v "$(rclone config file | tail -n1):/config/rclone/rclone.conf:ro" \
+  rclone/rclone:latest copy r2:shorjeh-backups/media/ /app/media
+```
+
+> لا `:ro` بعد `--volumes-from` هنا — وهو الفرق الوحيد عن أمر النسخ في
+> `backup.sh`. المهمّة الليلية تركّب الحجم للقراءة فقط عمداً حتى لا تملك
+> إتلاف ما تحميه؛ والاسترجاع وحده يكتب فيه، بيدٍ وبقرار.
+
+ثم تأكّد أن العدد يطابق المصدر — لا أن الأمر «نجح» وحسب:
+
+```bash
+docker compose -f deploy/docker-compose.yml exec web sh -c 'find /app/media -type f | wc -l'
 ```
 
 وتحقّق قبل أن تلمس DNS — كل هذا يعمل بلا شهادة:
@@ -218,8 +238,9 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST \
    وتحرير كل دفعة مرتين، وهذه تُصلَّح بالمال لا بالكود.
 2. أعد تفريغ القاعدة من القديم واسترجعها في الجديد (أوامر الخطوتين ٢ و٥).
    تأخذ دقائق، وهي نافذة التوقّف الحقيقية.
-3. انقل أي صور رُفعت بعد النسخة الأولى:
-   `docker compose ... run --rm --no-deps -T -v /tmp:/out web tar czf /out/media2.tgz -C /app/media .`
+3. الصور التي رُفعت بين النسختين: `bash deploy/backup.sh` على القديم مرّة
+   أخرى، ثم أعد أمر الاسترجاع من الخطوة ٥ على الجديد. المرآة تنقل الجديد
+   وحده، فهي ثوانٍ لا دقائق.
 4. في Cloudflare: وجّه `api` و`live` و`delivery` و`@` و`www` إلى العنوان
    الجديد. و`api` و`live` و`delivery` **رمادية (DNS only)**؛ و`live` تبقى
    رمادية للأبد — الوكيل ينقل HTTP/HTTPS فقط، فتمرّ المفاوضة وتُحجب
@@ -246,12 +267,24 @@ curl -s -o /dev/null -w "%{http_code}\n" https://shorjeh.com/.well-known/assetli
 
 ## 8. ما يبقى بعد أن يعمل كل شيء
 
-- **النسخ الاحتياطي:** ثبّت `rclone`، أعد `rclone config` (التعليمات في
-  رأس `backup.sh`)، وأضف سطر `crontab`. بلا هذه الخطوة يعمل الخادم الجديد
-  بلا نسخة أي ليلة. و`SENTRY_DSN` في `.env` هو ما يُنبّهك إن توقّفت.
-- **جرّب الاسترجاع مرة واحدة** على قاعدة اختبار. نسخةٌ لم تُجرَّب ليست نسخة.
-- **عالج فجوة الصور** من القسم صفر، وإلا كرّرت هذا النقل اليدوي في كل مرة —
-  وفي المرة غير المخطَّط لها لن تستطيع.
+- **النسخ الاحتياطي:** ثبّت `rclone`، أعد `rclone config`، وثبّت نسخة
+  صورة `rclone` في `.env` (التعليمات الأربع في رأس `backup.sh`)، وأضف سطر
+  `crontab`. بلا هذه الخطوة يعمل الخادم الجديد بلا نسخة أي ليلة — لا
+  للقاعدة ولا للصور. و`SENTRY_DSN` في `.env` هو ما يُنبّهك إن توقّفت.
+- **جرّب الاسترجاع مرة واحدة** — القاعدة على قاعدة اختبار، والصور بأن تطلب
+  ملفاً واحداً من المرآة وتفتحه. نسخةٌ لم تُجرَّب ليست نسخة:
+
+  ```bash
+  rclone lsf --files-only -R r2:shorjeh-backups/media/ | head
+  rclone copy r2:shorjeh-backups/media/item_images /tmp/probe --include '*.jpg' --max-transfer 1M
+  ```
+- **تحقّق أن الصور تُرفَع فعلاً بعد أول ليلة** — سطر `[backup] ok` في
+  `/var/log/balla-backup.log` يطبع عدد الملفات، وصفرٌ هناك مع متجر عامل
+  يعني أن الحجم لم يُركَّب:
+
+  ```bash
+  tail -1 /var/log/balla-backup.log   # ‎[backup] ok … (db 12M / media 3417 files)
+  ```
 - **أوقف الخادم القديم** بعد يوم أو يومين من استقرار كل شيء، لا قبل. واحتفظ
   بـ`.env` القديم عندك حتى تتأكّد.
 - التطبيق لا يُعاد بناؤه: يقصد `api.shorjeh.com` بالاسم، وقد تبعه DNS.
