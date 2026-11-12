@@ -605,11 +605,27 @@ UNFOLD = {
                 ],
             },
             {
+                'title': 'التقسيط',
+                'items': [
+                    # الشارة = عدد الطلبات المنتظِرة، فتُرى من أي صفحة في
+                    # اللوحة (core.admin_site.pending_installment_requests).
+                    {'title': 'طلبات وخطط التقسيط', 'icon': 'credit_card',
+                     'link': reverse_lazy('admin:core_installmentplan_changelist'),
+                     'badge': 'core.admin_site.pending_installment_requests',
+                     'badge_variant': 'warning'},
+                    {'title': 'الأقساط المحصَّلة', 'icon': 'event_repeat',
+                     'link': reverse_lazy('admin:core_installmentcollection_changelist')},
+                    {'title': 'إرجاعات التمويل', 'icon': 'undo',
+                     'link': reverse_lazy('admin:core_installmentreversal_changelist')},
+                ],
+            },
+            {
                 'title': 'المال والمحافظ',
                 'items': [
                     {'title': 'المحافظ', 'icon': 'account_balance_wallet', 'link': reverse_lazy('admin:core_wallet_changelist')},
                     {'title': 'طلبات الإيداع', 'icon': 'add_card', 'link': reverse_lazy('admin:core_depositrequest_changelist')},
                     {'title': 'طلبات السحب', 'icon': 'payments', 'link': reverse_lazy('admin:core_withdrawalrequest_changelist')},
+                    {'title': 'عمليات الدفع (البوابة)', 'icon': 'receipt', 'link': reverse_lazy('admin:core_paymentintent_changelist')},
                     {'title': 'الإشعارات', 'icon': 'notifications', 'link': reverse_lazy('admin:core_notification_changelist')},
                 ],
             },

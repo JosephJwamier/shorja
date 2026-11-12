@@ -424,6 +424,34 @@ def test_the_review_page_breaks_the_amount_down_and_it_adds_up(staff):
     assert payout == plan.total_payable
 
 
+def test_the_sidebar_shows_the_requests_and_counts_them(staff):
+    """القائمة الجانبية في unfold مكتوبة بيد لا مُولَّدة من النماذج
+    المسجَّلة، فنموذج جديد لا يظهر فيها مهما سُجّل — وهذا ما كان يُخفي
+    التقسيط عن الإدارة رغم وجود صفحاته.
+
+    والشارة هي ما يجعل الطلب مرئياً من أي صفحة: لا بريد يُنبّه أحداً،
+    ونافذة المراجعة 72 ساعة."""
+    buyer, seller = make_user('m_nav_b'), make_user('m_nav_s')
+    requested(buyer, seller)
+    client = Client()
+    client.force_login(staff)
+
+    page = client.get(reverse('admin:core_reservation_changelist'))
+    content = page.content.decode()
+
+    assert reverse('admin:core_installmentplan_changelist') in content
+    assert reverse('admin:core_installmentreversal_changelist') in content
+    assert 'طلبات وخطط التقسيط' in content
+    # الشارة: طلب واحد بانتظار المكالمة.
+    from core.admin_site import pending_installment_requests
+    assert pending_installment_requests(None) == '1'
+
+
+def test_the_badge_is_empty_when_nothing_is_waiting(staff):
+    from core.admin_site import pending_installment_requests
+    assert pending_installment_requests(None) == ''
+
+
 def test_the_changelist_never_shows_the_full_number(staff):
     buyer, seller = make_user('m_cl_b'), make_user('m_cl_s')
     _, plan = requested(buyer, seller)
