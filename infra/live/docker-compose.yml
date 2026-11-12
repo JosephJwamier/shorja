@@ -32,8 +32,19 @@ services:
     command: >
       sh -c "sed -e 's|__HOOK_BASE__|'\"$$DJANGO_HOOK_BASE\"'|g' -e 's|__HOOK_SECRET__|'\"$$SRS_HOOK_SECRET\"'|g'
       /usr/local/srs/conf/docker.conf > /tmp/srs.conf && exec ./objs/srs -c /tmp/srs.conf"
+    # bash لا wget: صورة ossrs/srs لا تحمل wget ولا curl ولا nc — ولا
+    # حتى busybox. فالفحص السابق كان يخرج بـ127 ("not found") كل خمس
+    # عشرة ثانية، وبقيت الحاوية unhealthy ثلاثة أسابيع بلا عطب فيها:
+    # 126,378 فشلاً متتالياً، وSRS يبثّ طوال الوقت.
+    #
+    # وفحصٌ يكذب أسوأ من لا فحص: `depends_on: service_healthy` لن يمرّ
+    # أبداً لمن يعتمد عليها، و«unhealthy» الدائمة تُخفي اليوم الذي تصير
+    # فيه صادقة.
+    #
+    # /dev/tcp في bash يفتح مقبساً بلا أداة خارجية، والطلب كامل لا مجرّد
+    # فتح منفذ: منفذٌ مفتوح وSRS عالق لا يردّ حالةٌ نريد أن نراها.
     healthcheck:
-      test: ["CMD", "sh", "-c", "wget -qO- http://127.0.0.1:1985/api/v1/versions >/dev/null"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/1985 && printf 'GET /api/v1/versions HTTP/1.0\r\n\r\n' >&3 && head -1 <&3 | grep -q '200 OK'"]
       interval: 15s
       timeout: 5s
       retries: 3
