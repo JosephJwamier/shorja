@@ -374,8 +374,8 @@ def test_the_review_page_shows_the_number_and_approves(staff):
     # The figure the admin types into Qi is the grossed-up one, not the price,
     # and it is not localised into "1073685,00".
     content = page.content.decode()
-    assert '>1073685<' in content
-    assert '1073685,00' not in content
+    assert '>1074000<' in content
+    assert '1074000,00' not in content
 
     done = client.post(url, {'decision': 'approve', 'provider_reference': 'QI-9'})
     assert done.status_code == 302

@@ -1009,6 +1009,17 @@ INSTALLMENT_PLATFORM_FEE_PERCENT = os.environ.get('INSTALLMENT_PLATFORM_FEE_PERC
 # فقط: الحجز لا ينتهي ما دام طلبه مفتوحاً، والرفض يمنحه يوماً بعدها.
 INSTALLMENT_REVIEW_HOURS = int(os.environ.get('INSTALLMENT_REVIEW_HOURS', '72'))
 
+# المبلغ المكتوب في كي كارد يُدوَّر لأعلى مضاعف لهذا الرقم.
+#
+# 500 لأن الرقم يُملى في الهاتف ويُكتب بيد موظّف في منصة كي كارد: مبلغ
+# ينتهي بـ 500 أو 000 يُقال ويُراجَع بلا خطأ، و1,073,685 لا. والفرق
+# (أقلّ من 500) يبقى للمنصة كما يبقى كسر التدوير الحالي.
+#
+# يُدوَّر المكتوب وحده: القسط الشهري ناتج قسمةِ المكتوب + نسبة كي كارد على
+# عدد الأشهر، وكي كارد هي من يصدره — فتدويره هنا كان يعرض على المشتري رقماً
+# غير الذي سيُستقطع من راتبه.
+INSTALLMENT_ROUNDING_STEP = os.environ.get('INSTALLMENT_ROUNDING_STEP', '500')
+
 # =============================================================================
 # Platform commission — what الشورجة keeps from each sale, taken from the
 # SELLER when escrow is released (never added on top of what the buyer pays).

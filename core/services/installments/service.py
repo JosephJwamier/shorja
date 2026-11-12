@@ -93,6 +93,7 @@ def options():
         'platform_fee_percent': str(platform_fee_percent()),
         'min_amount': str(terms.min_amount),
         'max_amount': str(terms.max_amount),
+        'rounding_step': str(rounding_step()),
         'settlement_mode': terms.settlement_mode,
         # يحدّد للتطبيق أيّ مسار يعرض: 'manual' = رقم الحساب ثم «سنتصل بك»،
         # 'api' = فحص البطاقة والجدول ثم التأكيد الفوري.
@@ -137,10 +138,15 @@ def pricing(principal, terms, *, customer_fee_percent=None, months=None):
         A × (1 − merchant%)  =  principal × (1 + platform%)
         buyer pays           =  A × (1 + customer%)
 
-    For a 1,000,000 order at 10% / 5% / 2%: A = 1,073,685, the buyer pays
-    1,181,054 (118,106 × 10), Qi pays the platform 1,020,001 — 1,000,000 for
-    the seller and 20,000 for the platform. A is rounded up to the whole
-    dinar, so rounding can only ever leave the platform a dinar ahead.
+    For a 1,000,000 order at 10% / 5% / 2%: A = 1,074,000, the buyer pays
+    1,181,400 (118,140 × 10), Qi pays the platform 1,020,300 — 1,000,000 for
+    the seller and 20,300 for the platform.
+
+    A is rounded **up to the next 500** (INSTALLMENT_ROUNDING_STEP), because
+    it is dictated over the phone and typed by hand into Qi's platform. The
+    rounding can only ever leave the platform ahead, never short. The monthly
+    figure is not rounded with it: Qi derives the schedule from A, so a round
+    installment here would be a number the buyer never actually pays.
     """
     principal = _money(principal)
     months = max(int(months or terms.months or 1), 1)
@@ -153,8 +159,7 @@ def pricing(principal, terms, *, customer_fee_percent=None, months=None):
     keep = Decimal('1') - merchant_percent / Decimal('100')
     if keep <= 0:
         raise InstallmentError('merchant fee of %s%% leaves nothing to settle' % merchant_percent)
-    qi_amount = ((principal + platform_fee) / keep).quantize(Decimal('1'), ROUND_CEILING)
-    qi_amount = _money(qi_amount)
+    qi_amount = _money(_ceil_to((principal + platform_fee) / keep, rounding_step()))
     merchant_fee = _percent_of(qi_amount, merchant_percent)
     customer_fee = _percent_of(qi_amount, customer_percent)
     total_payable = qi_amount + customer_fee
@@ -858,6 +863,28 @@ def _monthly(total, months):
     returns one."""
     months = max(int(months or 1), 1)
     return (_money(total) / Decimal(months)).quantize(Decimal('1'), ROUND_CEILING)
+
+
+def rounding_step():
+    """The multiple the amount written at Qi is rounded up to. 1 disables it.
+
+    A settings value rather than a constant so a renegotiated step (250, or
+    none at all) is an env change — the same reason every other term here is
+    one.
+    """
+    try:
+        step = Decimal(str(getattr(settings, 'INSTALLMENT_ROUNDING_STEP', '500')))
+    except Exception:
+        return Decimal('1')
+    return step if step >= 1 else Decimal('1')
+
+
+def _ceil_to(value, step):
+    """Up to the next multiple of `step` — never down: a rounding that can
+    take the platform below what it owes the seller is not a rounding, it is
+    a slow loss."""
+    step = Decimal(step)
+    return (Decimal(value) / step).quantize(Decimal('1'), ROUND_CEILING) * step
 
 
 def platform_fee_percent():

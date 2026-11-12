@@ -52,11 +52,12 @@ PROVIDER_SETTINGS = {
 
 PRICE = Decimal('1000000.00')
 # The customer carries every fee (service.pricing): the amount written to Qi is
-# grossed up so that after Qi keeps 5% the platform is left with the order
-# plus its 2% — 1,020,000 / 0.95 rounded up — and Qi adds its 10% on top.
-QI_AMOUNT = Decimal('1073685.00')
-TOTAL_PAYABLE = Decimal('1181053.50')
-MONTHLY = Decimal('118106')
+# grossed up so that after Qi keeps 5% the platform is left with the order plus
+# its 2% — 1,020,000 / 0.95 — and then rounded up to the next 500, because it is
+# typed into Qi's platform by hand. Qi adds its 10% on top of that.
+QI_AMOUNT = Decimal('1074000.00')
+TOTAL_PAYABLE = Decimal('1181400.00')
+MONTHLY = Decimal('118140')
 PLATFORM_FEE = Decimal('20000.00')
 
 
@@ -169,6 +170,38 @@ def test_price_preview_is_the_monthly_figure():
     assert preview['fees_amount'] == str(TOTAL_PAYABLE - PRICE)
 
 
+def test_the_amount_written_at_qi_is_rounded_up_to_the_next_500():
+    """الرقم يُملى في الهاتف ويُكتب بيد موظّف في منصة كي كارد، فيُدوَّر:
+    1,073,684.21 تصير 1,074,000.
+
+    ولأعلى دائماً لا لأقرب: تدويرٌ لأسفل يُنقص ما تقبضه المنصة عمّا تدين
+    به للبائع، فيصير كل طلب خسارة صغيرة صامتة."""
+    from core.services.installments.service import _ceil_to
+    assert _ceil_to(Decimal('1422'), 500) == Decimal('1500')
+    assert _ceil_to(Decimal('1550'), 500) == Decimal('2000')
+    assert _ceil_to(Decimal('1500'), 500) == Decimal('1500')
+
+
+def test_the_rounding_never_leaves_the_platform_short():
+    """الحارس الحقيقي على التدوير: مهما كان المبلغ، ما تسدّده كي كارد بعد
+    خصم نسبتها يغطّي ثمن الطلب ورسم المنصة كاملين."""
+    from core.services.installments.service import pricing
+    terms = get_provider('qicard').terms
+    for amount in ('250000', '333333', '999999', '1000000', '4999999'):
+        price = pricing(Decimal(amount), terms)
+        assert price['qi_amount'] % Decimal('500') == 0, amount
+        assert price['platform_settlement'] >= (price['principal']
+                                                + price['platform_fee_amount']), amount
+
+
+def test_the_rounding_step_is_a_setting(settings):
+    settings.INSTALLMENT_ROUNDING_STEP = '1'
+    from core.services.installments.service import pricing
+    price = pricing(PRICE, get_provider('qicard').terms)
+    # بلا تدوير: المبلغ الخام مُقرَّباً لأعلى دينار.
+    assert price['qi_amount'] == Decimal('1073685.00')
+
+
 def test_price_preview_is_none_below_the_floor():
     assert price_preview(Decimal('100000')) is None
 
@@ -185,14 +218,16 @@ def test_a_quote_prices_the_whole_schedule():
     assert plan.state == InstallmentPlan.STATE_QUOTED
     assert plan.principal == PRICE
     assert plan.qi_amount == QI_AMOUNT
-    assert plan.customer_fee_amount == Decimal('107368.50')   # 10% of QI_AMOUNT
+    assert plan.customer_fee_amount == Decimal('107400.00')   # 10% of QI_AMOUNT
     assert plan.total_payable == TOTAL_PAYABLE
     assert plan.monthly_amount == MONTHLY
-    assert plan.merchant_fee_amount == Decimal('53684.25')    # 5% of QI_AMOUNT
+    assert plan.merchant_fee_amount == Decimal('53700.00')    # 5% of QI_AMOUNT
     assert plan.platform_fee_amount == PLATFORM_FEE
     assert plan.seller_fee_amount == Decimal('0.00')
     # What Qi pays out covers the seller's whole order and the platform's 2%.
-    assert plan.platform_settlement == Decimal('1020000.75')
+    # المكتوب ناقص نسبة كي كارد: يغطّي المليون ورسم المنصة، والفائض
+    # (300) هو تدوير المكتوب لأعلى 500 ويبقى للمنصة.
+    assert plan.platform_settlement == Decimal('1020300.00')
     assert plan.platform_settlement >= PRICE + PLATFORM_FEE
     assert plan.applied_at is None
 
@@ -390,8 +425,8 @@ def test_the_platform_fee_is_a_setting(settings):
     buyer, seller = make_user('ins_sh_buyer'), make_user('ins_sh_seller')
     reservation, plan = financed(buyer, seller)
 
-    # Only Qi's 5% left to cover: 1,000,000 / 0.95, rounded up.
-    assert plan.qi_amount == Decimal('1052632.00')
+    # Only Qi's 5% left to cover: 1,000,000 / 0.95, up to the next 500.
+    assert plan.qi_amount == Decimal('1053000.00')
     assert plan.platform_fee_amount == Decimal('0.00')
     release_reservation_payment(reservation)
     assert balance(seller) == PRICE
@@ -671,7 +706,7 @@ def test_check_then_confirm_over_http(client):
                          'card_number': GOOD_CARD}, format='json')
     assert check.status_code == 200, check.data
     assert check.data['eligible'] is True
-    assert check.data['data']['monthly_amount'] == '118106.00'
+    assert check.data['data']['monthly_amount'] == '118140.00'
 
     reference = check.data['data']['reference']
     done = client.post('/api/installments/confirm/', {'reference': reference},
@@ -748,7 +783,7 @@ def test_the_reservation_payload_shows_the_financing():
     from core.serializers import ReservationSerializer
     data = ReservationSerializer(reservation).data['installment']
     assert data['months'] == 10
-    assert data['monthly_amount'] == '118106.00'
+    assert data['monthly_amount'] == '118140.00'
     assert data['card_last4'] == GOOD_CARD[-4:]
 
 
