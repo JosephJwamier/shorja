@@ -4985,6 +4985,26 @@ class DisputeViewSet(viewsets.ModelViewSet):
             'message': 'لا يمكن حذف النزاع. يتم إغلاقه فقط عبر قرار الإدارة (resolve).'
         }, status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
+    # Create and update are closed too. A dispute is opened by create_dispute
+    # (which checks the complainant is the buyer, not the seller) and decided
+    # by resolve (admins only). A plain PATCH let the defendant close the
+    # complaint against them with a fake resolution and "admin notes", which
+    # took it out of the open-disputes queue the admins work from.
+    def _closed(self):
+        return Response({
+            'success': False,
+            'message': 'افتح النزاع عبر create_dispute، ويُغلق فقط بقرار الإدارة (resolve).'
+        }, status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def create(self, request, *args, **kwargs):
+        return self._closed()
+
+    def update(self, request, *args, **kwargs):
+        return self._closed()
+
+    def partial_update(self, request, *args, **kwargs):
+        return self._closed()
+
     @swagger_auto_schema(
         operation_description="Create a dispute for an item or reservation",
         request_body=CreateDisputeSerializer,

@@ -1201,7 +1201,9 @@ class DisputeSerializer(serializers.ModelSerializer):
             'resolution', 'resolution_action', 'created_at', 'resolved_at',
             'can_resolve'
         ]
-        read_only_fields = ['created_at', 'resolved_at']
+        # Output only: the decision and the admin's notes are written by
+        # DisputeViewSet.resolve, never by either party.
+        read_only_fields = fields
 
     def get_can_resolve(self, obj):
         return obj.status in ['open', 'investigating']
