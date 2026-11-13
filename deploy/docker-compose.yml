@@ -134,6 +134,13 @@ services:
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
     env_file: ../.env
+    # beat لا يرسل إشعاراً بنفسه، لكنه يأخذ المفتاح كغيره. بدونه يفشل فحص
+    # Firebase في NEW_SERVER.md حين يُشغَّل هنا، فيبدو أن الإشعارات معطّلة
+    # وهي تعمل. فحصٌ تتغيّر نتيجته بحسب الحاوية التي اخترتها يُضلّل.
+    environment:
+      FIREBASE_CREDENTIALS_PATH: /run/secrets/firebase-credentials.json
+    volumes:
+      - *firebase-key
     # نسخة واحدة فقط مهما توسّعت: نسختان تعنيان إغلاق كل مزاد مرتين
     # وتحرير كل دفعة مرتين.
     command: celery -A balla beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
