@@ -31,7 +31,11 @@ def _get_user_from_token(token):
     try:
         validated_token = AccessToken(token)
         user_id = validated_token['user_id']
-        return User.objects.get(id=user_id)
+        # is_active=True: a deleted account (delete-account deactivates it)
+        # or one an admin banned would otherwise keep its chat and live
+        # sockets open for the rest of its access token's 30 minutes.
+        # REST already refuses those users; the socket has to match.
+        return User.objects.get(id=user_id, is_active=True)
     except (TokenError, KeyError, User.DoesNotExist) as e:
         logger.debug(f"WebSocket JWT auth failed: {e}")
         return AnonymousUser()
