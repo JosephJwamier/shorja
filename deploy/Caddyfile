@@ -126,11 +126,10 @@ live.shorjeh.com {
 		}
 	}
 
-	# إحصاءات للقراءة فقط — لا واجهة SRS كاملة فهي تقطع البثّ بطلب واحد.
-	handle /api/v1/streams* {
-		reverse_proxy host.docker.internal:1985
-	}
-
+	# واجهة SRS (/api/v1/*) لا تُفتح للعموم إطلاقاً. كانت /api/v1/streams
+	# هنا «للقراءة فقط»، لكن Caddy يمرّر كل الطرق، فكانت تكشف أسماء البثوث
+	# لأي أحد، ولا شيء في التطبيق ولا الباك إند يقرؤها. للمراقبة من الخادم:
+	#   curl -s http://127.0.0.1:1985/api/v1/streams/
 	handle {
 		respond "live" 200
 	}

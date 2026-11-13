@@ -86,13 +86,11 @@
         }
     }
 
-    # Read-only stats for the admin/dashboard (never the full SRS API).
-    handle /api/v1/streams* {
-        reverse_proxy 127.0.0.1:1985
-    }
-    handle /api/v1/clients* {
-        reverse_proxy 127.0.0.1:1985
-    }
+    # The SRS HTTP API (/api/v1/*) is never public. /api/v1/streams and
+    # /api/v1/clients used to be proxied here as "read-only stats", but Caddy
+    # passes every method: DELETE /api/v1/clients/<id> kicks a publisher off
+    # the air with one anonymous request. Nothing in the app or backend reads
+    # them. Monitor from the box: curl -s http://127.0.0.1:1985/api/v1/streams/
 
     # Everything else on this host is nobody's business.
     handle {
