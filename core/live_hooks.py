@@ -427,7 +427,15 @@ class HlsSecretMixin:
     throttle_classes = []
 
     def caddy_sent_this(self, request):
-        return request.query_params.get("secret", "") == getattr(settings, "SRS_HOOK_SECRET", None)
+        # Same two rules as SrsHookView.post. Fail closed on an unset secret:
+        # `"" == ""` used to let a request with no ?secret= through on any
+        # deploy that left SRS_HOOK_SECRET blank. And compare_digest, not ==:
+        # the secret is fixed and checked about once per viewer per second,
+        # the shape a timing comparison leaks.
+        expected = getattr(settings, "SRS_HOOK_SECRET", "") or ""
+        if not expected:
+            return False
+        return secrets.compare_digest(request.query_params.get("secret", ""), expected)
 
 
 class HlsAuthView(HlsSecretMixin, APIView):

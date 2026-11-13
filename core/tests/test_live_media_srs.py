@@ -597,6 +597,24 @@ def test_both_endpoints_need_the_shared_secret(origin):
                        secret='wrong').status_code == 403
 
 
+@pytest.mark.parametrize('configured', ['', None])
+def test_an_unconfigured_secret_closes_hls_too(settings, origin, configured):
+    """نفس عطب الخطّاف أعلاه، وكان باقياً هنا.
+
+    `caddy_sent_this` كانت تقارن بـ`==`، فطلبٌ بلا سرّ على نشرٍ نُسي فيه
+    `SRS_HOOK_SECRET` يقارن `''` بـ`''` وينجح: قائمة التشغيل والمقاطع
+    تُعطى لمن يطلبها مباشرة دون Caddy.
+    """
+    settings.SRS_HOOK_SECRET = configured
+    session, _ = make_session()
+    viewer = User.objects.create_user(username='viewer_nosecret', password='x')
+    origin.serving(session.stream_name)
+    token = tok(session, viewer.id)
+    assert ask_playlist(session, token, secret='').status_code == 403
+    assert ask_segment('/live/%s-12.ts?token=%s' % (session.stream_name, token),
+                       secret='').status_code == 403
+
+
 def test_the_original_segment_request_must_be_a_read(origin):
     session, _ = make_session()
     viewer = User.objects.create_user(username='viewer', password='x')
