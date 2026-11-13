@@ -7,6 +7,7 @@ from decimal import Decimal
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 import re
+import uuid
 
 from .phone_utils import to_e164
 from .models import (
@@ -1711,15 +1712,27 @@ class MessageSerializer(serializers.ModelSerializer):
 class MessageCreateSerializer(serializers.Serializer):
     """Serializer for creating messages"""
     content = serializers.CharField(required=False, allow_blank=True, default='')
-    attachment = serializers.FileField(required=False, allow_null=True)
+    # ImageField, not FileField: Pillow has to open the bytes as a picture.
+    # The old check read `content_type`, which is whatever the sender typed,
+    # so an HTML page sent as "image/png" was stored as chat_attachments/x.html
+    # and Caddy served it as text/html on api.shorjeh.com, the admin's origin.
+    attachment = serializers.ImageField(required=False, allow_null=True)
+
+    # Formats Pillow decoded, mapped to the only extensions we will write.
+    # The extension is what Caddy picks the Content-Type from, so it must
+    # come from the decoded image, never from the sender's filename.
+    ATTACHMENT_EXTENSIONS = {'JPEG': 'jpg', 'PNG': 'png', 'WEBP': 'webp', 'GIF': 'gif'}
 
     def validate_attachment(self, value):
         if not value:
             return value
-        if not (value.content_type or '').startswith('image/'):
-            raise serializers.ValidationError("Attachment must be an image.")
         if value.size > 5 * 1024 * 1024:
             raise serializers.ValidationError("Image must be 5MB or smaller.")
+        image_format = getattr(getattr(value, 'image', None), 'format', None)
+        extension = self.ATTACHMENT_EXTENSIONS.get(image_format)
+        if extension is None:
+            raise serializers.ValidationError("Attachment must be a JPEG, PNG, WebP or GIF image.")
+        value.name = '%s.%s' % (uuid.uuid4().hex, extension)
         return value
 
     def validate(self, data):

@@ -6,8 +6,14 @@ api.shorjeh.com {
 
 	# الوسائط والثابت من القرص مباشرة: urls.py لا يخدمها عند DEBUG=False،
 	# وCaddy أسرع من Django لها بمراتب.
+	#
+	# /media ملفات رفعها المستخدمون، فـ sandbox يمنع أي سكربت فيها من العمل
+	# حتى لو تسلّل ملف HTML أو SVG (هذا النطاق نفسه يحمل لوحة الإدارة).
+	# لا يمسّ عرض الصور: الرأس يحكم الصفحة المفتوحة في المتصفح لا <img>
+	# ولا Image.network في التطبيق.
 	handle_path /media/* {
 		root * /srv/media
+		header Content-Security-Policy "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox"
 		file_server
 	}
 	handle_path /static/* {
@@ -186,6 +192,7 @@ shorjeh.com, www.shorjeh.com {
 	# من هذا النطاق لا من api، فلا بد أن تُخدَم هنا أيضاً.
 	handle_path /media/* {
 		root * /srv/media
+		header Content-Security-Policy "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox"
 		file_server
 	}
 
