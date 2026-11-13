@@ -66,6 +66,27 @@ class TestOpenToAnyone:
         assert client.get(f'/p/{listing.id}').status_code == 404
 
 
+class TestNothingMeantForUsLeaks:
+    """تعليق قالب ظهر للزائر على صفحة منتج حقيقية.
+
+    السبب أن `{#` في Django لسطر واحد، وتعليقاً امتدّ سطرين طُبع حرفياً.
+    ولأنه كان في head نقله المتصفّح إلى body فصار عنصراً في الـflex
+    يسحق البطاقة ويقصّ نصّ الزر — فالعطب بدا تنسيقاً وهو تعليق.
+    """
+
+    def test_no_template_comment_reaches_the_reader(self, client, listing):
+        html = client.get(f'/p/{listing.id}').content.decode()
+        for marker in ('{#', '#}', '{% comment', '{% endcomment'):
+            assert marker not in html, marker
+
+    def test_the_same_holds_for_every_share_page(self, client, listing, seller):
+        # القالب واحد لكل الصفحات، لكن الصفحة الرئيسية قالبٌ آخر.
+        shop = UserStore.objects.create(user=seller, name='متجر علي', is_active=True)
+        for path in (f'/p/{listing.id}', f'/s/{shop.id}', '/'):
+            html = client.get(path).content.decode()
+            assert '{#' not in html and '{% comment' not in html, path
+
+
 class TestOpenGraphTags:
     def test_card_carries_title_description_and_image(self, client, listing):
         html = client.get(f'/p/{listing.id}').content.decode()

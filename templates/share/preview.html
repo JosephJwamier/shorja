@@ -5,8 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ title }} — الشورجة</title>
 
-{# واتساب وتيليغرام وفيسبوك يقرؤون هذه الوسوم وحدها لرسم البطاقة. لا
-   جافاسكربت ينتظرونه ولا تنسيق يهمّهم — فتأتي قبل كل شيء في <head>. #}
+{% comment %}
+تعليق القالب القصير لا يصلح هنا: هو لسطر واحد، وامتداده سطرين يطبعه
+حرفياً للزائر — وقد حدث. ولأنه كان داخل head نقله المتصفّح إلى body،
+فصار عنصراً في الـflex يسحق البطاقة ويقصّ نصّ الزر.
+واتساب وتيليغرام وفيسبوك يقرؤون هذه الوسوم وحدها لرسم البطاقة. لا
+جافاسكربت ينتظرونه ولا تنسيق يهمّهم — فتأتي قبل كل شيء في <head>.
+{% endcomment %}
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="الشورجة">
 <meta property="og:locale" content="ar_IQ">
@@ -37,7 +42,9 @@
   body {
     margin: 0; background: var(--bg); color: var(--ink);
     font-family: system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif;
-    display: flex; align-items: center; justify-content: center;
+    /* column: الافتراضي صفٌّ واحد، فكان التذييل يقف بجانب البطاقة. */
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
     min-height: 100vh; padding: 16px;
   }
   .card {
