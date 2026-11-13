@@ -15,6 +15,7 @@
 | قاعدة البيانات | `backup.sh` ← R2 كل ليلة | **نعم** |
 | صور المنتجات والمتاجر (`media`) | `backup.sh` ← R2 كل ليلة | **نعم** |
 | `.env` بأسراره | قرص الخادم فقط | **لا** |
+| `~/secrets/firebase-credentials.json` | قرص الخادم + جهازك | من جهازك فقط |
 | `assetlinks.json` | داخل حجم `static` | **لا** |
 | شهادات Caddy | حجم `caddy_data` | لا — وتُعاد تلقائياً |
 | الريلز | R2 | نعم |
@@ -100,6 +101,9 @@ scp -i ~/.ssh/<مفتاحك> <مستخدم>@<IP القديم>:/tmp/assetlinks.js
 scp -i ~/.ssh/<مفتاحك> <مستخدم>@<IP القديم>:~/balla/.env .
 ```
 
+ومفتاح Firebase موجود أصلاً على جهازك في مجلد المشروع
+(`firebase-credentials.json`، وهو في `.gitignore`)، فلا حاجة لتنزيله.
+
 **أعد تشغيل القديم** بعدها (`up -d`) ليبقى يخدم حتى التبديل. القاعدة التي
 نسختَها ستتأخّر عن الواقع بما يدخل بينهما — لذا يُعاد التفريغ مرة أخيرة في
 الخطوة ٦، وهذه النسخة بروفة.
@@ -164,6 +168,20 @@ PUBLIC_IP=<IP الخادم الجديد>
 
 راجع أن هذه موجودة، فالنقل يُنسيها: `127.0.0.1` ضمن `ALLOWED_HOSTS`،
 و`SRS_HLS_ORIGIN=http://host.docker.internal:8080`، و`SRS_DVR=off`.
+
+ثم **مفتاح Firebase**، من جهازك:
+
+```bash
+ssh shorjeh@<IP الجديد> 'mkdir -p -m 700 ~/secrets'
+scp firebase-credentials.json shorjeh@<IP الجديد>:~/secrets/
+ssh shorjeh@<IP الجديد> 'chmod 600 ~/secrets/firebase-credentials.json'
+```
+
+بدونه لا تصل الإشعارات إلى أي هاتف، ولا يعمل الدخول بـGoogle (يردّ 503).
+وغيابه لا يُسقط شيئاً ظاهراً، ولذلك بقي الخادم الأول بلا إشعارات شهراً
+كاملاً. لهذا يرفض `docker compose up` الآن البدء إن لم يجد الملف (انظر
+`x-firebase-key` في `docker-compose.yml`). إن رأيت خطأ `bind source path
+does not exist` فهذه الخطوة هي التي نقصت.
 
 ---
 
@@ -255,6 +273,18 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST \
 for d in api live delivery; do curl -s -o /dev/null -w "$d %{http_code}\n" https://$d.shorjeh.com/; done
 curl -s -o /dev/null -w "%{http_code}\n" https://shorjeh.com/.well-known/assetlinks.json
 ```
+
+وأن Firebase يقبل المفتاح، لا أن الملف موجود فقط. مفتاحٌ أُلغي من لوحة
+Firebase يُقرأ بلا خطأ ثم يُرفض عند أول إرسال:
+
+```bash
+docker compose -f deploy/docker-compose.yml exec -T worker python manage.py shell -c "
+from core.firebase import get_firebase_app; from firebase_admin import messaging
+get_firebase_app()
+messaging.send(messaging.Message(topic='healthcheck'), dry_run=True); print('firebase ok')"
+```
+
+`dry_run` يمرّ بالمصادقة كاملة ولا يصل منه شيء إلى أي هاتف.
 
 ثم بثّ حقيقي من هاتف: ابدأ جلسة وشاهدها من هاتف آخر على شبكة جوّال لا
 على نفس الواي-فاي — فمسار المرحّل (coturn) هو ما لا يُختبر إلا هكذا، وهو

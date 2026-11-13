@@ -13,6 +13,26 @@
 #
 # البثّ يشارك هذا الخادم بقرار؛ ما يعنيه ذلك وحدوده في deploy/README.md
 # تحت «البثّ على نفس الخادم».
+
+# مفتاح حساب خدمة Firebase. عليه تقوم إشعارات الهاتف كلها (حجز، مزاد،
+# دردشة، تذكير التسليم) وتسجيل الدخول بـGoogle. غيابه لا يُسقط شيئاً
+# ظاهراً: يُكتب سطر في السجلّ ويبقى كل إشعار في قاعدة البيانات ولا يصل
+# إلى أي هاتف. هكذا بقي الإنتاج شهراً كاملاً دون أن يلاحظ أحد.
+#
+# لذلك create_host_path: false. بدونه يُنشئ Docker مجلداً فارغاً بهذا
+# الاسم إن لم يجد الملف، فتقلع الحاويات وتعود المشكلة صامتة كما كانت.
+# بهذا الإعداد يرفض `up` البدء ويسمّي الملف الناقص.
+#
+# الملف خارج مجلد المشروع (~/secrets لا ~/balla) لسببين: `COPY . .` في
+# الـDockerfile كان سيضعه داخل الصورة، وإعادة استنساخ المستودع لا تمسّه.
+x-firebase-key: &firebase-key
+  type: bind
+  source: ../../secrets/firebase-credentials.json
+  target: /run/secrets/firebase-credentials.json
+  read_only: true
+  bind:
+    create_host_path: false
+
 services:
   db:
     image: mysql:8.0
@@ -61,6 +81,8 @@ services:
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
     env_file: ../.env
+    environment:
+      FIREBASE_CREDENTIALS_PATH: /run/secrets/firebase-credentials.json
     # daphne لا gunicorn: الدردشة والبث المباشر على WebSocket، وWSGI لا يحملها.
     command: >
       sh -c "python manage.py migrate --noinput &&
@@ -83,6 +105,7 @@ services:
     volumes:
       - media:/app/media
       - static:/app/staticfiles
+      - *firebase-key
     depends_on:
       db: {condition: service_healthy}
       redis: {condition: service_healthy}
@@ -93,9 +116,14 @@ services:
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
     env_file: ../.env
+    # العامل هو من يرسل أغلب الإشعارات (المهامّ المجدولة والتذكيرات)، فله
+    # المفتاح كما لـweb.
+    environment:
+      FIREBASE_CREDENTIALS_PATH: /run/secrets/firebase-credentials.json
     command: celery -A balla worker -l info --concurrency=2
     volumes:
       - media:/app/media
+      - *firebase-key
     depends_on:
       db: {condition: service_healthy}
       redis: {condition: service_healthy}
