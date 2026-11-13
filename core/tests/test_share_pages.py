@@ -169,16 +169,49 @@ class TestHomePage:
         assert '/legal/privacy/' in html
         assert '/legal/terms/' in html
 
-    def test_no_dead_download_button_before_the_store_link_exists(self, client):
-        # زرّ يقود إلى 404 أسوأ من زرّ غائب.
+    def test_the_download_button_leads_to_the_download_page(self, client):
+        # لا إلى Google Play مباشرةً: الزرّ واحد والقارئ قد يكون على أيّ
+        # من المنصّتين، ورابط Play يصل صاحب الآيفون إلى صفحة لا تنفعه.
         html = client.get('/').content.decode()
-        assert 'قريباً' in html
+        assert 'href="/get"' in html
+        assert 'play.google.com' not in html
 
-    def test_the_store_link_appears_once_it_is_configured(self, client,
-                                                           settings):
-        # الرابط من البيئة لا من الكود: يوم النشر يُضبط في .env وحده، فلا
-        # إعادة بناء ولا نشر لأجل سلسلة نصّية.
-        settings.PLAY_STORE_URL =             'https://play.google.com/store/apps/details?id=com.balla.balla'
-        html = client.get('/').content.decode()
+
+class TestDownloadPage:
+    """وجهة كل زرّ يقول «حمّل التطبيق» أو «افتح في التطبيق»."""
+
+    def test_it_opens_without_an_account(self, client):
+        assert client.get('/get').status_code == 200
+
+    def test_neither_store_is_a_dead_link_before_publishing(self, client):
+        # زرّ يقود إلى 404 أسوأ من وعدٍ صريح.
+        html = client.get('/get').content.decode()
+        assert html.count('قادم قريباً') == 2
+        assert 'play.google.com' not in html
+        assert 'apps.apple.com' not in html
+
+    def test_each_store_appears_once_configured(self, client, settings):
+        # من البيئة لا من الكود: يوم النشر يُضبط في .env وحده، فلا إعادة
+        # بناء ولا نشر لأجل سلسلة نصّية.
+        settings.PLAY_STORE_URL = 'https://play.google.com/store/apps/details?id=com.balla.balla'
+        settings.APP_STORE_URL = 'https://apps.apple.com/iq/app/id123456789'
+        html = client.get('/get').content.decode()
         assert 'play.google.com/store/apps/details?id=com.balla.balla' in html
-        assert 'قريباً' not in html
+        assert 'apps.apple.com/iq/app/id123456789' in html
+        assert 'قادم قريباً' not in html
+
+    def test_publishing_on_one_platform_does_not_hide_the_other(
+            self, client, settings):
+        # أندرويد أولاً هو الأرجح هنا. وصاحب الآيفون يجب أن يرى أن التطبيق
+        # قادم، لا أن يرى زرّ أندرويد وحده فيظنّ أن لا تطبيق له.
+        settings.PLAY_STORE_URL = 'https://play.google.com/store/apps/details?id=com.balla.balla'
+        settings.APP_STORE_URL = ''
+        html = client.get('/get').content.decode()
+        assert 'play.google.com' in html
+        assert 'قادم قريباً إلى App Store' in html
+
+    def test_the_product_card_sends_the_reader_here(self, client, listing):
+        # كان الزرّ يشير إلى الصفحة نفسها، فيُعاد من لا يملك التطبيق إلى
+        # حيث هو.
+        html = client.get(f'/p/{listing.id}').content.decode()
+        assert 'href="/get"' in html

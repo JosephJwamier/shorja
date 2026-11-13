@@ -26,14 +26,17 @@ from .models import AuctionListing, FixedPriceListing, LiveSession, UserStore
 # ثابت أفضل من وسم ناقص.
 FALLBACK_IMAGE = '/static/share-fallback.png'
 
-def _play_store_url():
-    """رابط التطبيق على Google Play، أو '' قبل النشر.
+def _store_links():
+    """رابطا المتجرين، أو '' لكلٍّ منهما قبل النشر.
 
-    من البيئة لا ثابتاً في الكود: يوم ينشر التطبيق يصير الرابط معروفاً، وربطه
+    من البيئة لا ثابتين في الكود: يوم ينشر التطبيق يصير الرابط معروفاً، وربطه
     بإعادة بناء الحاوية ونشرٍ كامل لأجل سلسلة نصّية واحدة ثمنٌ لا داعي له.
     فارغاً يختفي الزرّ ويظهر «قادم قريباً» بدل أن يقود إلى 404.
     """
-    return getattr(settings, 'PLAY_STORE_URL', '') or ''
+    return {
+        'play_store_url': getattr(settings, 'PLAY_STORE_URL', '') or '',
+        'app_store_url': getattr(settings, 'APP_STORE_URL', '') or '',
+    }
 
 
 def _absolute(request, path):
@@ -56,7 +59,6 @@ def _render(request, *, title, description, image, deep_link, meta=None):
         'image': _absolute(request, image or FALLBACK_IMAGE),
         'canonical': request.build_absolute_uri(),
         'deep_link': deep_link,
-        'play_store_url': _play_store_url(),
         'meta': meta or [],
     })
 
@@ -159,6 +161,24 @@ def live(request, session_id):
 
 
 @cache_control(max_age=3600)
+def get_app(request):
+    """صفحة التحميل — وجهة كل زرّ يقول «افتح في التطبيق» أو «حمّل التطبيق».
+
+    صفحةٌ لا رابطٌ مباشر إلى Google Play، لأن الزرّ واحد والقارئ قد يكون
+    على أيّ من المنصّتين: رابط Play يصل صاحب الآيفون إلى صفحة لا تنفعه.
+    وهي أيضاً الموضع الوحيد الذي يعرف أين يُحمَّل التطبيق، فيوم يُنشر على
+    متجر ثانٍ لا يُبحث عن الأزرار في القوالب.
+
+    وقبل النشر لا تُخفى الصفحة بل تقول «قادم قريباً» لكل منصّة لم تُضبط:
+    زرٌّ يقود إلى 404 أسوأ من وعدٍ صريح.
+    """
+    return render(request, 'share/get.html', {
+        'canonical': request.build_absolute_uri(),
+        **_store_links(),
+    })
+
+
+@cache_control(max_age=3600)
 def home(request):
     """جذر shorjeh.com.
 
@@ -170,5 +190,5 @@ def home(request):
     """
     return render(request, 'share/home.html', {
         'canonical': request.build_absolute_uri(),
-        'play_store_url': _play_store_url(),
+        **_store_links(),
     })

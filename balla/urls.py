@@ -80,6 +80,7 @@ urlpatterns = [
     # جذر shorjeh.com. يأتي بعد tf_urls في الترتيب، وهي لا تعرّف مساراً
     # فارغاً — فلولا ذلك لحجبته.
     path('', share_views.home, name='share-home'),
+    path('get', share_views.get_app, name='share-get-app'),
     path('p/<int:listing_id>', share_views.product, name='share-product'),
     path('s/<int:store_id>', share_views.store, name='share-store'),
     path('a/<int:auction_id>', share_views.auction, name='share-auction'),

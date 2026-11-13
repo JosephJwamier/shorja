@@ -324,11 +324,7 @@ footer { background: var(--ink); color: var(--bone-dim); padding: var(--s5) 0; f
           التوصيل يصل كل محافظة، والدفع نقداً عند الباب.
         </p>
         <div class="hero-actions">
-          {% if play_store_url %}
-            <a class="btn btn--primary" href="{{ play_store_url }}">حمّل التطبيق</a>
-          {% else %}
-            <span class="pending">قادم قريباً إلى Google Play</span>
-          {% endif %}
+          <a class="btn btn--primary" href="{% url 'share-get-app' %}">حمّل التطبيق</a>
           <a class="btn btn--ghost" href="#how">كيف يعمل</a>
         </div>
       </div>
@@ -502,11 +498,7 @@ footer { background: var(--ink); color: var(--bone-dim); padding: var(--s5) 0; f
 </footer>
 
 <div class="sticky">
-  {% if play_store_url %}
-    <a class="btn btn--primary" href="{{ play_store_url }}">حمّل التطبيق</a>
-  {% else %}
-    <span class="pending">قادم قريباً إلى Google Play</span>
-  {% endif %}
+  <a class="btn btn--primary" href="{% url 'share-get-app' %}">حمّل التطبيق</a>
 </div>
 
 </body>
