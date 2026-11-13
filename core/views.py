@@ -5999,6 +5999,27 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
             'message': 'لا يمكن حذف اتفاقية النقل نهائيًا. استخدم reject أو cancel لإنهائها.'
         }, status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
+    # Create and update are closed the same way. Every state change goes
+    # through an action that checks who is asking and from which state:
+    # create_agreement, approve, reject, cancel, complete. A plain PATCH let
+    # the owner rewind an executed agreement to 'pending', raise its quantity
+    # and approve it again, charging the reseller's wallet for stock they
+    # never asked for, as many times as their balance allowed.
+    def _closed(self):
+        return Response({
+            'success': False,
+            'message': 'Use create_agreement/, approve/, reject/, cancel/ or complete/',
+        }, status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def create(self, request, *args, **kwargs):
+        return self._closed()
+
+    def update(self, request, *args, **kwargs):
+        return self._closed()
+
+    def partial_update(self, request, *args, **kwargs):
+        return self._closed()
+
     # ==================== WHOLESALE TRANSFER ENDPOINTS ====================
 
     @action(detail=False, methods=['post'])

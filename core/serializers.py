@@ -1557,6 +1557,9 @@ class ItemTransferSerializer(serializers.ModelSerializer):
             # Permissions
             'can_approve', 'can_reject', 'can_cancel',
         ]
+        # Output only. Status, quantity, price and storage fees decide what is
+        # charged to whose wallet, so only the views' actions write them.
+        read_only_fields = fields
 
     def get_days_remaining(self, obj):
         return obj.days_remaining()
