@@ -33,6 +33,17 @@ def _cache_key(phone_e164):
     return f'otp:{phone_e164}'
 
 
+def _failures_key(phone_e164):
+    return f'otp-fail:{phone_e164}'
+
+
+# محاولات خاطئة يُسمح بها على رمز واحد قبل إبطاله. الخنق وحده
+# (otp_verify) مربوط بالـ IP، ومهاجم بعناوين كثيرة كان يجرّب الرمز نفسه
+# بلا حدّ: الخطأ لم يكن يُبطل شيئاً. خمس محاولات تكفي من أخطأ الكتابة،
+# وتجعل فرصة التخمين 5 من مليون لكل رمز مهما كثرت العناوين.
+OTP_MAX_FAILURES = 5
+
+
 def _service_unavailable():
     return Response(
         {'success': False, 'code': 'otp_unavailable',
@@ -82,6 +93,7 @@ class SendPhoneCodeView(APIView):
                             status=status.HTTP_502_BAD_GATEWAY)
 
         cache.set(key, message_id, settings.OTP_TTL_SECONDS)
+        cache.delete(_failures_key(canonical))  # رمز جديد، عدّاد جديد
         logger.info('OTP sent to %s (message %s)', canonical[-4:], message_id)
         return Response({
             'success': True,
@@ -107,13 +119,25 @@ def _check_code(canonical, code):
                                status=status.HTTP_502_BAD_GATEWAY)
 
     if not ok:
+        failures_key = _failures_key(canonical)
+        # add ثم incr: ذرّيّتان على Redis، فطلبان متزامنان لا يضيّعان عدّة.
+        cache.add(failures_key, 0, settings.OTP_TTL_SECONDS)
+        failures = cache.incr(failures_key)
+        if failures >= OTP_MAX_FAILURES:
+            cache.delete_many([_cache_key(canonical), failures_key])
+            logger.warning('OTP for %s burned after %d wrong attempts',
+                           canonical[-4:], failures)
+            return False, Response(
+                {'success': False, 'code': 'otp_too_many_attempts',
+                 'message': 'محاولات خاطئة كثيرة — اطلب رمزاً جديداً'},
+                status=status.HTTP_400_BAD_REQUEST)
         return False, Response(
             {'success': False, 'message': 'الرمز غير صحيح'},
             status=status.HTTP_400_BAD_REQUEST)
 
     # يُستهلك مرة واحدة: رمز صالح بعد استعماله يسمح بإعادة تشغيل الطلب
     # نفسه (توثيق رقم، أو إعادة تعيين كلمة مرور) مرّات.
-    cache.delete(_cache_key(canonical))
+    cache.delete_many([_cache_key(canonical), _failures_key(canonical)])
     return True, None
 
 
