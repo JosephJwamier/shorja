@@ -14,6 +14,21 @@ Open Graph هنا. ويكفيها description لمحرّكات البحث.
 {% endcomment %}
 <meta name="description" content="حمّل تطبيق الشورجة — سوق العراق: بيع وشراء ومزادات وتوصيل لكل محافظة.">
 <link rel="canonical" href="{{ canonical }}">
+<link rel="icon" href="{{ icon_url }}">
+<link rel="apple-touch-icon" href="{{ icon_url }}">
+
+{% comment %}
+هذه الصفحة تُشارَك هي نفسها («حمّل التطبيق»)، فتحتاج بطاقتها مثل صفحات
+المنتجات. والأيقونة هي الصورة الصحيحة لها: هي ما سيبحث عنه القارئ في
+المتجر وما سيضغطه على شاشته بعد التثبيت.
+{% endcomment %}
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="الشورجة">
+<meta property="og:locale" content="ar_IQ">
+<meta property="og:title" content="حمّل تطبيق الشورجة">
+<meta property="og:description" content="سوق العراق في جيبك: بضاعة من كل محافظة، ومزادات مباشرة، وتوصيل إلى بابك.">
+<meta property="og:image" content="{{ icon_url }}">
+<meta property="og:url" content="{{ canonical }}">
 
 <style>
   :root {
@@ -45,11 +60,13 @@ Open Graph هنا. ويكفيها description لمحرّكات البحث.
     padding: 32px 24px; text-align: center;
     box-shadow: 0 2px 20px rgba(0,0,0,.06);
   }
+  /* الأيقونة الكاملة بمربّعها البرتقالي، لا الطبقة الشفّافة التي
+     تستعملها الصفحة الرئيسية: تلك أقواسها كريميّة باهتة تذوب على بطاقة
+     بيضاء، وهنا الخلفية بيضاء. و18px انحناءً تقارب ما يرسمه النظامان
+     حول الأيقونة على الشاشة. */
   .mark {
-    width: 64px; height: 64px; margin: 0 auto 16px;
-    border-radius: 18px; background: var(--brand); color: #fff;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 1.75rem; font-weight: 700;
+    width: 72px; height: 72px; margin: 0 auto 16px;
+    border-radius: 18px; display: block;
   }
   h1 { font-size: 1.35rem; margin: 0 0 8px; line-height: 1.4; }
   .lede { color: var(--muted); font-size: .9rem; line-height: 1.7; margin: 0 0 24px; }
@@ -73,7 +90,7 @@ Open Graph هنا. ويكفيها description لمحرّكات البحث.
 </head>
 <body>
   <main class="card">
-    <div class="mark">ش</div>
+    <img class="mark" src="{{ icon_url }}" alt="أيقونة تطبيق الشورجة" width="72" height="72">
     <h1>حمّل تطبيق الشورجة</h1>
     <p class="lede">
       سوق العراق في جيبك: بضاعة من كل محافظة، ومزادات مباشرة،

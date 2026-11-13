@@ -18,6 +18,7 @@
 from django.http import Http404
 from django.shortcuts import render
 from django.conf import settings
+from django.templatetags.static import static
 from django.views.decorators.cache import cache_control
 
 from .models import AuctionListing, FixedPriceListing, LiveSession, UserStore
@@ -174,6 +175,10 @@ def get_app(request):
     """
     return render(request, 'share/get.html', {
         'canonical': request.build_absolute_uri(),
+        # مطلقاً لا نسبياً: STATIC_URL هنا بلا شرطة بادئة، فـ{% static %}
+        # يُخرج مساراً نسبياً يُحلّ بحسب عمق الصفحة — وهو ما يحتاجه
+        # og:image مطلقاً على أي حال، فالجالب على خادم واتساب.
+        'icon_url': request.build_absolute_uri(static('img/app-icon.png')),
         **_store_links(),
     })
 
