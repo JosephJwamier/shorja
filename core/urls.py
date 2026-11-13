@@ -2,6 +2,8 @@
 
 from django.urls import path, include
 
+from . import app_version_views
+
 from rest_framework.routers import DefaultRouter
 
 
@@ -66,6 +68,8 @@ from . import installment_views, live_hooks, payment_views
 urlpatterns = [
 
     path('', include(router.urls)),
+
+    path('app/version/', app_version_views.app_version, name='app-version'),
 
     # Payments. Not a ViewSet: the webhook and the browser-return endpoint are
     # unauthenticated and have nothing to do with a resource's CRUD surface,

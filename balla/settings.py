@@ -766,6 +766,13 @@ WEVLIX_TEMPLATE_HANDOVER_REMINDER = os.environ.get(
 # رابط التطبيق على Google Play. فارغ قبل النشر: صفحات المشاركة تُظهر
 # «قادم قريباً» بدل زرّ يقود إلى 404. يُضبط في .env يوم النشر بلا تعديل كود.
 PLAY_STORE_URL = os.environ.get('PLAY_STORE_URL', '')
+APP_STORE_URL = os.environ.get('APP_STORE_URL', '')
+
+# أقدم رقم بنية (`+N` في pubspec) ما زال يُخدم. أقدم منه يرى «حدّث
+# التطبيق» عند الإقلاع — انظر core/app_version_views.py. صفر = لا منع.
+# يُرفع بعد وصول النسخة الجديدة إلى المتجر، لا قبله.
+APP_MIN_BUILD_ANDROID = int(os.environ.get('APP_MIN_BUILD_ANDROID', '0'))
+APP_MIN_BUILD_IOS = int(os.environ.get('APP_MIN_BUILD_IOS', '0'))
 
 REELS_PUBLIC_BASE_URL = (
     os.environ.get('REELS_PUBLIC_BASE_URL')
