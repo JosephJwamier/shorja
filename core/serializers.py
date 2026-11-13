@@ -1657,7 +1657,6 @@ class TransactionSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'user', 'transaction_type', 'amount', 'status',
             'item', 'reservation', 'auction', 'transfer',
-            'stripe_payment_intent_id',
             'created_at', 'completed_at'
         ]
 

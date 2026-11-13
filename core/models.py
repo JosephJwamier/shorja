@@ -1899,9 +1899,6 @@ class Transaction(models.Model):
     auction = models.ForeignKey(AuctionListing, on_delete=models.SET_NULL, null=True, blank=True)
     transfer = models.ForeignKey(ItemTransfer, on_delete=models.SET_NULL, null=True, blank=True)  # NEW
 
-    # Payment gateway
-    stripe_payment_intent_id = models.CharField(max_length=200, blank=True)
-
     created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 

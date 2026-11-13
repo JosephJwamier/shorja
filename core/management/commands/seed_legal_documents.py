@@ -95,7 +95,7 @@ def privacy_ar(c):
 <h2>4. مشاركة المعلومات</h2>
 <p>لا نبيع بياناتك الشخصية. وقد نُشاركها في الحدود اللازمة مع:</p>
 <ul>
-  <li><strong>مزوّدي الخدمة:</strong> معالِج الدفع (Stripe)، وخدمات Google Firebase (الإشعارات، التحليلات،
+  <li><strong>مزوّدي الخدمة:</strong> بوابة الدفع (القاصة) وكي كارد لخدمة التقسيط، وخدمات Google Firebase (الإشعارات، التحليلات،
       تقارير الأعطال، والمصادقة)، وخرائط OpenStreetMap، وشركات التوصيل،
       ومزوّدي الاستضافة والبريد — وذلك لتشغيل الخدمة نيابةً عنّا. أمّا البث المباشر
       فيمرّ عبر سيرفراتنا وحدها دون مزوّد خارجي.</li>
@@ -299,7 +299,7 @@ our legitimate interests (security, fraud prevention, service improvement), and 
 <h2>4. Sharing of Information</h2>
 <p>We do not sell your personal data. We may share it, only as necessary, with:</p>
 <ul>
-  <li><strong>Service providers:</strong> the payment processor (Stripe), Google Firebase services (notifications, analytics,
+  <li><strong>Service providers:</strong> the payment gateway (Al-Qaseh) and Qi Card for installments, Google Firebase services (notifications, analytics,
       crash reporting and authentication), OpenStreetMap maps, delivery companies,
       and hosting/email providers — to operate the service on our behalf. Live
       broadcasts pass through our own servers only, with no third-party provider.</li>

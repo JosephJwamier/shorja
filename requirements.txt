@@ -11,8 +11,8 @@ django-filter==26.1
 #===============================================================================
 # Declared because core/live_hooks.py imports it at module level and
 # core/urls.py imports that — so a missing `requests` does not break live
-# video, it stops Django booting. It arrives transitively today (stripe,
-# google-cloud-storage), which is exactly the kind of dependency that
+# video, it stops Django booting. It arrives transitively today
+# (google-cloud-storage, firebase-admin), which is exactly the kind of dependency that
 # disappears in someone else's release.
 requests==2.34.2
 
@@ -51,11 +51,6 @@ PyJWT==2.13.0
 #       API Documentation
 #===============================================================================
 drf-yasg==1.21.15
-
-#===============================================================================
-#       Payments
-#===============================================================================
-stripe==7.8.0
 
 #===============================================================================
 #       Media & Validation

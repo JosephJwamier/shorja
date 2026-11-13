@@ -589,7 +589,7 @@ class ReservationAdmin(ExportActionMixin, ModelAdmin):
 class TransactionAdmin(ExportActionMixin, ModelAdmin):
     list_display = ('id', 'user', 'transaction_type', 'amount', 'status', 'created_at', 'completed_at')
     list_filter = ('transaction_type', 'status')
-    search_fields = ('user__username', 'stripe_payment_intent_id')
+    search_fields = ('user__username',)
     raw_id_fields = ('user', 'item', 'reservation', 'auction', 'transfer')
     date_hierarchy = 'created_at'
     list_select_related = ('user',)

@@ -95,7 +95,6 @@ urlpatterns = [
 
     # Additional custom endpoints
     path('api/auth/', include('core.auth_urls')),  # Custom auth endpoints
-    path('api/webhooks/', include('core.webhook_urls')),  # Stripe webhooks
 ]
 
 # Development only: media/static served by Django, and the public API

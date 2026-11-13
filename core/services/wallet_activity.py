@@ -103,7 +103,7 @@ def _transaction_entry(txn, user):
             return _entry(kind="bid_deposit", direction="out", amount=txn.amount,
                           title="عربون مزايدة", from_label=WALLET,
                           to_label="مزاد #%d" % txn.auction_id, **base)
-        # Legacy gateway deposit rows (pending Stripe-era) — money that may come in.
+        # Legacy gateway deposit rows (from before PaymentIntent) — money that may come in.
         return _entry(kind="topup", direction="pending" if txn.status == "pending" else "in",
                       amount=txn.amount, title="إيداع", from_label=CARD, to_label=WALLET, **base)
 
