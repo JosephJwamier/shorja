@@ -5921,6 +5921,28 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
             }
         })
 
+    # The generic create/update endpoints are closed. Every change to an
+    # assignment goes through an action that checks who is asking:
+    # create_request (the representative proposes), accept/reject (only the
+    # owner), update_permissions (only the owner), cancel. A plain PATCH let
+    # the representative accept their own request and set their commission to
+    # 100%, which create_reservation_for_buyer then paid out of the seller's
+    # sale.
+    def _closed(self, use):
+        return Response({
+            'success': False,
+            'message': f'Use {use} instead',
+        }, status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def create(self, request, *args, **kwargs):
+        return self._closed('/representatives/create_request/')
+
+    def update(self, request, *args, **kwargs):
+        return self._closed('accept/, reject/ or update_permissions/')
+
+    def partial_update(self, request, *args, **kwargs):
+        return self._closed('accept/, reject/ or update_permissions/')
+
     def destroy(self, request, *args, **kwargs):
         representative = self.get_object()
 

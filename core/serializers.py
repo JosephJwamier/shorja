@@ -1406,10 +1406,10 @@ class RepresentativeSerializer(serializers.ModelSerializer):
             'completed_at', 'cancelled_at',
             'can_accept', 'can_reject', 'can_cancel'
         ]
-        read_only_fields = [
-            'created_at', 'accepted_at', 'rejected_at',
-            'completed_at', 'cancelled_at'
-        ]
+        # Output only. Status, commission and permissions decide who gets paid
+        # from a sale, so they are written by the views' own actions and never
+        # through this serializer, even if a generic endpoint is reopened.
+        read_only_fields = fields
 
     def get_can_accept(self, obj):
         request = self.context.get('request')
