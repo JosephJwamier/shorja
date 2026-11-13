@@ -25,6 +25,7 @@ from .serializers import (
     ResetPasswordSerializer,
     LogoutSerializer,
 )
+from .auth_tokens import fresh_token_pair, revoke_refresh_tokens
 from .notifications import NotificationService
 from .password_rules import password_error
 from .phone_utils import to_e164
@@ -287,10 +288,15 @@ class ChangePasswordView(APIView):
             return Response({'error': error},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        user.set_password(new_password)
-        user.save()
+        with transaction.atomic():
+            user.set_password(new_password)
+            user.save()
+            # Every other device is signed out; this one gets a new pair so the
+            # person who just changed the password stays signed in here.
+            revoke_refresh_tokens(user)
+            tokens = fresh_token_pair(user)
 
-        return Response({'message': 'Password changed successfully'})
+        return Response({'message': 'Password changed successfully', **tokens})
 
 
 class ResetPasswordView(APIView):
@@ -386,9 +392,13 @@ class ResetPasswordConfirmView(APIView):
             return Response({'error': error},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        user.set_password(new_password)
-        user.save()
-        user.clear_verification_code()
+        with transaction.atomic():
+            user.set_password(new_password)
+            user.save()
+            user.clear_verification_code()
+            # A reset means the old password may be in someone else's hands:
+            # sign every device out, including whoever is using it.
+            revoke_refresh_tokens(user)
 
         return Response({'message': 'Password reset successful'})
 

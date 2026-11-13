@@ -98,7 +98,7 @@ from .filters import (
 )
 from .iraq_governorates import IRAQ_GOVERNORATES
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
+from .auth_tokens import revoke_refresh_tokens
 import math
 
 User = get_user_model()
@@ -289,8 +289,7 @@ class UserViewSet(viewsets.ModelViewSet):
         with transaction.atomic():
             # Refresh tokens aren't checked against is_active by default, so a
             # deactivated user could otherwise still mint fresh access tokens.
-            for outstanding in OutstandingToken.objects.filter(user=user):
-                BlacklistedToken.objects.get_or_create(token=outstanding)
+            revoke_refresh_tokens(user)
 
             anon_suffix = uuid.uuid4().hex[:12]
             user.is_active = False

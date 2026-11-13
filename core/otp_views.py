@@ -13,12 +13,14 @@ import logging
 
 from django.conf import settings
 from django.core.cache import cache
+from django.db import transaction
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from .auth_tokens import revoke_refresh_tokens
 from .password_rules import password_error
 from .phone_utils import to_e164
 from .services.wevlix import (
@@ -221,6 +223,9 @@ class ResetPasswordByCodeView(APIView):
         # الرمز وصل إلى الرقم، فملكيته مثبتة — وتسجيل ذلك يوفّر على
         # المستخدم توثيقاً ثانياً فور استرجاعه.
         user.phone_verified = True
-        user.save(update_fields=['password', 'phone_verified'])
+        with transaction.atomic():
+            user.save(update_fields=['password', 'phone_verified'])
+            # من يسترجع حسابه قد يكون فقده لغيره: كل جهاز مسجّل يخرج.
+            revoke_refresh_tokens(user)
         logger.info('Password reset by WhatsApp code for user %s', user.id)
         return Response(self.GENERIC_OK)
