@@ -1,0 +1,34 @@
+# What stays out of the image built by deploy/Dockerfile (`COPY . .`).
+#
+# Without this file the whole checkout was copied, so the production .env and
+# its two .env.bak.* copies sat inside every image at /app/.env*: every secret
+# readable by anyone who got a shell in a container or a copy of the image.
+# The containers never read those files: compose passes the variables with
+# `env_file: ../.env`, and settings.py reads only os.environ.
+
+# Secrets
+.env
+.env.*
+firebase-credentials.json
+*.pem
+*.key
+*.jks
+
+# Runtime data: mounted as volumes or created at start, never baked in
+media/
+staticfiles/
+logs/
+celerybeat-schedule*
+
+# Repository and tooling
+.git/
+.gitignore
+.claude/
+.gstack/
+.idea/
+.vscode/
+.venv/
+venv/
+.pytest_cache/
+**/__pycache__/
+**/*.py[cod]
