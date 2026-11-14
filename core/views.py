@@ -173,6 +173,17 @@ class UserViewSet(viewsets.ModelViewSet):
             return User.objects.all()
         return User.objects.filter(id=self.request.user.id)
 
+    def create(self, request, *args, **kwargs):
+        # Accounts are made by /auth/register/ and the social sign-in, which
+        # carry the password policy, the throttle and the phone rules. The
+        # router's plain POST had none of them: any signed-in user could mint
+        # rows holding someone else's phone or email, and both are unique, so
+        # the real owner could then never register.
+        return Response({
+            'success': False,
+            'message': 'Use /auth/register/ to create an account.'
+        }, status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
     def destroy(self, request, *args, **kwargs):
         # A raw hard-delete here would CASCADE through owned_items and
         # everything that in turn references those items (reservations,
@@ -856,7 +867,11 @@ class ItemViewSet(viewsets.ModelViewSet):
         current_location_id = serializer.validated_data['current_location_id']
         notes = serializer.validated_data.get('notes', '')
         try:
-            location = Location.objects.get(id=current_location_id)
+            # The caller's own locations only. Any id used to be accepted, and
+            # an item shows its location's pin and owner to everyone - so
+            # walking the ids over one's own item read out where every other
+            # user lives, buyers' delivery addresses included.
+            location = Location.objects.get(id=current_location_id, user=request.user)
         except Location.DoesNotExist:
             return Response({
                 'success': False,

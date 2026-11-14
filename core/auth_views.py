@@ -12,6 +12,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from .throttling import LoginUsernameThrottle, PasswordResetEmailThrottle
 from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model
+from django.core.cache import cache
 from django.db import transaction  # NEW
 from django.utils import timezone
 import logging
@@ -247,11 +248,30 @@ class VerifyEmailView(generics.GenericAPIView):
             user.email_verified = True
             user.save(update_fields=['email_verified'])
             user.clear_verification_code()
+            cache.delete(self._failures_key(user))
             return Response({'message': 'Email verified successfully'})
+
+        # A six-digit code with no limit is a code anyone can find: the caller
+        # is signed in, so nothing else slows them down, and a verified email
+        # is what lets a Google sign-in attach to this account. Same rule as
+        # the WhatsApp code (otp_views.OTP_MAX_FAILURES): five wrong tries and
+        # the code is gone.
+        if user.verification_code and user.verification_code_purpose == 'email':
+            key = self._failures_key(user)
+            cache.add(key, 0, 15 * 60)
+            if cache.incr(key) >= self.MAX_FAILURES:
+                user.clear_verification_code()
+                cache.delete(key)
 
         return Response({
             'error': 'Invalid or expired code'
         }, status=status.HTTP_400_BAD_REQUEST)
+
+    MAX_FAILURES = 5
+
+    @staticmethod
+    def _failures_key(user):
+        return f'email-code-fail:{user.pk}'
 
 
 class ResendVerificationView(APIView):
@@ -476,7 +496,17 @@ def resolve_social_user(uid, email, decoded=None):
     email = (email or '').strip().lower()
     if not email or not _email_is_proven(decoded):
         return None
-    user = User.objects.filter(email=email).first()
+    # Both sides have to be proven. Google proving the address says who is
+    # signing in; it says nothing about who typed that address into the
+    # account already holding it. Registration never checks an email, so
+    # anyone can sign up as victim@gmail.com with a password of their own and
+    # wait: the day the real owner taps "Sign in with Google" they would be
+    # dropped into that account, and the person who made it still has its
+    # password. An unverified address therefore never attracts a Google
+    # identity. (The honest version of this - same person, password first,
+    # Google later - is finished in SocialAttachPhoneView, where the phone
+    # proves it.)
+    user = User.objects.filter(email=email, email_verified=True).first()
     if user is not None:
         user.firebase_uid = uid
         user.save(update_fields=['firebase_uid'])
@@ -629,6 +659,15 @@ class SocialAttachPhoneView(APIView):
         # only safe answer: silently moving the number would hand this
         # caller the other account's recovery route.
         holder = User.objects.filter(phone=canonical).first()
+        if user is None and self._is_the_same_person(holder, email, social):
+            # A password account, now signing in with Google for the first
+            # time. resolve_social_user would not link it (its email was
+            # never verified), but here the caller has shown both halves:
+            # Google vouches for the email and the SMS for the phone.
+            user = holder
+            user.firebase_uid = uid
+            user.email_verified = True
+            user.save(update_fields=['firebase_uid', 'email_verified'])
         if holder is not None and (user is None or holder.pk != user.pk):
             return Response({'error': 'هذا الرقم مسجّل في حساب آخر'},
                             status=status.HTTP_409_CONFLICT)
@@ -662,6 +701,21 @@ class SocialAttachPhoneView(APIView):
 
         logger.info(f"Phone attached to social account {user.id} (new={is_new_user})")
         return issue_session(user, is_new_user=is_new_user)
+
+    @staticmethod
+    def _is_the_same_person(holder, email, social):
+        """True when the account holding this phone is the caller's own.
+
+        All of it is required: the account's phone was verified before today
+        (so whoever set its password also held the phone - an account someone
+        opened on a number they do not own never passes), it has no Google
+        identity yet, and its email is the one Google just proved.
+        """
+        return (holder is not None
+                and holder.phone_verified
+                and not holder.firebase_uid
+                and bool(email) and holder.email == email
+                and _email_is_proven(social))
 
 
 class FirebaseCustomTokenView(APIView):

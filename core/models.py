@@ -119,8 +119,11 @@ class User(AbstractUser):
 
     def generate_verification_code(self, purpose):
         """Generate and store a fresh 6-digit code for the given purpose."""
-        import random
-        code = f"{random.randint(0, 999999):06d}"
+        # secrets, not random: this code is a credential (it resets a
+        # password), and random's Mersenne Twister can be predicted from
+        # its own earlier outputs.
+        import secrets
+        code = f"{secrets.randbelow(1000000):06d}"
         self.verification_code = code
         self.verification_code_purpose = purpose
         self.verification_code_sent_at = timezone.now()
@@ -137,7 +140,8 @@ class User(AbstractUser):
             return False
         if timezone.now() - self.verification_code_sent_at > timedelta(minutes=validity_minutes):
             return False
-        return self.verification_code == code
+        import hmac
+        return hmac.compare_digest(self.verification_code, str(code or ''))
 
     def clear_verification_code(self):
         self.verification_code = None

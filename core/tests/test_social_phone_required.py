@@ -95,14 +95,14 @@ class TestFirstStepRefusesAndWritesNothing:
 
     def test_an_existing_account_without_a_verified_phone_is_also_asked(self, client):
         User.objects.create_user(username='ali', password='x',
-                                 email='ali@example.com')
+                                 email='ali@example.com', email_verified=True)
         r = social_login(client)
         assert r.data['status'] == 'phone_required'
         assert r.data['is_new_user'] is False
 
     def test_an_account_with_a_verified_phone_signs_straight_in(self, client):
         User.objects.create_user(username='ali', password='x',
-                                 email='ali@example.com',
+                                 email='ali@example.com', email_verified=True,
                                  phone='07701234567', phone_verified=True)
         r = social_login(client)
         assert r.status_code == 200, r.data
@@ -134,8 +134,11 @@ class TestSecondStepCompletesTheSignup:
         assert accounts().count() == 1
 
     def test_an_existing_password_account_is_linked_not_duplicated(self, client):
+        # email_verified: an address the account itself proved. One it never
+        # proved is not linked at all - see test_pentest_round_two.
         existing = User.objects.create_user(
-            username='ali', password='x', email='ali@example.com')
+            username='ali', password='x', email='ali@example.com',
+            email_verified=True)
         r = attach(client)
         assert r.status_code == 200, r.data
         assert r.data['is_new_user'] is False
@@ -213,6 +216,10 @@ class TestOnlyAProvenEmailLinks:
             assert other.email is None
 
     def test_a_verified_google_email_still_links(self, client, owner):
+        # Proven on both sides: by Google in the token, and by the account
+        # for the address it holds.
+        owner.email_verified = True
+        owner.save(update_fields=['email_verified'])
         r = social_login(client)
         assert r.status_code == 200, r.data
         assert 'tokens' in r.data

@@ -166,6 +166,13 @@ delivery.shorjeh.com {
 	header X-Robots-Tag "noindex, nofollow"
 	header X-Frame-Options "DENY"
 	header X-Content-Type-Options "nosniff"
+	header Strict-Transport-Security "max-age=31536000"
+	header Referrer-Policy "no-referrer"
+	# الصفحة تحفظ رمز الدخول في localStorage، فأي سكربت يعمل فيها يقرؤه.
+	# هذه السياسة تحصر السكربتات في ملفّات الصفحة والاتصال في الـ API وحده:
+	# نصّ محقون في اسم أو عنوان لا يُنفَّذ، ولو نُفِّذ لما وجد أين يُرسل الرمز.
+	header Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src https://api.shorjeh.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+	header -Server
 
 	root * /srv/delivery
 	try_files {path} {path}/ /index.html

@@ -652,7 +652,7 @@ class ItemUpdateLocationSerializer(serializers.Serializer):
     def validate_current_location_id(self, value):
         request = self.context.get('request')
         try:
-            Location.objects.get(id=value)
+            Location.objects.get(id=value, user=request.user)
             item = self.context.get('item')
             if item and request.user not in [item.owner, item.current_holder]:
                 raise serializers.ValidationError("You don't have permission to move this item")
