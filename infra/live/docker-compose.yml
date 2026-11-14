@@ -61,9 +61,17 @@ services:
       - TURN_SECRET=${TURN_SECRET}
       - PUBLIC_IP=${PUBLIC_IP}
       - LIVE_DOMAIN=${LIVE_DOMAIN}
-    command: >
-      sh -c "sed -e 's|__TURN_SECRET__|'\"$$TURN_SECRET\"'|' -e 's|__PUBLIC_IP__|'\"$$PUBLIC_IP\"'|' -e 's|__LIVE_DOMAIN__|'\"$$LIVE_DOMAIN\"'|'
-      /etc/coturn/turnserver.conf > /tmp/turnserver.conf && turnserver -c /tmp/turnserver.conf"
+    # entrypoint, not command: the image's own entrypoint runs every argument
+    # through `eval "echo ..."`, so a `>` inside a command is executed there
+    # and the config ends up holding the command's text. coturn then starts on
+    # its defaults - no authentication at all. See deploy/docker-compose.yml.
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        sed -e "s|__TURN_SECRET__|$$TURN_SECRET|" -e "s|__PUBLIC_IP__|$$PUBLIC_IP|" -e "s|__LIVE_DOMAIN__|$$LIVE_DOMAIN|"
+        /etc/coturn/turnserver.conf > /tmp/turnserver.conf
+        && exec turnserver -c /tmp/turnserver.conf
 
   caddy:
     image: caddy:2

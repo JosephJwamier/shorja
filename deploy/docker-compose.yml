@@ -237,9 +237,23 @@ services:
     volumes:
       - ../infra/live/turnserver.conf:/etc/coturn/turnserver.conf:ro
       - caddy_data:/certs:ro
-    command: >
-      sh -c "sed -e 's|__TURN_SECRET__|'\"$$TURN_SECRET\"'|' -e 's|__PUBLIC_IP__|'\"$$PUBLIC_IP\"'|' -e 's|__LIVE_DOMAIN__|'\"$$LIVE_DOMAIN\"'|'
-      /etc/coturn/turnserver.conf > /tmp/turnserver.conf && turnserver -c /tmp/turnserver.conf"
+    # entrypoint لا command: مدخل صورة coturn يمرّر كل وسيط على
+    # `eval "echo ..."` قبل تنفيذه. فكان `>` في الأمر يُنفَّذ هناك: يُكتب نصّ
+    # الأمر نفسه في /tmp/turnserver.conf بدل ناتج sed، ثم يُقلع turnserver
+    # بملفّ من سطر واحد لا يفهمه. والنتيجة مرحّل بإعداداته الافتراضية: بلا
+    # توثيق إطلاقاً، وبلا أي من قيود denied-peer-ip — أي أحد على الإنترنت
+    # يحجز منه مرحّلاً. وبقي هكذا ثلاثة أسابيع لأن البثّ يعمل معه: مرحّل بلا
+    # قفل يقبل بيانات التطبيق الصحيحة كما يقبل غيابها.
+    #
+    # للتحقق بعد أي تعديل هنا (يجب أن يطبع عدد أسطر الإعداد كاملاً، لا 1):
+    #   docker exec deploy-coturn-1 wc -l /tmp/turnserver.conf
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        sed -e "s|__TURN_SECRET__|$$TURN_SECRET|" -e "s|__PUBLIC_IP__|$$PUBLIC_IP|" -e "s|__LIVE_DOMAIN__|$$LIVE_DOMAIN|"
+        /etc/coturn/turnserver.conf > /tmp/turnserver.conf
+        && exec turnserver -c /tmp/turnserver.conf
     depends_on:
       - caddy
 
