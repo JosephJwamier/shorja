@@ -2,14 +2,14 @@
 
 UserSerializer and LocationSerializer are nested read-only inside the public
 item/store/auction views. They used to carry the owner's email and phone and
-the location's exact address and GPS, so one anonymous GET /api/items/
-returned every seller's phone and a pin on their home. Now, for anyone who is
-not the record's owner (or staff):
+the location's street address and contact phone, so one anonymous GET
+/api/items/ returned every seller's phone and where they live. Now, for anyone
+who is not the record's owner (or staff):
 
 - a user loses email, phone and date of birth;
-- an item's location loses its street address, label and on-site contact,
-  and its pin is rounded to ~100 m — the "near me" map still places the item
-  in its neighbourhood, without pointing at a door;
+- an item's location loses its street address, label and on-site contact;
+  its exact pin stays, because the "near me" map places each item where it
+  is (the owner's decision, 2026-11-15);
 - a store's location stays public (the store page exists to show where the
   shop is), minus the on-site contact and notes;
 - a reservation's delivery address stays whole for the reservation's parties,
@@ -62,7 +62,7 @@ def location_block(payload):
     return payload['current_location']
 
 
-def test_anonymous_item_detail_hides_seller_contact_and_pin(item):
+def test_anonymous_item_detail_hides_seller_contact_and_address(item):
     r = APIClient().get(f'/api/items/{item.id}/')
 
     assert r.status_code == 200
@@ -75,9 +75,9 @@ def test_anonymous_item_detail_hides_seller_contact_and_pin(item):
     assert loc['city'] == 'بغداد'  # coarse area stays
     for gone in ('name', 'address_line1', 'contact_phone', 'full_address'):
         assert gone not in loc, gone
-    # The pin survives for the map, rounded to 3 decimals (~100 m).
-    assert loc['latitude'] == '33.315'
-    assert loc['longitude'] == '44.366'
+    # The exact pin stays for the map.
+    assert loc['latitude'] == '33.315200'
+    assert loc['longitude'] == '44.366100'
 
 
 def test_the_near_me_map_still_gets_a_pin_for_every_item(item):
@@ -175,7 +175,7 @@ def test_another_logged_in_user_is_still_a_stranger(item):
     owner = owner_block(r.data)
     assert 'phone' not in owner
     assert 'address_line1' not in location_block(r.data)
-    assert location_block(r.data)['latitude'] == '33.315'
+    assert location_block(r.data)['latitude'] == '33.315200'
 
 
 def test_staff_sees_everything(item):

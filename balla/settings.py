@@ -105,13 +105,13 @@ def _check_reels_storage_config():
 # scanner tries. Must end with '/'. Override per environment via .env.
 ADMIN_URL_PATH = os.environ.get('ADMIN_URL_PATH', 'admin/')
 
-# An OTP-verified session before any admin page. Production always demands
-# it; the environment switch only lets a developer's DEBUG server skip it.
-# (The 2026-11 pentest found production running with the switch off: the
-# password alone opened the panel that approves withdrawals.) Staff enrol
-# from the server, never the web — `manage.py enroll_admin_2fa <username>`,
-# see core/admin_site.py for why.
-ADMIN_REQUIRE_2FA = (not DEBUG) or os.environ.get('ADMIN_REQUIRE_2FA', 'False') == 'True'
+# An OTP-verified session before any admin page. Off — the owner's decision
+# (2026-11-15), so the panel opens with the password alone. To turn it on:
+# enrol a device on the server first (`manage.py enroll_admin_2fa
+# <username>`; enrolment is never offered on the web, see
+# core/admin_site.py), then set ADMIN_REQUIRE_2FA=True in .env and recreate
+# web. In that order: switched on before enrolling, it locks the panel.
+ADMIN_REQUIRE_2FA = os.environ.get('ADMIN_REQUIRE_2FA', 'False') == 'True'
 # The name the authenticator app shows next to the code.
 OTP_TOTP_ISSUER = 'Shorjeh Admin'
 

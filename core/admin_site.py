@@ -4,7 +4,7 @@ The admin site's class, in two layers:
 BallaAdminSite gives every admin page the unfold theme (sidebar, colors,
 dark mode) — always on. OTPBallaAdminSite adds the hard "must have a
 verified OTP session" requirement on top of that, gated behind
-settings.ADMIN_REQUIRE_2FA (see core/apps.py), which production always has on.
+settings.ADMIN_REQUIRE_2FA (see core/apps.py) — off unless .env turns it on.
 
 Enrolment — binding an authenticator app to a staff account — happens only on
 the server, with `manage.py enroll_admin_2fa <username>`. On the web the only

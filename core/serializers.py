@@ -131,19 +131,15 @@ class LocationSerializer(serializers.ModelSerializer):
 
     # What a stranger may not see. The default is an item's location — often
     # the seller's home: the street address, its label and the on-site
-    # contact are dropped, and the GPS pin is rounded (COARSE_DECIMALS) so the
-    # "near me" map still places the item in its neighbourhood without
-    # pointing at a door. Distances are computed server-side from the exact
-    # values, so they stay right. Owners and staff see everything; so do a
-    # reservation's own parties for its delivery address (see
-    # party_location), and the delivery company reads its own serializer.
+    # contact are dropped. The exact pin stays: the "near me" map places each
+    # item where it is, by the owner's decision (2026-11-15). Owners and
+    # staff see everything; so do a reservation's own parties for its
+    # delivery address (see party_location), and the delivery company reads
+    # its own serializer.
     _PRIVATE_FIELDS = (
         'name', 'address_line1', 'address_line2', 'postal_code',
         'contact_person', 'contact_phone', 'notes', 'full_address',
     )
-    _COARSE_FIELDS = ('latitude', 'longitude')
-    # 3 decimals ≈ 110 m north–south, ≈ 93 m east–west at Baghdad.
-    COARSE_DECIMALS = 3
 
     def _sees_everything(self, obj):
         if self.context.get('show_full_location'):
@@ -152,29 +148,17 @@ class LocationSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
-        if self._sees_everything(instance):
-            return data
-        for field in self._PRIVATE_FIELDS:
-            data.pop(field, None)
-        for field in self._COARSE_FIELDS:
-            if data.get(field) is not None:
-                data[field] = _coarsen(data[field], self.COARSE_DECIMALS)
+        if not self._sees_everything(instance):
+            for field in self._PRIVATE_FIELDS:
+                data.pop(field, None)
         return data
-
-
-def _coarsen(value, decimals):
-    """Round a serialized coordinate, keeping the type DRF produced (a string
-    under COERCE_DECIMAL_TO_STRING, else a number)."""
-    rounded = Decimal(str(value)).quantize(Decimal(1).scaleb(-decimals))
-    return str(rounded) if isinstance(value, str) else type(value)(rounded)
 
 
 class StoreLocationSerializer(LocationSerializer):
     """A store's location is its shop front, and the store page exists to
-    show it: the address and the exact pin stay public. Only the on-site
-    contact and the owner's private notes are withheld from visitors."""
+    show it: the address stays public too. Only the on-site contact and the
+    owner's private notes are withheld from visitors."""
     _PRIVATE_FIELDS = ('contact_person', 'contact_phone', 'notes')
-    _COARSE_FIELDS = ()
 
 
 def party_location(reservation, context):

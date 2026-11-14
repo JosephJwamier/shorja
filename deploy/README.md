@@ -161,8 +161,9 @@ docker compose -f deploy/docker-compose.yml logs -f web worker beat
 # نشر تحديث — منفصل عن الطرفية، فانقطاع SSH أثناء البناء لا يقطعه
 sudo bash deploy/deploy.sh
 
-# ربط تطبيق المصادقة بحساب إدارة (لوحة الإدارة تطلب رمزه في الإنتاج،
-# والربط لا يتم من المتصفح أبداً — انظر core/admin_site.py)
+# ربط تطبيق المصادقة بحساب إدارة — التحقق بخطوتين مطفأ حالياً، ولتشغيله:
+# اربط أولاً بهذا الأمر، ثم ADMIN_REQUIRE_2FA=True في .env وأعد إنشاء web.
+# الربط لا يتم من المتصفح أبداً — انظر core/admin_site.py
 docker compose -f deploy/docker-compose.yml --env-file .env exec web python manage.py enroll_admin_2fa <username>
 
 # صدفة Django

@@ -1,10 +1,14 @@
 """Bind an authenticator app to a staff account — from the server only.
 
-Production's admin requires an OTP-verified session (settings.ADMIN_REQUIRE_2FA),
-and the web offers no way to enrol (see core/admin_site.py): there the
-password is the only proof of identity, so whoever knew it first could bind
-their own phone. Running this command needs a shell on the server, which the
-password alone does not give.
+With settings.ADMIN_REQUIRE_2FA on, the admin requires an OTP-verified
+session; enrol here first, then switch it on. The web offers no way to enrol
+(see core/admin_site.py): there the password is the only proof of identity,
+so whoever knew it first could bind their own phone. Running this command
+needs a shell on the server, which the password alone does not give.
+
+Once a device is enrolled, the sign-in page asks for its code even while
+ADMIN_REQUIRE_2FA is off — two_factor's login does that for any account with
+a confirmed 'default' device.
 
     docker compose -f deploy/docker-compose.yml --env-file .env \\
         exec web python manage.py enroll_admin_2fa <username>
