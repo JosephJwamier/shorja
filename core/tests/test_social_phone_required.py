@@ -24,6 +24,9 @@ GOOGLE_CLAIMS = {
     'email': 'Ali@Example.com',
     'name': 'علي',
     'email_verified': True,
+    # What a real Google sign-in through Firebase carries; email linking
+    # depends on it (see TestOnlyAProvenEmailLinks).
+    'firebase': {'sign_in_provider': 'google.com'},
 }
 
 
@@ -169,3 +172,49 @@ class TestWhatTheSecondStepRefuses:
         r = attach(client, phone_number='+964740123456')
         assert r.status_code == 400
         assert accounts().count() == 0
+
+
+# A Firebase token can carry an address its holder never proved (an
+# email/password Firebase account, or Google with email_verified false).
+# Linking on such a token handed the existing account to whoever held it.
+UNPROVEN = [
+    {'email_verified': False},
+    {'firebase': {'sign_in_provider': 'password'}},
+    {'email_verified': False, 'firebase': {'sign_in_provider': 'password'}},
+]
+
+
+class TestOnlyAProvenEmailLinks:
+    @pytest.fixture
+    def owner(self):
+        return User.objects.create_user(
+            username='ali', password='Str0ng-Pass!9', email='ali@example.com',
+            phone='07709998887', phone_verified=True)
+
+    @pytest.mark.parametrize('claims', UNPROVEN)
+    def test_social_login_never_opens_an_account_on_an_unproven_email(
+            self, client, owner, claims):
+        r = social_login(client, google=claims)
+        assert 'tokens' not in r.data
+        owner.refresh_from_db()
+        assert owner.firebase_uid in (None, '')
+
+    @pytest.mark.parametrize('claims', UNPROVEN)
+    def test_attach_phone_never_links_an_unproven_email(
+            self, client, owner, claims):
+        r = attach(client, google=claims)
+        owner.refresh_from_db()
+        assert owner.firebase_uid in (None, '')
+        assert owner.phone == '+9647709998887'
+        # A separate account may be made for the caller, but without the
+        # address it could not prove, so the unique email cannot collide.
+        if r.status_code == 200:
+            other = accounts().exclude(pk=owner.pk).get()
+            assert other.email is None
+
+    def test_a_verified_google_email_still_links(self, client, owner):
+        r = social_login(client)
+        assert r.status_code == 200, r.data
+        assert 'tokens' in r.data
+        owner.refresh_from_db()
+        assert owner.firebase_uid == GOOGLE_CLAIMS['uid']

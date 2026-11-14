@@ -438,26 +438,39 @@ def verify_firebase_token(id_token):
                               status=status.HTTP_401_UNAUTHORIZED)
 
 
-def resolve_social_user(uid, email):
+def resolve_social_user(uid, email, decoded=None):
     """The account behind a Google identity, or None.
 
     Matches on firebase_uid first, then on the email — the second case is
     someone who registered with a password and later signed in with Google
     on the same address; linking the uid keeps it one account rather than
     silently starting a second.
+
+    Linking by email is only safe when the token proves the email: it must
+    be marked verified and come from Google. A Firebase token for an
+    address nobody verified says nothing about who owns that address, so
+    it never attaches to an existing account.
     """
     user = User.objects.filter(firebase_uid=uid).first()
     if user is not None:
         return user
 
     email = (email or '').strip().lower()
-    if not email:
+    if not email or not _email_is_proven(decoded):
         return None
     user = User.objects.filter(email=email).first()
     if user is not None:
         user.firebase_uid = uid
         user.save(update_fields=['firebase_uid'])
     return user
+
+
+def _email_is_proven(decoded):
+    """True only for a Google sign-in whose email Google has verified."""
+    if not decoded:
+        return False
+    provider = (decoded.get('firebase') or {}).get('sign_in_provider')
+    return decoded.get('email_verified') is True and provider == 'google.com'
 
 
 def unique_username(email, name):
@@ -519,7 +532,7 @@ class SocialLoginView(APIView):
         uid = decoded['uid']
         name = decoded.get('name', '')
 
-        user = resolve_social_user(uid, decoded.get('email'))
+        user = resolve_social_user(uid, decoded.get('email'), decoded)
 
         # Every account must carry a verified phone, so this endpoint can
         # only finish for someone who already has one. Google will not tell
@@ -591,7 +604,7 @@ class SocialAttachPhoneView(APIView):
         email = (social.get('email') or '').strip().lower() or None
         name = social.get('name', '')
 
-        user = resolve_social_user(uid, email)
+        user = resolve_social_user(uid, email, social)
 
         # The number may already belong to an account reached another way —
         # a password signup, or a different Google identity. Refusing is the
@@ -607,7 +620,11 @@ class SocialAttachPhoneView(APIView):
             if is_new_user:
                 user = User(
                     username=unique_username(email, name),
-                    email=email,
+                    # An unproven address, or one another account holds,
+                    # is not written: it would claim an inbox nobody showed
+                    # they own (and email is unique, so the second would 500).
+                    email=email if (_email_is_proven(social)
+                                    and not User.objects.filter(email=email).exists()) else None,
                     first_name=name,
                     email_verified=bool(social.get('email_verified')),
                     firebase_uid=uid,
