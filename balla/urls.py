@@ -19,13 +19,18 @@ from rest_framework import permissions
 from two_factor.urls import urlpatterns as tf_urls
 from core.legal_views import legal_document_page
 from core import share_views
+from core.admin_site import enrol_on_server
+from core.auth_tokens import PolicyTokenObtainPairSerializer
 from core.throttling import LoginUsernameThrottle
 from rest_framework.throttling import ScopedRateThrottle
 
 
 class ThrottledTokenObtainPairView(TokenObtainPairView):
-    """/api/auth/token/ is a second login door (username+password -> JWT);
-    it gets the same per-IP + per-username budget as /api/auth/login/."""
+    """/api/auth/token/ is a second login door (username+password -> JWT),
+    used by the delivery portal. It carries every control /api/auth/login/
+    has: the same per-IP + per-username budget, and the same refusal of a
+    password the policy no longer accepts."""
+    serializer_class = PolicyTokenObtainPairSerializer
     throttle_classes = [ScopedRateThrottle, LoginUsernameThrottle]
     throttle_scope = 'auth_login'
 
@@ -54,11 +59,17 @@ schema_view = get_schema_view(
 )
 
 urlpatterns = [
-    # Two-factor login/enrollment wizard (also used as the admin's LOGIN_URL —
-    # see settings.LOGIN_URL). tf_urls already bakes in its own 'account/'
-    # prefix on every path, so it's included at the root here, not nested
-    # under an extra one. Provides /account/login/,
-    # /account/two_factor/setup/, /account/two_factor/qrcode/, etc.
+    # No device enrolment on the web: there the password is the only proof
+    # of identity, so whoever knew it first could bind their own phone.
+    # Staff enrol on the server (manage.py enroll_admin_2fa). Listed before
+    # tf_urls so these match first and shadow two_factor's setup wizard.
+    path('account/two_factor/setup/', enrol_on_server),
+    path('account/two_factor/qrcode/', enrol_on_server),
+
+    # Two-factor login (also the admin's LOGIN_URL — see settings.LOGIN_URL)
+    # and the verified-only pages (backup tokens, disable). tf_urls already
+    # bakes in its own 'account/' prefix on every path, so it's included at
+    # the root here, not nested under an extra one.
     path('', include(tf_urls)),
 
     # Admin — path is env-configurable so it isn't sitting at the

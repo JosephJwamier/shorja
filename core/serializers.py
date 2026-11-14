@@ -26,6 +26,26 @@ from .services.support import SUPPORT_USERNAME
 User = get_user_model()
 
 
+def viewer_of(context):
+    """Who this payload is being built for.
+
+    An explicit context['viewer'] wins: a sign-in response is the user's own
+    data, but its request is still anonymous (the tokens are in the response
+    being built). Otherwise it is the request's user. None means nobody, and
+    every privacy check below treats nobody as a stranger.
+    """
+    viewer = context.get('viewer')
+    if viewer is not None:
+        return viewer
+    return getattr(context.get('request'), 'user', None)
+
+
+def _is_self_or_staff(viewer, owner_id):
+    if viewer is None or not getattr(viewer, 'is_authenticated', False):
+        return False
+    return viewer.is_staff or viewer.id == owner_id
+
+
 def store_badges_of(user):
     """Badge kinds of the user's store, [] when they have none. Used wherever
     a seller is shown next to something they sell."""
@@ -57,16 +77,9 @@ class UserSerializer(serializers.ModelSerializer):
     # seller's email and phone to an anonymous caller.
     _PRIVATE_FIELDS = ('email', 'phone', 'date_of_birth')
 
-    def _viewer_owns(self, obj):
-        request = self.context.get('request')
-        viewer = getattr(request, 'user', None)
-        if viewer is None or not viewer.is_authenticated:
-            return False
-        return viewer.is_staff or viewer.id == getattr(obj, 'id', None)
-
     def to_representation(self, instance):
         data = super().to_representation(instance)
-        if not self._viewer_owns(instance):
+        if not _is_self_or_staff(viewer_of(self.context), getattr(instance, 'id', None)):
             for field in self._PRIVATE_FIELDS:
                 data.pop(field, None)
         return data
@@ -116,29 +129,70 @@ class LocationSerializer(serializers.ModelSerializer):
     def get_full_address(self, obj):
         return obj.get_full_address()
 
-    # Precise whereabouts and the on-site contact. A buyer browsing a listing
-    # sees only the coarse area (city/state/country); the exact address, the
-    # GPS pin and the contact phone belong to the location's owner, to staff,
-    # and to the delivery company (which gets them through its own serializer,
-    # not this one). Leaking lat/long here put a pin on every seller's home.
+    # What a stranger may not see. The default is an item's location — often
+    # the seller's home: the street address, its label and the on-site
+    # contact are dropped, and the GPS pin is rounded (COARSE_DECIMALS) so the
+    # "near me" map still places the item in its neighbourhood without
+    # pointing at a door. Distances are computed server-side from the exact
+    # values, so they stay right. Owners and staff see everything; so do a
+    # reservation's own parties for its delivery address (see
+    # party_location), and the delivery company reads its own serializer.
     _PRIVATE_FIELDS = (
-        'address_line1', 'address_line2', 'postal_code', 'latitude',
-        'longitude', 'contact_person', 'contact_phone', 'notes', 'full_address',
+        'name', 'address_line1', 'address_line2', 'postal_code',
+        'contact_person', 'contact_phone', 'notes', 'full_address',
     )
+    _COARSE_FIELDS = ('latitude', 'longitude')
+    # 3 decimals ≈ 110 m north–south, ≈ 93 m east–west at Baghdad.
+    COARSE_DECIMALS = 3
 
-    def _viewer_owns(self, obj):
-        request = self.context.get('request')
-        viewer = getattr(request, 'user', None)
-        if viewer is None or not viewer.is_authenticated:
-            return False
-        return viewer.is_staff or viewer.id == getattr(obj, 'user_id', None)
+    def _sees_everything(self, obj):
+        if self.context.get('show_full_location'):
+            return True
+        return _is_self_or_staff(viewer_of(self.context), getattr(obj, 'user_id', None))
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
-        if not self._viewer_owns(instance):
-            for field in self._PRIVATE_FIELDS:
-                data.pop(field, None)
+        if self._sees_everything(instance):
+            return data
+        for field in self._PRIVATE_FIELDS:
+            data.pop(field, None)
+        for field in self._COARSE_FIELDS:
+            if data.get(field) is not None:
+                data[field] = _coarsen(data[field], self.COARSE_DECIMALS)
         return data
+
+
+def _coarsen(value, decimals):
+    """Round a serialized coordinate, keeping the type DRF produced (a string
+    under COERCE_DECIMAL_TO_STRING, else a number)."""
+    rounded = Decimal(str(value)).quantize(Decimal(1).scaleb(-decimals))
+    return str(rounded) if isinstance(value, str) else type(value)(rounded)
+
+
+class StoreLocationSerializer(LocationSerializer):
+    """A store's location is its shop front, and the store page exists to
+    show it: the address and the exact pin stay public. Only the on-site
+    contact and the owner's private notes are withheld from visitors."""
+    _PRIVATE_FIELDS = ('contact_person', 'contact_phone', 'notes')
+    _COARSE_FIELDS = ()
+
+
+def party_location(reservation, context):
+    """A reservation's delivery address, in full for the reservation's own
+    parties — the buyer typed it, and the selling side (owner, current holder,
+    representative) has to know where the order goes — and the stranger's
+    view for anyone else."""
+    location = reservation.delivery_location
+    if location is None:
+        return None
+    viewer = viewer_of(context)
+    item = reservation.item
+    parties = {reservation.buyer_id, reservation.representative_id,
+               item.owner_id, item.current_holder_id} - {None}
+    is_party = (viewer is not None and getattr(viewer, 'is_authenticated', False)
+                and viewer.id in parties)
+    return LocationSerializer(
+        location, context={**context, 'show_full_location': is_party}).data
 
 
 class LocationCreateUpdateSerializer(serializers.ModelSerializer):
@@ -933,7 +987,7 @@ class ReservationSerializer(serializers.ModelSerializer):
     item = ItemSerializer(read_only=True)
     buyer = UserSerializer(read_only=True)
     representative = UserSerializer(read_only=True)
-    delivery_location = LocationSerializer(read_only=True)
+    delivery_location = serializers.SerializerMethodField()
     related_transfer = serializers.PrimaryKeyRelatedField(read_only=True)
     time_remaining = serializers.SerializerMethodField()
     has_dispute = serializers.SerializerMethodField()
@@ -990,6 +1044,9 @@ class ReservationSerializer(serializers.ModelSerializer):
 
     def get_installment(self, obj):
         return _reservation_installment(obj)
+
+    def get_delivery_location(self, obj):
+        return party_location(obj, self.context)
 
     def get_seller_net(self, obj):
         """What the seller will receive: price minus the platform's cut and
@@ -1410,7 +1467,7 @@ class SellerReservationSerializer(serializers.ModelSerializer):
     """Serializer for sellers to view their item reservations"""
     item = ItemSerializer(read_only=True)
     buyer = UserSerializer(read_only=True)
-    delivery_location = LocationSerializer(read_only=True)
+    delivery_location = serializers.SerializerMethodField()
     time_remaining = serializers.SerializerMethodField()
     can_approve_cancellation = serializers.SerializerMethodField()
 
@@ -1432,6 +1489,9 @@ class SellerReservationSerializer(serializers.ModelSerializer):
 
     def get_can_approve_cancellation(self, obj):
         return obj.status == 'pending' and not obj.seller_cancellation_approved
+
+    def get_delivery_location(self, obj):
+        return party_location(obj, self.context)
 
 
 class RepresentativeSerializer(serializers.ModelSerializer):
@@ -2323,7 +2383,7 @@ class UserStoreUpdateSerializer(serializers.ModelSerializer):
 class UserStoreSerializer(serializers.ModelSerializer):
     """Full UserStore serializer with all details"""
     user = UserSerializer(read_only=True)
-    default_location = LocationSerializer(read_only=True)
+    default_location = StoreLocationSerializer(read_only=True)
     total_items = serializers.SerializerMethodField()
     total_active_items = serializers.SerializerMethodField()
     logo_url = serializers.SerializerMethodField()

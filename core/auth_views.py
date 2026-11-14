@@ -27,7 +27,9 @@ from .serializers import (
 )
 from .auth_tokens import fresh_token_pair, revoke_refresh_tokens
 from .notifications import NotificationService
-from .password_rules import password_error
+from .password_rules import (
+    WEAK_PASSWORD_CODE, WEAK_PASSWORD_MESSAGE, password_error,
+)
 from .phone_utils import to_e164
 from .models import Location  # NEW: Import Location
 
@@ -78,7 +80,10 @@ class RegisterView(generics.CreateAPIView):
         refresh = RefreshToken.for_user(user)
 
         return Response({
-            'user': UserSerializer(user).data,
+            # viewer=user: the request is still anonymous, but this is the
+            # user's own record — without it their email and phone are
+            # stripped as if a stranger were asking (UserSerializer).
+            'user': UserSerializer(user, context={'viewer': user}).data,
             'tokens': {
                 'refresh': str(refresh),
                 'access': str(refresh.access_token),
@@ -139,6 +144,19 @@ class LoginView(generics.GenericAPIView):
                 'error': 'Account is disabled'
             }, status=status.HTTP_403_FORBIDDEN)
 
+        # A correct password that today's policy rejects no longer opens the
+        # account. Accounts made before the policy was enforced still carry
+        # "12345678"-type passwords (7 of 11 at the 2026-11 pentest), and
+        # with usernames and phones on display those fall to a few guesses.
+        # The owner resets it by WhatsApp code, which applies the policy.
+        # What a guesser learns is only that a password they cannot use was
+        # right — the trade every "your password must be changed" makes.
+        if password_error(password, user=user):
+            return Response({
+                'error': WEAK_PASSWORD_MESSAGE,
+                'code': WEAK_PASSWORD_CODE,
+            }, status=status.HTTP_403_FORBIDDEN)
+
         # Generate tokens
         refresh = RefreshToken.for_user(user)
 
@@ -151,7 +169,7 @@ class LoginView(generics.GenericAPIView):
         primary_location = Location.objects.filter(user=user, is_primary=True).first()
 
         return Response({
-            'user': UserSerializer(user).data,
+            'user': UserSerializer(user, context={'viewer': user}).data,
             'tokens': {
                 'refresh': str(refresh),
                 'access': str(refresh.access_token),
@@ -496,7 +514,7 @@ def issue_session(user, is_new_user):
     primary_location = Location.objects.filter(user=user, is_primary=True).first()
 
     return Response({
-        'user': UserSerializer(user).data,
+        'user': UserSerializer(user, context={'viewer': user}).data,
         'tokens': {
             'refresh': str(refresh),
             'access': str(refresh.access_token),

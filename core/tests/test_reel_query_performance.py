@@ -16,6 +16,7 @@ core_savedreel, not the page's whole query count — the page total is *not*
 flat yet, and TestTheWholePageIsFlat below says why.
 """
 import pytest
+from django.core.cache import cache
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APIClient
@@ -91,10 +92,16 @@ class TestTheFlagsCostTheSameAtAnyPageSize:
     difference between the two runs is per-row work."""
 
     def test_the_feed(self, client, store, viewer):
+        # The feed ranks once per viewer and keeps the ranked ids for
+        # FEED_CACHE_TTL. Ranking reads the viewer's likes in one query at
+        # any size, so it is warmed first and what is measured is the page.
         make_reels(store, 3, viewer=viewer)
+        client.get('/api/reels/')
         small = len(_flag_queries(client, '/api/reels/', {}, 3))
 
         make_reels(store, 12, viewer=viewer, start=3)
+        cache.clear()  # drop the three-reel ranking, then warm the new one
+        client.get('/api/reels/')
         large = len(_flag_queries(client, '/api/reels/', {}, 15))
 
         assert small == large == 1, \

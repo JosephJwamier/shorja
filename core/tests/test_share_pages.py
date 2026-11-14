@@ -215,3 +215,22 @@ class TestDownloadPage:
         # حيث هو.
         html = client.get(f'/p/{listing.id}').content.decode()
         assert 'href="/get"' in html
+
+
+class TestScriptsCannotRun:
+    """The pages carry no script, so their policy forbids every script. The
+    templates escape what sellers type; this holds the day one of them
+    doesn't — injected markup may show, it never runs."""
+
+    def test_every_share_page_forbids_scripts(self, client, listing, seller):
+        for path in (f'/p/{listing.id}', '/get', '/'):
+            policy = client.get(path)['Content-Security-Policy']
+            assert "default-src 'none'" in policy, path
+            assert 'script-src' not in policy, path   # falls back to 'none'
+            assert "frame-ancestors 'none'" in policy, path
+
+    def test_the_fonts_and_images_the_pages_use_are_allowed(self, client, listing):
+        policy = client.get(f'/p/{listing.id}')['Content-Security-Policy']
+        assert 'https://fonts.googleapis.com' in policy
+        assert 'font-src https://fonts.gstatic.com' in policy
+        assert "img-src 'self' https:" in policy

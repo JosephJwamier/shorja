@@ -158,8 +158,12 @@ JSON
 # السجلات
 docker compose -f deploy/docker-compose.yml logs -f web worker beat
 
-# نشر تحديث
-git pull && docker compose -f deploy/docker-compose.yml up -d --build
+# نشر تحديث — منفصل عن الطرفية، فانقطاع SSH أثناء البناء لا يقطعه
+sudo bash deploy/deploy.sh
+
+# ربط تطبيق المصادقة بحساب إدارة (لوحة الإدارة تطلب رمزه في الإنتاج،
+# والربط لا يتم من المتصفح أبداً — انظر core/admin_site.py)
+docker compose -f deploy/docker-compose.yml --env-file .env exec web python manage.py enroll_admin_2fa <username>
 
 # صدفة Django
 docker compose -f deploy/docker-compose.yml exec web python manage.py shell

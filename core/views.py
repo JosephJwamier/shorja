@@ -10,6 +10,7 @@ from .services.disputes import resolve_dispute, DisputeResolutionError
 from .services.withdrawals import approve_withdrawal, reject_withdrawal, WithdrawalReviewError
 from .services.support import start_support_chat
 from .services.moderation import archive_item, resolve_report, ReportResolutionError
+from .api_errors import server_error
 
 logger = logging.getLogger(__name__)
 from .models import get_or_create_wallet
@@ -403,8 +404,10 @@ class ItemViewSet(viewsets.ModelViewSet):
                     order=idx
                 )
                 created_images.append(item_image)
-            except Exception as e:
-                errors.append(f"Failed to upload image {idx + 1}: {str(e)}")
+            except Exception:
+                # The storage error's text (bucket, endpoint) is for the log.
+                logger.exception('Image %s of item %s failed to upload', idx + 1, item.id)
+                errors.append(f"Failed to upload image {idx + 1}")
 
         return created_images, errors
 
@@ -488,12 +491,8 @@ class ItemViewSet(viewsets.ModelViewSet):
                     'errors': serializer.errors
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to create item',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to create item')
 
     @swagger_auto_schema(
         operation_description="Create a fixed price listing for an item",
@@ -543,12 +542,8 @@ class ItemViewSet(viewsets.ModelViewSet):
                     'data': FixedPriceListingSerializer(listing).data
                 }, status=status.HTTP_201_CREATED)
 
-            except Exception as e:
-                return Response({
-                    'success': False,
-                    'message': 'Failed to create listing',
-                    'errors': str(e)
-                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            except Exception:
+                return server_error('Failed to create listing')
 
         return Response({
             'success': False,
@@ -598,12 +593,8 @@ class ItemViewSet(viewsets.ModelViewSet):
                     'data': FixedPriceListingSerializer(updated_listing).data
                 }, status=status.HTTP_200_OK)
 
-            except Exception as e:
-                return Response({
-                    'success': False,
-                    'message': 'Failed to update listing',
-                    'errors': str(e)
-                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            except Exception:
+                return server_error('Failed to update listing')
 
         return Response({
             'success': False,
@@ -654,12 +645,8 @@ class ItemViewSet(viewsets.ModelViewSet):
                 'image_errors': errors if errors else None,
                 'data': ItemImageSerializer(created_images, many=True).data
             }, status=status.HTTP_201_CREATED)
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to upload images',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to upload images')
 
     @swagger_auto_schema(
         operation_description="Create an auction listing for an item (only for single quantity items)",
@@ -715,12 +702,8 @@ class ItemViewSet(viewsets.ModelViewSet):
                     'data': AuctionListingSerializer(auction).data
                 }, status=status.HTTP_201_CREATED)
 
-            except Exception as e:
-                return Response({
-                    'success': False,
-                    'message': 'Failed to create auction',
-                    'errors': str(e)
-                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            except Exception:
+                return server_error('Failed to create auction')
 
         return Response({
             'success': False,
@@ -803,12 +786,8 @@ class ItemViewSet(viewsets.ModelViewSet):
                     'data': AuctionListingSerializer(updated_auction).data
                 }, status=status.HTTP_200_OK)
 
-            except Exception as e:
-                return Response({
-                    'success': False,
-                    'message': 'Failed to update auction',
-                    'errors': str(e)
-                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            except Exception:
+                return server_error('Failed to update auction')
 
         return Response({
             'success': False,
@@ -1493,12 +1472,8 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                 'message': 'Insufficient balance to place bid (bid deposit required)',
                 'errors': str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to place bid',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to place bid')
 
 
     def _calculate_time_remaining(self, auction):
@@ -1778,12 +1753,8 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                 'message': 'Auction cancelled successfully'
             }, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to cancel auction',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to cancel auction')
 
     @swagger_auto_schema(
         operation_description="End an auction early (owner only)",
@@ -1883,12 +1854,8 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                 'final_price': str(auction.current_price)
             }, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to end auction',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to end auction')
 
 
 def _create_quick_live_item(owner, title, description, category_id, condition, quantity, force_live_category=False):
@@ -2986,12 +2953,8 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 'success': False,
                 'message': 'Delivery location not found or does not belong to you'
             }, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to reserve item',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to reserve item')
 
         try:
             notify_live_item_reserved(reservation)
@@ -4048,12 +4011,8 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 'data': ReservationSerializer(reservation, context={'request': request}).data
             }, status=status.HTTP_201_CREATED)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to create reservation',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to create reservation')
 
     @swagger_auto_schema(
         operation_description="""
@@ -4174,12 +4133,8 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 'message': 'Insufficient balance to complete this reservation',
                 'errors': str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to complete reservation',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to complete reservation')
 
     @swagger_auto_schema(
         operation_description="Buyer changes the delivery address on their own reservation. "
@@ -4285,12 +4240,8 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 'data': ReservationSerializer(reservation, context={'request': request}).data
             }, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to approve reservation',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to approve reservation')
 
     @swagger_auto_schema(
         operation_description="Seller hands a paid reservation off to the delivery company, instead of cancelling it."
@@ -4344,12 +4295,8 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 'data': DeliveryOrderSerializer(delivery_order).data
             }, status=status.HTTP_201_CREATED)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to send reservation to delivery',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to send reservation to delivery')
 
     @swagger_auto_schema(
         operation_description="Seller bundles several paid reservations for the same buyer/address into as few delivery trips as fit the size cap — one delivery fee per trip instead of one per reservation."
@@ -4420,12 +4367,8 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         try:
             with transaction.atomic():
                 results = [combine_deliveries(group, company) for group in groups]
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'فشل دمج التوصيل',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('فشل دمج التوصيل')
 
         trips = len(results)
         total_refunded = sum((refunded for _batch, _orders, refunded in results), Decimal('0.00'))
@@ -4605,12 +4548,8 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 'data': ReservationSerializer(reservation, context={'request': request}).data
             }, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to cancel reservation',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to cancel reservation')
 
     @action(detail=True, methods=['post'])
     def approve_cancellation(self, request, pk=None):
@@ -4639,12 +4578,8 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 'data': ReservationSerializer(reservation, context={'request': request}).data
             }, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to approve cancellation',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to approve cancellation')
 
     @action(detail=True, methods=['post'])
     def request_payment_release(self, request, pk=None):
@@ -4695,12 +4630,8 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 'message': f'Payment release request sent to {reservation.buyer.username}'
             }, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to send payment release request',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to send payment release request')
 
 
 class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
@@ -4772,12 +4703,8 @@ class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
                 'data': DeliveryOrderSerializer(delivery_order).data
             }, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to confirm pickup',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to confirm pickup')
 
     @swagger_auto_schema(operation_description="Delivery company confirms the item physically reached the buyer — prompts the buyer to confirm or refuse receipt.")
     @action(detail=True, methods=['post'], url_path='mark-arrived')
@@ -4948,12 +4875,8 @@ class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
                 'data': DeliveryOrderSerializer(return_order).data
             }, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to refuse receipt',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to refuse receipt')
 
 
 class DisputeViewSet(viewsets.ModelViewSet):
@@ -5097,12 +5020,8 @@ class DisputeViewSet(viewsets.ModelViewSet):
                 'success': False,
                 'message': 'Reservation not found'
             }, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to create dispute',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to create dispute')
 
     @swagger_auto_schema(
         operation_description="Resolve a dispute (admin only)",
@@ -5158,12 +5077,8 @@ class DisputeViewSet(viewsets.ModelViewSet):
                 'message': 'تعذّر تنفيذ التحويل المالي لهذا القرار',
                 'errors': str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to resolve dispute',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to resolve dispute')
 
 
 class ReportViewSet(viewsets.ModelViewSet):
@@ -5458,12 +5373,8 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                 'success': False,
                 'message': 'Item not found'
             }, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to create representative request',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to create representative request')
 
     @swagger_auto_schema(
         operation_description="Accept a representative request (owner only)",
@@ -5509,12 +5420,8 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                 'data': RepresentativeSerializer(representative, context={'request': request}).data
             }, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to accept request',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to accept request')
 
     @swagger_auto_schema(
         operation_description="Reject a representative request (owner only)",
@@ -5572,12 +5479,8 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                 'data': RepresentativeSerializer(representative, context={'request': request}).data
             }, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to reject request',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to reject request')
 
     @swagger_auto_schema(
         operation_description="Cancel a representative request or assignment",
@@ -5622,12 +5525,8 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                 'data': RepresentativeSerializer(representative, context={'request': request}).data
             }, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to cancel',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to cancel')
 
     @swagger_auto_schema(
         operation_description="Create a reservation through a representative (buyer gets representative's deal)",
@@ -5823,12 +5722,8 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                 }
             }, status=status.HTTP_201_CREATED)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to create reservation',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to create reservation')
 
 
     @swagger_auto_schema(
@@ -5900,12 +5795,8 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                 'data': RepresentativeSerializer(representative, context={'request': request}).data
             }, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to update permissions',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to update permissions')
 
     # In RepresentativeViewSet
     @swagger_auto_schema(
@@ -6346,12 +6237,8 @@ class ChatViewSet(viewsets.ModelViewSet):
                 'success': False,
                 'message': 'Item not found'
             }, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to create/get chat',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to create/get chat')
 
     @swagger_auto_schema(
         operation_description="Create or get a direct chat with a store",
@@ -6418,12 +6305,8 @@ class ChatViewSet(viewsets.ModelViewSet):
                 'success': False,
                 'message': 'Store not found'
             }, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to create/get store chat',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to create/get store chat')
 
     @swagger_auto_schema(
         operation_description="Create or get the current user's support chat",
@@ -6455,12 +6338,8 @@ class ChatViewSet(viewsets.ModelViewSet):
                 'message': 'Chat created' if created else 'Chat retrieved',
                 'data': ChatDetailSerializer(chat, context={'request': request}).data
             }, status=status_code)
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to create/get support chat',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to create/get support chat')
 
     @swagger_auto_schema(
         operation_description="Send a message in a chat",
@@ -6538,12 +6417,8 @@ class ChatViewSet(viewsets.ModelViewSet):
                 'data': response_data
             }, status=status.HTTP_201_CREATED)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to send message',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to send message')
 
     @swagger_auto_schema(
         operation_description="Send a price offer",
@@ -6637,12 +6512,8 @@ class ChatViewSet(viewsets.ModelViewSet):
                 'data': MessageSerializer(message, context={'request': request}).data
             }, status=status.HTTP_201_CREATED)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to send offer',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to send offer')
 
     @swagger_auto_schema(
         operation_description="Mark all messages as read",
@@ -6978,12 +6849,8 @@ class MessageViewSet(viewsets.ModelViewSet):
                 'data': MessageSerializer(message, context={'request': request}).data
             })
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to accept offer',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to accept offer')
 
     @swagger_auto_schema(
         operation_description="Reject a price offer (seller only)",
@@ -7058,12 +6925,8 @@ class MessageViewSet(viewsets.ModelViewSet):
                 'data': MessageSerializer(message, context={'request': request}).data
             })
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to reject offer',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to reject offer')
 
 
 class UserStoreViewSet(viewsets.ModelViewSet):
@@ -7199,12 +7062,8 @@ class UserStoreViewSet(viewsets.ModelViewSet):
                 'data': UserStoreSerializer(store).data
             }, status=status.HTTP_201_CREATED)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to create store',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to create store')
 
     @swagger_auto_schema(
         operation_description="Update your store details",
@@ -7246,12 +7105,8 @@ class UserStoreViewSet(viewsets.ModelViewSet):
                 'data': UserStoreSerializer(updated_store).data
             }, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to update store',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to update store')
 
     @swagger_auto_schema(
         operation_description="Get your own store details",
@@ -7711,12 +7566,8 @@ class UserStoreViewSet(viewsets.ModelViewSet):
                 'data': UserStoreSerializer(store).data
             }, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to update store status',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to update store status')
 
     @swagger_auto_schema(
         operation_description="Update store logo - Use multipart/form-data to upload image file",
@@ -7772,12 +7623,8 @@ class UserStoreViewSet(viewsets.ModelViewSet):
                 'data': UserStoreSerializer(store).data
             }, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to update logo',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to update logo')
 
     @swagger_auto_schema(
         operation_description="Set default location for store",
@@ -7833,12 +7680,8 @@ class UserStoreViewSet(viewsets.ModelViewSet):
                 'success': False,
                 'message': 'Location not found or does not belong to you'
             }, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to set default location',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to set default location')
 
     @swagger_auto_schema(
         operation_description="Get store statistics",
@@ -7924,12 +7767,8 @@ class UserStoreViewSet(viewsets.ModelViewSet):
                 'data': stats
             }, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'Failed to retrieve statistics',
-                'errors': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Failed to retrieve statistics')
 
     @swagger_auto_schema(
         operation_description="Browse all active stores",
@@ -8491,9 +8330,8 @@ class WalletViewSet(viewsets.ViewSet):
                 'message': 'Withdrawal requested. Awaiting admin approval.',
                 'data': WithdrawalRequestSerializer(wd).data
             }, status=status.HTTP_201_CREATED)
-        except Exception as e:
-            return Response({'success': False, 'message': 'Withdrawal failed', 'errors': str(e)},
-                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Withdrawal failed')
 
     @action(detail=False, methods=['get'])
     def my_deposits(self, request):
@@ -8524,9 +8362,8 @@ class AdminWithdrawalViewSet(viewsets.ReadOnlyModelViewSet):
                              'data': WithdrawalRequestSerializer(wd).data})
         except WithdrawalReviewError as e:
             return Response({'success': False, 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            return Response({'success': False, 'message': 'Approval failed', 'errors': str(e)},
-                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Approval failed')
 
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
@@ -8538,9 +8375,8 @@ class AdminWithdrawalViewSet(viewsets.ReadOnlyModelViewSet):
                              'data': WithdrawalRequestSerializer(wd).data})
         except WithdrawalReviewError as e:
             return Response({'success': False, 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            return Response({'success': False, 'message': 'Rejection failed', 'errors': str(e)},
-                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return server_error('Rejection failed')
 
 
 class NotificationViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet):

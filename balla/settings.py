@@ -105,11 +105,15 @@ def _check_reels_storage_config():
 # scanner tries. Must end with '/'. Override per environment via .env.
 ADMIN_URL_PATH = os.environ.get('ADMIN_URL_PATH', 'admin/')
 
-# Hard-enforce an OTP-verified session before granting admin access. Left
-# off by default so this ships without locking out staff who haven't
-# enrolled a device yet — flip to 'True' only after every staff account has
-# set up a device at /account/two_factor/setup/. See core/admin_site.py.
-ADMIN_REQUIRE_2FA = os.environ.get('ADMIN_REQUIRE_2FA', 'False') == 'True'
+# An OTP-verified session before any admin page. Production always demands
+# it; the environment switch only lets a developer's DEBUG server skip it.
+# (The 2026-11 pentest found production running with the switch off: the
+# password alone opened the panel that approves withdrawals.) Staff enrol
+# from the server, never the web — `manage.py enroll_admin_2fa <username>`,
+# see core/admin_site.py for why.
+ADMIN_REQUIRE_2FA = (not DEBUG) or os.environ.get('ADMIN_REQUIRE_2FA', 'False') == 'True'
+# The name the authenticator app shows next to the code.
+OTP_TOTP_ISSUER = 'Shorjeh Admin'
 
 # Application definition
 INSTALLED_APPS = [
@@ -251,6 +255,12 @@ WEVLIX_BASE_URL = os.environ.get('WEVLIX_BASE_URL', 'https://api.wevlix.com')
 # بين الرقم و messageId في الذاكرة المؤقتة.
 OTP_TTL_SECONDS = int(os.environ.get('OTP_TTL_SECONDS', '600'))
 
+# سقف رسائل التحقّق على المنصة كلها في اليوم (بتوقيت بغداد). خنق
+# otp_send يوقف عنواناً واحداً، أما مهاجم بعناوين كثيرة يرسل رموزاً لأرقام
+# عشوائية فلا يوقفه إلا سقف للمجموع — وكل رسالة تُدفع من رصيد Wevlix.
+# عند 80% منه يصل تنبيه إلى Sentry؛ ارفعه من .env قبل حملة إعلانية.
+OTP_DAILY_SEND_CAP = int(os.environ.get('OTP_DAILY_SEND_CAP', '500'))
+
 CACHES = {
     'default': {
         'BACKEND': 'django_redis.cache.RedisCache',
@@ -365,7 +375,12 @@ CHANNEL_LAYERS = {
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
-    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
+    # 'phone' on top of Django's defaults: the 2026-11 pentest found accounts
+    # whose password was their own number, and a "+964..." number is not
+    # caught by NumericPasswordValidator because of the '+'.
+    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
+     'OPTIONS': {'user_attributes': ('username', 'first_name', 'last_name',
+                                     'email', 'phone')}},
     {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
     {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
     {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},

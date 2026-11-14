@@ -14,6 +14,7 @@ import logging
 from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -53,6 +54,40 @@ def _service_unavailable():
         status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
 
+def _daily_key():
+    # تاريخ بغداد في المفتاح: العدّاد يبدأ من الصفر عند منتصف ليلنا، ويُمحى
+    # وحده بعد يومين.
+    return f'otp-sent:{timezone.localdate().isoformat()}'
+
+
+def _take_daily_slot():
+    """يحجز رسالة من سقف اليوم ويعيد مفتاح عدّاده، أو `None` إن امتلأ.
+
+    الحجز قبل الإرسال لا بعده: طلبان متزامنان عند آخر مكان كانا سيمرّان
+    معاً لو فُحص العدد ثم أُرسل. add ثم incr ذرّيّتان على Redis.
+    """
+    key = _daily_key()
+    cache.add(key, 0, timeout=2 * 24 * 3600)
+    sent = cache.incr(key)
+    cap = settings.OTP_DAILY_SEND_CAP
+    if sent == max(1, cap * 8 // 10):
+        logger.error('OTP sends reached %d of today\'s cap of %d', sent, cap)
+    if sent > cap:
+        if sent == cap + 1:
+            logger.error('OTP daily cap of %d reached; refusing sends until midnight', cap)
+        return None
+    return key
+
+
+def _give_back_daily_slot(key):
+    """رسالة حُجزت ولم تُرسل (فشل Wevlix) لا تُحسب على السقف. المفتاح من
+    الحجز نفسه: إرجاعٌ بعد منتصف الليل لا يُنقص عدّاد اليوم التالي."""
+    try:
+        cache.decr(key)
+    except ValueError:  # المفتاح انتهى بين الحجز والإرجاع
+        pass
+
+
 class SendPhoneCodeView(APIView):
     """يرسل رمزاً إلى رقم عبر واتساب.
 
@@ -85,12 +120,20 @@ class SendPhoneCodeView(APIView):
                 'already_sent': True,
             })
 
+        # يبدو للمستخدم كتعطّل عابر لا كسقف: لا شيء يخبر المهاجم أنه وصل
+        # إلى الحدّ فيعرف متى يعود.
+        slot = _take_daily_slot()
+        if slot is None:
+            return _service_unavailable()
+
         try:
             message_id = send_otp(canonical)
         except WevlixNotConfigured:
+            _give_back_daily_slot(slot)
             logger.error('OTP requested but Wevlix is not configured')
             return _service_unavailable()
         except WevlixError as e:
+            _give_back_daily_slot(slot)
             return Response({'success': False, 'message': str(e)},
                             status=status.HTTP_502_BAD_GATEWAY)
 

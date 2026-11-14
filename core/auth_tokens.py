@@ -10,10 +10,43 @@ An access token already issued keeps working until it expires
 (ACCESS_TOKEN_LIFETIME, 30 minutes): simplejwt verifies those without the
 database. That window is the price of stateless access tokens, and it is short.
 """
+from django.contrib.auth.models import update_last_login
+from rest_framework import exceptions
+from rest_framework_simplejwt.serializers import (
+    TokenObtainPairSerializer, TokenObtainSerializer,
+)
+from rest_framework_simplejwt.settings import api_settings
 from rest_framework_simplejwt.token_blacklist.models import (
     BlacklistedToken, OutstandingToken,
 )
 from rest_framework_simplejwt.tokens import RefreshToken
+
+from .password_rules import (
+    WEAK_PASSWORD_CODE, WEAK_PASSWORD_MESSAGE_PORTAL, password_error,
+)
+
+
+class PolicyTokenObtainPairSerializer(TokenObtainPairSerializer):
+    """/api/auth/token/ (the delivery portal's sign-in) refuses what
+    /api/auth/login/ refuses: a correct password that today's policy rejects.
+
+    The check sits between authenticating and minting, so a refused sign-in
+    leaves no token behind. That means repeating the parent's three minting
+    lines (simplejwt 5.3) instead of calling it — the parent mints first.
+    """
+
+    def validate(self, attrs):
+        data = TokenObtainSerializer.validate(self, attrs)  # sets self.user
+        if password_error(attrs['password'], user=self.user):
+            raise exceptions.PermissionDenied(
+                WEAK_PASSWORD_MESSAGE_PORTAL, code=WEAK_PASSWORD_CODE)
+
+        refresh = self.get_token(self.user)
+        data['refresh'] = str(refresh)
+        data['access'] = str(refresh.access_token)
+        if api_settings.UPDATE_LAST_LOGIN:
+            update_last_login(None, self.user)
+        return data
 
 
 def revoke_refresh_tokens(user):

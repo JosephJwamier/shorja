@@ -15,6 +15,8 @@
 
 كلها عامة (AllowAny ضمناً: دوال Django عادية لا DRF) وللقراءة فقط.
 """
+import functools
+
 from django.http import Http404
 from django.shortcuts import render
 from django.conf import settings
@@ -26,6 +28,30 @@ from .models import AuctionListing, FixedPriceListing, LiveSession, UserStore
 # صورة تُعرض حين لا صورة للمنتج. واتساب يرفض البطاقة بلا og:image، فبديل
 # ثابت أفضل من وسم ناقص.
 FALLBACK_IMAGE = '/static/share-fallback.png'
+
+# لا صفحة هنا تشغّل سكربتاً — بطاقات Open Graph وصفحة تحميل — فالسياسة
+# تمنع السكربت كلياً. القوالب تهرّب كل ما يكتبه البائع (العنوان والوصف)،
+# وهذه الطبقة هي ما يبقى يوم يفلت شيء منها: الوسم المحقون يظهر نصاً ولا
+# يعمل أبداً. وما تحمّله الصفحات من خارجها: أنماط <style> المضمّنة، وخطوط
+# Google في home.html، وصور https (صور المنتجات من نطاق الوسائط أو R2).
+SHARE_PAGE_CSP = '; '.join([
+    "default-src 'none'",
+    "img-src 'self' https: data:",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src https://fonts.gstatic.com",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+])
+
+
+def _locked_down(view):
+    @functools.wraps(view)
+    def wrapped(request, *args, **kwargs):
+        response = view(request, *args, **kwargs)
+        response['Content-Security-Policy'] = SHARE_PAGE_CSP
+        return response
+    return wrapped
 
 def _store_links():
     """رابطا المتجرين، أو '' لكلٍّ منهما قبل النشر.
@@ -74,6 +100,7 @@ def _item_title(item):
     return item.name_ar or item.title
 
 
+@_locked_down
 @cache_control(max_age=300)
 def product(request, listing_id):
     listing = (
@@ -97,6 +124,7 @@ def product(request, listing_id):
     )
 
 
+@_locked_down
 @cache_control(max_age=300)
 def store(request, store_id):
     shop = UserStore.objects.filter(pk=store_id, is_active=True).first()
@@ -113,6 +141,7 @@ def store(request, store_id):
     )
 
 
+@_locked_down
 @cache_control(max_age=60)
 def auction(request, auction_id):
     # مهلة أقصر من المنتج: السعر الحالي يتغيّر مع كل مزايدة، وبطاقة
@@ -138,6 +167,7 @@ def auction(request, auction_id):
     )
 
 
+@_locked_down
 @cache_control(max_age=60)
 def live(request, session_id):
     session = (
@@ -161,6 +191,7 @@ def live(request, session_id):
     )
 
 
+@_locked_down
 @cache_control(max_age=3600)
 def get_app(request):
     """صفحة التحميل — وجهة كل زرّ يقول «افتح في التطبيق» أو «حمّل التطبيق».
@@ -183,6 +214,7 @@ def get_app(request):
     })
 
 
+@_locked_down
 @cache_control(max_age=3600)
 def home(request):
     """جذر shorjeh.com.
