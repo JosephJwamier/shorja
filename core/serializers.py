@@ -50,6 +50,27 @@ class UserSerializer(serializers.ModelSerializer):
                             'email_verified', 'phone_verified', 'identity_verified',
                             'store_badges']
 
+    # Fields that identify or reach the person. Shown only to the account
+    # itself and to staff; stripped for everyone else, because this serializer
+    # is nested read-only inside ~30 public views (items, stores, auctions,
+    # chats, reviews...). A single GET /api/items/ used to return every
+    # seller's email and phone to an anonymous caller.
+    _PRIVATE_FIELDS = ('email', 'phone', 'date_of_birth')
+
+    def _viewer_owns(self, obj):
+        request = self.context.get('request')
+        viewer = getattr(request, 'user', None)
+        if viewer is None or not viewer.is_authenticated:
+            return False
+        return viewer.is_staff or viewer.id == getattr(obj, 'id', None)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if not self._viewer_owns(instance):
+            for field in self._PRIVATE_FIELDS:
+                data.pop(field, None)
+        return data
+
     def get_store_badges(self, obj):
         try:
             return store_badges_of(obj)
@@ -94,6 +115,30 @@ class LocationSerializer(serializers.ModelSerializer):
 
     def get_full_address(self, obj):
         return obj.get_full_address()
+
+    # Precise whereabouts and the on-site contact. A buyer browsing a listing
+    # sees only the coarse area (city/state/country); the exact address, the
+    # GPS pin and the contact phone belong to the location's owner, to staff,
+    # and to the delivery company (which gets them through its own serializer,
+    # not this one). Leaking lat/long here put a pin on every seller's home.
+    _PRIVATE_FIELDS = (
+        'address_line1', 'address_line2', 'postal_code', 'latitude',
+        'longitude', 'contact_person', 'contact_phone', 'notes', 'full_address',
+    )
+
+    def _viewer_owns(self, obj):
+        request = self.context.get('request')
+        viewer = getattr(request, 'user', None)
+        if viewer is None or not viewer.is_authenticated:
+            return False
+        return viewer.is_staff or viewer.id == getattr(obj, 'user_id', None)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if not self._viewer_owns(instance):
+            for field in self._PRIVATE_FIELDS:
+                data.pop(field, None)
+        return data
 
 
 class LocationCreateUpdateSerializer(serializers.ModelSerializer):

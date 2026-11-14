@@ -844,7 +844,19 @@ if not DEBUG:
 # allowing unlimited password guessing against staff accounts.
 AXES_FAILURE_LIMIT = 5
 AXES_COOLOFF_TIME = timedelta(minutes=30)
-AXES_LOCKOUT_PARAMETERS = ['username', 'ip_address']
+# One list inside the list = lock on the (username AND ip_address) pair, not
+# on either alone. Behind Caddy every request shares one proxy IP, so locking
+# on ip_address by itself froze login for the whole platform after any five
+# failures anywhere; locking on username alone let one attacker lock a victim
+# out at will. The pair locks only the account being guessed from the address
+# guessing it.
+AXES_LOCKOUT_PARAMETERS = [['username', 'ip_address']]
+# Read the real client IP from the X-Forwarded-For that Caddy appends, not
+# REMOTE_ADDR (which is Caddy's container address, the same for everyone).
+# core.axes_ip.client_ip takes the right-most entry — the one Caddy appends and
+# a client cannot spoof. Without it the IP half of the pair above would be one
+# value for the whole platform and the lock would still be global.
+AXES_CLIENT_IP_CALLABLE = 'core.axes_ip.client_ip'
 AXES_RESET_ON_SUCCESS = True
 
 # django-two-factor-auth: route the admin's login redirect through the
