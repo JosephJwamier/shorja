@@ -2510,6 +2510,17 @@ class ReelComment(models.Model):
     reel = models.ForeignKey(Reel, on_delete=models.CASCADE, related_name='comments')
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='reel_comments')
     content = models.CharField(max_length=300)
+    # الردود بمستوى واحد كإنستغرام: الردّ على ردّ يُعلَّق تحت التعليق الأصلي
+    # نفسه، ويُحفظ صاحب الردّ المقصود في reply_to. السلسلة المتداخلة بلا حدّ
+    # تنضغط على شاشة هاتف إلى عمود ضيّق لا يُقرأ.
+    parent = models.ForeignKey(
+        'self', null=True, blank=True, on_delete=models.CASCADE,
+        related_name='replies',
+    )
+    reply_to = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='+',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -2670,6 +2681,7 @@ class Notification(models.Model):
         ('report_reviewed', 'Report Reviewed'),
         ('reel_liked', 'Reel Liked'),
         ('reel_comment', 'Reel Comment'),
+        ('reel_comment_reply', 'Reel Comment Reply'),
         ('general', 'General'),
     ]
 

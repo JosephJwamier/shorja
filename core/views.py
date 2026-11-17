@@ -21,7 +21,8 @@ from rest_framework.permissions import IsAuthenticated, AllowAny,IsAdminUser
 from rest_framework.pagination import PageNumberPagination
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db import transaction, IntegrityError
-from django.db.models import Q, Count, F, Exists, OuterRef
+from django.db.models import Q, Count, F, Exists, OuterRef, Prefetch
+from django.db.models.functions import Greatest
 from django.core.cache import cache
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -87,6 +88,7 @@ from .serializers import (ItemImageSerializer, FixedPriceListingCreateSerializer
                           ReelCardSerializer, ReelDetailSerializer,
                           RequestReelUploadSerializer, FinalizeReelSerializer,
                           ReelCommentSerializer, ReelCommentCreateSerializer,
+                          ReelCommentThreadSerializer,
                           )
 from .permissions import IsOwnerOrReadOnly, IsParticipantOrReadOnly, IsStoreOwner
 from .firestore import sync_chat_to_firestore, sync_message_to_firestore, sync_user_fcm_token
@@ -3471,16 +3473,30 @@ class ReelViewSet(SafeRankingCacheMixin,
 
     @action(detail=True, methods=['get', 'post'], url_path='comments')
     def comments(self, request, pk=None):
-        """List recent comments (GET, public) or post a new one (POST, authenticated)"""
+        """List recent comments with their replies (GET, public) or post a
+        comment or a reply (POST, authenticated)"""
         reel = self.get_object()
+        ctx = {'store_owner_id': reel.store.user_id if reel.store_id else None}
 
         if request.method == 'GET':
             limit = min(int(request.query_params.get('limit', 50)), 200)
-            recent = list(reel.comments.select_related('user').order_by('-created_at')[:limit])
+            # الحدّ على التعليقات الرئيسية وحدها: ردود تعليقٍ مقطوعة من
+            # منتصفها تُبقي سؤالاً بلا جوابه الظاهر.
+            recent = list(
+                reel.comments.filter(parent__isnull=True)
+                .select_related('user')
+                .prefetch_related(Prefetch(
+                    'replies',
+                    queryset=ReelComment.objects.select_related('user', 'reply_to')
+                    .order_by('created_at', 'id'),
+                    to_attr='thread_replies',
+                ))
+                .order_by('-created_at')[:limit]
+            )
             recent.reverse()  # oldest first, chat-feed order
             return Response({
                 'success': True,
-                'data': ReelCommentSerializer(recent, many=True).data
+                'data': ReelCommentThreadSerializer(recent, many=True, context=ctx).data
             })
 
         serializer = ReelCommentCreateSerializer(data=request.data)
@@ -3491,8 +3507,25 @@ class ReelViewSet(SafeRankingCacheMixin,
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        parent = None
+        reply_to = None
+        parent_id = serializer.validated_data.get('parent_id')
+        if parent_id is not None:
+            target = reel.comments.select_related('user').filter(id=parent_id).first()
+            if target is None:
+                return Response({
+                    'success': False,
+                    'message': 'التعليق الذي تردّ عليه لم يعد موجوداً',
+                }, status=status.HTTP_404_NOT_FOUND)
+            # ردّ على ردّ: يُعلَّق تحت التعليق الرئيسي، ويُسمّى من رُدّ عليه.
+            if target.parent_id:
+                parent, reply_to = target.parent, target.user
+            else:
+                parent = target
+
         comment = ReelComment.objects.create(
-            reel=reel, user=request.user, content=serializer.validated_data['content']
+            reel=reel, user=request.user, parent=parent, reply_to=reply_to,
+            content=serializer.validated_data['content'],
         )
         Reel.objects.filter(pk=reel.pk).update(comments_count=F('comments_count') + 1)
 
@@ -3507,7 +3540,7 @@ class ReelViewSet(SafeRankingCacheMixin,
 
         return Response({
             'success': True,
-            'data': ReelCommentSerializer(comment).data
+            'data': ReelCommentSerializer(comment, context=ctx).data
         }, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['delete'], url_path='comments/(?P<comment_id>[^/.]+)')
@@ -3527,10 +3560,15 @@ class ReelViewSet(SafeRankingCacheMixin,
                 'message': 'You cannot delete this comment'
             }, status=status.HTTP_403_FORBIDDEN)
 
+        # حذف تعليق رئيسي يحذف ردوده معه (CASCADE)، فالعدّاد ينقص بها كلها.
+        removed = 1 + comment.replies.count()
         comment.delete()
-        Reel.objects.filter(pk=reel.pk, comments_count__gt=0).update(comments_count=F('comments_count') - 1)
+        Reel.objects.filter(pk=reel.pk).update(
+            comments_count=Greatest(F('comments_count') - removed, 0))
 
-        return Response({'success': True, 'message': 'Comment deleted'}, status=status.HTTP_200_OK)
+        return Response({
+            'success': True, 'message': 'Comment deleted', 'removed': removed,
+        }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
     def view(self, request, pk=None):

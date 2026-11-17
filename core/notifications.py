@@ -1007,29 +1007,41 @@ def notify_reel_liked(reel, liker):
 
 
 def notify_reel_comment(comment):
-    """يُشعر صاحب الريل بكل تعليق.
+    """يُشعر صاحب الريل بكل تعليق، ومن رُدّ عليه بكل ردّ.
 
     بلا عتبات هنا: التعليق كلام موجَّه وغالباً سؤال عن البضاعة، وتأخيره
     يُضيّع بيعاً. وحجمه أقل من الإعجاب بمراتب فلا يُغرق.
+
+    إشعار واحد للشخص الواحد: صاحب الريل الذي رُدّ على تعليقه يصله «ردّ على
+    تعليقك» لا الإشعاران معاً.
     """
     reel = comment.reel
     owner = reel.store.user if reel.store_id else None
-    if owner is None or owner.pk == comment.user_id:
-        return
 
     author = bidi_isolate(comment.user.get_full_name() or comment.user.username)
     preview = comment.content.strip()
     # الإشعار يُعرض في سطرٍ على القفل؛ النصّ الطويل يُقطع بلا إشارة.
     if len(preview) > 60:
         preview = preview[:60].rstrip() + '…'
+    data = {'reel_id': str(reel.id), 'comment_id': str(comment.id)}
+
+    replied_to = None
+    if comment.parent_id:
+        replied_to = comment.reply_to or comment.parent.user
+        if replied_to.pk != comment.user_id:
+            notify_push(
+                replied_to, 'ردّ على تعليقك', f'{author}: {preview}',
+                data={**data, 'type': 'reel_comment_reply'},
+            )
+
+    if owner is None or owner.pk == comment.user_id:
+        return
+    if replied_to is not None and owner.pk == replied_to.pk:
+        return
 
     notify_push(
         owner, 'تعليق جديد على ريلك', f'{author}: {preview}',
-        data={
-            'type': 'reel_comment',
-            'reel_id': str(reel.id),
-            'comment_id': str(comment.id),
-        },
+        data={**data, 'type': 'reel_comment'},
     )
 
 

@@ -2750,17 +2750,51 @@ class FinalizeReelSerializer(serializers.Serializer):
 class ReelCommentSerializer(serializers.ModelSerializer):
     """Public reel comment. Deliberately exposes only id/username — never
     the full UserSerializer (email/phone), same convention as
-    LiveSessionCommentSerializer since comments are visible to any viewer."""
+    LiveSessionCommentSerializer since comments are visible to any viewer.
+
+    is_store_owner يعلّم ردّ البائع بشارة: سؤال عن البضاعة يجيب عنه زبون
+    آخر يختلف وزنه عن جواب صاحب المتجر نفسه. يُمرَّر store_owner_id في
+    السياق كي لا يكلّف كل تعليق استعلاماً عن متجر الريل."""
     username = serializers.CharField(source='user.username', read_only=True)
     user_id = serializers.IntegerField(source='user.id', read_only=True)
+    parent_id = serializers.IntegerField(read_only=True)
+    reply_to_username = serializers.SerializerMethodField()
+    is_store_owner = serializers.SerializerMethodField()
 
     class Meta:
         model = ReelComment
-        fields = ['id', 'user_id', 'username', 'content', 'created_at']
+        fields = ['id', 'user_id', 'username', 'content', 'created_at',
+                  'parent_id', 'reply_to_username', 'is_store_owner']
+
+    def get_reply_to_username(self, obj):
+        return obj.reply_to.username if obj.reply_to_id else None
+
+    def get_is_store_owner(self, obj):
+        owner_id = self.context.get('store_owner_id')
+        return owner_id is not None and obj.user_id == owner_id
+
+
+class ReelCommentThreadSerializer(ReelCommentSerializer):
+    """تعليق رئيسي مع ردوده، الأقدم أولاً كمحادثة.
+
+    الردود تأتي مُحمَّلة مسبقاً في thread_replies (Prefetch بـ to_attr)،
+    فالقائمة كلها استعلامان مهما كثرت الردود."""
+    replies = serializers.SerializerMethodField()
+
+    class Meta(ReelCommentSerializer.Meta):
+        fields = ReelCommentSerializer.Meta.fields + ['replies']
+
+    def get_replies(self, obj):
+        replies = getattr(obj, 'thread_replies', None)
+        if replies is None:
+            replies = obj.replies.select_related('user', 'reply_to').order_by('created_at', 'id')
+        return ReelCommentSerializer(replies, many=True, context=self.context).data
 
 
 class ReelCommentCreateSerializer(serializers.Serializer):
     content = serializers.CharField(max_length=300, trim_whitespace=True)
+    # التعليق الذي يُردّ عليه، رئيسياً كان أو ردّاً. غيابه = تعليق جديد.
+    parent_id = serializers.IntegerField(required=False, allow_null=True)
 
     def validate_content(self, value):
         if not value.strip():
