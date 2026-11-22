@@ -251,6 +251,13 @@ REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 WEVLIX_API_KEY = os.environ.get('WEVLIX_API_KEY', '')
 WEVLIX_BASE_URL = os.environ.get('WEVLIX_BASE_URL', 'https://api.wevlix.com')
 
+# لغة قالب رمز التحقّق. Wevlix تختار قالب AUTHENTICATION معتمداً بهذه اللغة،
+# وبلا لغة تفترض الإنجليزية — فإن لم يكن في الحساب قالب إنجليزي رُفض كل
+# إرسال بـ 404 «No approved ... template available for locale en». مستخدمونا
+# عراقيون، فالعربية هي الافتراضي؛ ويجب أن يكون في حساب Wevlix قالب
+# مصادقة معتمد بها.
+WEVLIX_OTP_LOCALE = os.environ.get('WEVLIX_OTP_LOCALE', 'ar').strip()
+
 # مهلة صلاحية الرمز عندنا. Wevlix لها مهلتها أيضاً؛ هذه تحدّ عمر الربط
 # بين الرقم و messageId في الذاكرة المؤقتة.
 OTP_TTL_SECONDS = int(os.environ.get('OTP_TTL_SECONDS', '600'))

@@ -81,6 +81,9 @@ def send_otp(phone_e164, client_message_id=None):
     رسالتين.
     """
     payload = {'to': phone_e164}
+    locale = getattr(settings, 'WEVLIX_OTP_LOCALE', '')
+    if locale:
+        payload['locale'] = locale
     if client_message_id:
         payload['clientMessageId'] = client_message_id
 

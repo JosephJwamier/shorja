@@ -174,3 +174,23 @@ class TestResettingAPassword:
         v.assert_not_called()
         # الرمز ما زال صالحاً: الخطأ كان في كلمة المرور لا فيه.
         assert cache.get(f'otp:{E164}') == MESSAGE_ID
+
+
+class TestOtpLocale:
+    """بلا لغة صريحة تفترض Wevlix الإنجليزية، فيُرفض كل إرسال إن كان قالب
+    الحساب عربياً فقط (أو لم يكن قالب إنجليزي) — وهو ما عطّل «نسيت كلمة
+    المرور» في 2026-11-23."""
+
+    def _payload(self, settings_override=None):
+        from core.services import wevlix
+        with patch.object(wevlix, '_post', return_value={'messageId': 'm1'}) as post:
+            wevlix.send_otp('+9647801234567')
+        return post.call_args.args[1]
+
+    def test_arabic_is_requested_by_default(self, settings):
+        settings.WEVLIX_OTP_LOCALE = 'ar'
+        assert self._payload()['locale'] == 'ar'
+
+    def test_an_empty_setting_sends_no_locale(self, settings):
+        settings.WEVLIX_OTP_LOCALE = ''
+        assert 'locale' not in self._payload()
