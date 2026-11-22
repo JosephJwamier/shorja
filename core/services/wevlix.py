@@ -42,6 +42,19 @@ def _api_key():
     return key
 
 
+def _unwrap(body):
+    """يُرجع حمولة الردّ من داخل غلاف Wevlix.
+
+    Wevlix تغلّف كل ردّ: {"success": true, "data": {...}, "meta": {...}}.
+    قراءة messageId أو verified من المستوى الأعلى كانت تُرجع None دائماً،
+    فأُبلغ المستخدم «تعذّر الإرسال» وقد وصله الرمز فعلاً (2026-11-23). ونقبل
+    الشكل غير المغلّف أيضاً كي لا ينكسر شيء لو تغيّر.
+    """
+    if isinstance(body, dict) and isinstance(body.get('data'), dict):
+        return body['data']
+    return body if isinstance(body, dict) else {}
+
+
 def _post(path, payload):
     url = f"{settings.WEVLIX_BASE_URL.rstrip('/')}{path}"
     try:
@@ -60,7 +73,7 @@ def _post(path, payload):
         raise WevlixError('تعذّر إرسال رمز التحقّق، حاول بعد قليل')
 
     if response.status_code in (200, 201):
-        return response.json()
+        return _unwrap(response.json())
 
     # 401/403 يعنيان مفتاحاً خاطئاً أو بلا صلاحية — خطؤنا لا خطؤه.
     if response.status_code in (401, 403):
@@ -142,8 +155,8 @@ def verify_otp(message_id, code):
         logger.warning('Wevlix verify unreachable: %s', e)
         raise WevlixError('تعذّر التحقّق من الرمز، حاول بعد قليل')
 
-    if response.status_code == 200:
-        return bool(response.json().get('verified'))
+    if response.status_code in (200, 201):
+        return bool(_unwrap(response.json()).get('verified'))
     if response.status_code == 400:
         return False
     if response.status_code in (401, 403):

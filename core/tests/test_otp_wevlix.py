@@ -194,3 +194,39 @@ class TestOtpLocale:
     def test_an_empty_setting_sends_no_locale(self, settings):
         settings.WEVLIX_OTP_LOCALE = ''
         assert 'locale' not in self._payload()
+
+
+class TestWevlixEnvelope:
+    """Wevlix تغلّف ردودها في {"success", "data", "meta"}. قراءة الحقول من
+    المستوى الأعلى أبلغت المستخدم «تعذّر الإرسال» وقد وصله الرمز، وكانت
+    سترفض الرمز الصحيح عند التحقّق (2026-11-23)."""
+
+    @staticmethod
+    def _response(status_code, body):
+        from unittest.mock import Mock
+        return Mock(status_code=status_code, json=Mock(return_value=body), text='')
+
+    def test_send_reads_the_message_id_inside_data(self, settings):
+        from core.services import wevlix
+        settings.WEVLIX_API_KEY = 'k'
+        body = {'success': True, 'data': {
+            'messageId': '81ee628d', 'status': 'queued', 'otpMode': 'generated'},
+            'meta': {'requestId': 'r'}}
+        with patch('core.services.wevlix.requests.post',
+                   return_value=self._response(201, body)):
+            assert wevlix.send_otp('+9647801234567') == '81ee628d'
+
+    def test_a_correct_code_inside_data_is_accepted(self, settings):
+        from core.services import wevlix
+        settings.WEVLIX_API_KEY = 'k'
+        body = {'success': True, 'data': {'verified': True}, 'meta': {}}
+        with patch('core.services.wevlix.requests.post',
+                   return_value=self._response(200, body)):
+            assert wevlix.verify_otp('81ee628d', '123456') is True
+
+    def test_an_unwrapped_reply_still_works(self, settings):
+        from core.services import wevlix
+        settings.WEVLIX_API_KEY = 'k'
+        with patch('core.services.wevlix.requests.post',
+                   return_value=self._response(200, {'messageId': 'plain'})):
+            assert wevlix.send_otp('+9647801234567') == 'plain'
