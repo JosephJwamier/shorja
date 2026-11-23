@@ -13,7 +13,8 @@ was paid nothing.
 
 The generic create/update endpoints are now closed (405) and the serializer is
 output-only. The owner's own paths — accept/ and update_permissions/, which is
-itself a PATCH — must keep working, so they are pinned here too.
+itself a PATCH — must keep working, so they are pinned here too. Once accepted,
+the rate is fixed: update_permissions changes the flags, never the commission.
 """
 from decimal import Decimal
 
@@ -123,12 +124,44 @@ def test_owner_update_permissions_patch_still_works(owner, assignment):
 
     response = client_for(owner).patch(
         f'/api/representatives/{assignment.id}/update_permissions/',
-        {'can_complete_sale': True, 'commission_percentage': '7.50'}, format='json')
+        {'can_complete_sale': True}, format='json')
 
     assert response.status_code == 200
     assignment.refresh_from_db()
     assert assignment.can_complete_sale is True
-    assert assignment.commission_percentage == Decimal('7.50')
+    assert assignment.commission_percentage == Decimal('5')
+
+
+def test_owner_cannot_change_the_rate_after_accepting(owner, assignment):
+    # النسبة اتفاق بين الطرفين، لا صلاحية يضبطها البائع وحده: خفضها بعد
+    # الموافقة يأكل حصّة مندوب يبيع على وعد أُعطي له.
+    assignment.status = 'accepted'
+    assignment.save(update_fields=['status'])
+
+    response = client_for(owner).patch(
+        f'/api/representatives/{assignment.id}/update_permissions/',
+        {'can_complete_sale': True, 'commission_percentage': '1'}, format='json')
+
+    assert response.status_code == 400
+    assignment.refresh_from_db()
+    assert assignment.commission_percentage == Decimal('5')
+    # الطلب يُرفض كلّه، فلا تُحفظ الصلاحيات المرسلة معه أيضاً.
+    assert assignment.can_complete_sale is False
+
+
+def test_an_older_app_resending_the_same_rate_still_saves(owner, assignment):
+    # النسخ القديمة من التطبيق ترسل النسبة الحالية مع كل حفظ للصلاحيات.
+    assignment.status = 'accepted'
+    assignment.save(update_fields=['status'])
+
+    response = client_for(owner).patch(
+        f'/api/representatives/{assignment.id}/update_permissions/',
+        {'can_list': True, 'commission_percentage': '5.0'}, format='json')
+
+    assert response.status_code == 200
+    assignment.refresh_from_db()
+    assert assignment.can_list is True
+    assert assignment.commission_percentage == Decimal('5')
 
 
 def test_representative_cannot_use_update_permissions(rep, assignment):

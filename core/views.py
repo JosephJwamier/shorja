@@ -5831,9 +5831,17 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                 representative.can_complete_sale = serializer.validated_data['can_complete_sale']
                 update_fields.append('can_complete_sale')
 
-            if 'commission_percentage' in serializer.validated_data:
-                representative.commission_percentage = serializer.validated_data['commission_percentage']
-                update_fields.append('commission_percentage')
+            # النسبة اتفاقٌ لا صلاحية: اقترحها المندوب ووافق عليها البائع،
+            # وعليها يبيع المندوب. لو غيّرها البائع بعد الموافقة لخفّض حصّة
+            # مندوب يعمل على وعدٍ أُعطي له. النسخ القديمة من التطبيق ترسل
+            # النسبة الحالية مع كل حفظ، فالقيمة نفسها تُقبل وتُتجاهَل، وأي
+            # قيمة أخرى تُرفض: نسبة جديدة تعني طلب مندوبية جديداً.
+            new_rate = serializer.validated_data.get('commission_percentage')
+            if new_rate is not None and new_rate != representative.commission_percentage:
+                return Response({
+                    'success': False,
+                    'message': 'لا يمكن تعديل نسبة المندوب بعد الموافقة',
+                }, status=status.HTTP_400_BAD_REQUEST)
 
             if update_fields:
                 representative.save(update_fields=update_fields)
