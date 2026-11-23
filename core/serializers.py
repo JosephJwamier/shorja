@@ -1623,6 +1623,7 @@ class ItemTransferSerializer(serializers.ModelSerializer):
     days_remaining = serializers.SerializerMethodField()
     is_expired = serializers.SerializerMethodField()
     total_wholesale_price = serializers.SerializerMethodField()
+    owner_net_amount = serializers.SerializerMethodField()
     due_storage_fee = serializers.SerializerMethodField()
     is_storage_fee_due = serializers.SerializerMethodField()
     # Permissions for the requesting user
@@ -1640,6 +1641,7 @@ class ItemTransferSerializer(serializers.ModelSerializer):
             'days_remaining', 'is_expired',
             # Wholesale purchase
             'quantity', 'wholesale_price_per_unit', 'total_wholesale_price', 'resulting_item',
+            'platform_commission_percent', 'platform_commission_amount', 'owner_net_amount',
             # Storage fees
             'storage_fee_type', 'storage_fee_amount', 'storage_fee_period_days',
             'total_storage_fees_paid', 'next_storage_fee_due',
@@ -1655,6 +1657,14 @@ class ItemTransferSerializer(serializers.ModelSerializer):
 
     def get_days_remaining(self, obj):
         return obj.days_remaining()
+
+    def get_owner_net_amount(self, obj):
+        # ما وصل البائع فعلاً: الثمن ناقص عمولة المنصة. فارغ قبل الموافقة
+        # لأن الثمن نفسه لم يُثبَّت بعد.
+        total = obj.total_wholesale_price
+        if total is None:
+            return None
+        return float(total - (obj.platform_commission_amount or 0))
 
     def get_is_expired(self, obj):
         return obj.is_expired()

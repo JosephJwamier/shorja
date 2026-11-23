@@ -871,6 +871,14 @@ class ItemTransfer(models.Model):
         max_digits=12, decimal_places=2, null=True, blank=True,
         help_text="Snapshot of the item's per-unit price at approval time"
     )
+    # عمولة المنصة على البيعة بالجملة: القاعدة نفسها التي على كل بيع —
+    # نسبة التصنيف مضروبة في شارة البائع (services.commission.commission_for)
+    # — تُقتطع من حصّة البائع لا تُضاف على المشتري. تُجمَّد عند الموافقة
+    # لأنها لحظة انتقال المال، فلا يمسّ تغييرُ النسبة لاحقاً بيعةً تمّت.
+    platform_commission_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal('0.00'))
+    platform_commission_amount = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal('0.00'))
     resulting_item = models.ForeignKey(
         Item, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='acquired_via_transfer',
@@ -930,8 +938,9 @@ class ItemTransfer(models.Model):
     def activate(self):
         """
         Owner approves → deducts the requested quantity from their item's stock,
-        charges the reseller's wallet at the item's listed per-unit price, and
-        creates a new, fully independent Item owned by the reseller.
+        charges the reseller's wallet at the item's listed per-unit price, pays
+        the owner that price less the platform commission, and creates a new,
+        fully independent Item owned by the reseller.
         """
         from .wallet_utils import debit_balance, credit_earnings
 
@@ -959,8 +968,16 @@ class ItemTransfer(models.Model):
 
         variant.take_stock(self.quantity)
 
+        from .services.commission import commission_for, platform_account
+        commission_percent, commission = commission_for(item, total_price)
+        commission = min(commission, total_price)
+
         debit_balance(self.to_user, total_price, 'purchase', item=item, transfer=self)
-        credit_earnings(self.from_user, total_price, 'payout', item=item, transfer=self)
+        credit_earnings(self.from_user, total_price - commission, 'payout',
+                        item=item, transfer=self)
+        if commission > 0:
+            credit_earnings(platform_account(), commission, 'commission',
+                            item=item, transfer=self)
 
         new_item = Item.objects.create(
             owner=self.to_user,
@@ -988,6 +1005,8 @@ class ItemTransfer(models.Model):
 
         now = timezone.now()
         self.wholesale_price_per_unit = wholesale_price_per_unit
+        self.platform_commission_percent = commission_percent
+        self.platform_commission_amount = commission
         self.resulting_item = new_item
         self.status = 'active'
         self.approved_at = now
@@ -997,7 +1016,8 @@ class ItemTransfer(models.Model):
         if self.storage_fee_type != 'none':
             self.next_storage_fee_due = now + timedelta(days=self.storage_fee_period_days)
         self.save(update_fields=[
-            'wholesale_price_per_unit', 'resulting_item', 'status', 'approved_at',
+            'wholesale_price_per_unit', 'platform_commission_percent',
+            'platform_commission_amount', 'resulting_item', 'status', 'approved_at',
             'agreement_start_date', 'agreement_end_date', 'next_storage_fee_due',
         ])
 
