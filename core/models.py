@@ -10,6 +10,7 @@ from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
 from decimal import Decimal
 from django.core.exceptions import ValidationError
+from .uploads import validate_image
 from .iraq_governorates import IRAQ_GOVERNORATE_CHOICES
 from .phone_utils import to_e164
 
@@ -43,7 +44,7 @@ class User(AbstractUser):
     phone_verified = models.BooleanField(default=False)
     email_verified = models.BooleanField(default=False)
     identity_verified = models.BooleanField(default=False)
-    avatar = models.ImageField(upload_to='avatars/', null=True, blank=True)
+    avatar = models.ImageField(upload_to='avatars/', validators=[validate_image], null=True, blank=True)
     bio = models.TextField(max_length=500, blank=True)
     date_of_birth = models.DateField(null=True, blank=True)
     # Updated from ChatConsumer on connect/disconnect — see
@@ -221,8 +222,8 @@ class UserStore(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='store')
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True)
-    logo = models.ImageField(upload_to='store_logos/', null=True, blank=True)
-    cover_image = models.ImageField(upload_to='store_covers/', null=True, blank=True)
+    logo = models.ImageField(upload_to='store_logos/', validators=[validate_image], null=True, blank=True)
+    cover_image = models.ImageField(upload_to='store_covers/', validators=[validate_image], null=True, blank=True)
     is_active = models.BooleanField(default=True)
     phone_number = models.CharField(
         max_length=20, blank=True,
@@ -614,13 +615,13 @@ class ItemVariant(models.Model):
     sku = models.CharField(max_length=64, blank=True)
     quantity = models.PositiveIntegerField(default=0)
     price = models.DecimalField(
-        max_digits=12, decimal_places=2, null=True, blank=True,
+        max_digits=14, decimal_places=2, null=True, blank=True,
         help_text='سعر خاص بهذا المتغيّر؛ فارغ = سعر المنتج الأساسي'
     )
     # What the merchant paid per unit. Optional and private to the seller:
     # the dashboard uses it for gross profit, the buyer never sees it.
     cost_price = models.DecimalField(
-        max_digits=12, decimal_places=2, null=True, blank=True,
+        max_digits=14, decimal_places=2, null=True, blank=True,
         help_text='كلفة الوحدة على التاجر (اختياري، لا تظهر للمشتري)'
     )
     image = models.ForeignKey(
@@ -678,7 +679,7 @@ class ItemVariant(models.Model):
 class ItemImage(models.Model):
     """Item images"""
     item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name='images')
-    image = models.ImageField(upload_to='item_images/')
+    image = models.ImageField(upload_to='item_images/', validators=[validate_image])
     order = models.PositiveSmallIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -707,12 +708,12 @@ class Favorite(models.Model):
 class FixedPriceListing(models.Model):
     """Fixed price sale listing"""
     item = models.OneToOneField(Item, on_delete=models.CASCADE, related_name='fixed_listing')
-    price = models.DecimalField(max_digits=10, decimal_places=2)
+    price = models.DecimalField(max_digits=14, decimal_places=2)
     original_price = models.DecimalField(
-        max_digits=10, decimal_places=2, null=True, blank=True,
+        max_digits=14, decimal_places=2, null=True, blank=True,
         help_text="Pre-discount reference price, used to show a discount badge"
     )
-    deposit_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    deposit_amount = models.DecimalField(max_digits=14, decimal_places=2)
     deposit_percentage = models.DecimalField(
         max_digits=5,
         decimal_places=2,
@@ -752,10 +753,10 @@ class AuctionListing(models.Model):
     ]
 
     item = models.OneToOneField(Item, on_delete=models.CASCADE, related_name='auction_listing')
-    starting_price = models.DecimalField(max_digits=10, decimal_places=2)
-    current_price = models.DecimalField(max_digits=10, decimal_places=2)
-    minimum_increment = models.DecimalField(max_digits=10, decimal_places=2)
-    bid_deposit = models.DecimalField(max_digits=10, decimal_places=2)
+    starting_price = models.DecimalField(max_digits=14, decimal_places=2)
+    current_price = models.DecimalField(max_digits=14, decimal_places=2)
+    minimum_increment = models.DecimalField(max_digits=14, decimal_places=2)
+    bid_deposit = models.DecimalField(max_digits=14, decimal_places=2)
 
     start_time = models.DateTimeField()
     end_time = models.DateTimeField()
@@ -793,7 +794,7 @@ class Bid(models.Model):
     """Auction bids"""
     auction = models.ForeignKey(AuctionListing, on_delete=models.CASCADE, related_name='bids')
     bidder = models.ForeignKey(User, on_delete=models.CASCADE, related_name='bids')
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
     deposit_paid = models.BooleanField(default=False)
     deposit_refunded = models.BooleanField(default=False)
     is_winning = models.BooleanField(default=False)
@@ -870,7 +871,7 @@ class ItemTransfer(models.Model):
         related_name='transfers'
     )
     wholesale_price_per_unit = models.DecimalField(
-        max_digits=12, decimal_places=2, null=True, blank=True,
+        max_digits=14, decimal_places=2, null=True, blank=True,
         help_text="Snapshot of the item's per-unit price at approval time"
     )
     # عمولة المنصة على البيعة بالجملة: القاعدة نفسها التي على كل بيع —
@@ -880,7 +881,7 @@ class ItemTransfer(models.Model):
     platform_commission_percent = models.DecimalField(
         max_digits=5, decimal_places=2, default=Decimal('0.00'))
     platform_commission_amount = models.DecimalField(
-        max_digits=12, decimal_places=2, default=Decimal('0.00'))
+        max_digits=14, decimal_places=2, default=Decimal('0.00'))
     resulting_item = models.ForeignKey(
         Item, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='acquired_via_transfer',
@@ -892,11 +893,11 @@ class ItemTransfer(models.Model):
         max_length=20, choices=STORAGE_FEE_TYPE_CHOICES, default='none'
     )
     storage_fee_amount = models.DecimalField(
-        max_digits=10, decimal_places=2, null=True, blank=True
+        max_digits=14, decimal_places=2, null=True, blank=True
     )
     storage_fee_period_days = models.PositiveIntegerField(default=30)
     total_storage_fees_paid = models.DecimalField(
-        max_digits=10, decimal_places=2, default=Decimal('0.00')
+        max_digits=14, decimal_places=2, default=Decimal('0.00')
     )
     next_storage_fee_due = models.DateTimeField(null=True, blank=True)
 
@@ -1053,7 +1054,7 @@ class StorageFeePayment(models.Model):
     ]
 
     transfer = models.ForeignKey(ItemTransfer, on_delete=models.CASCADE, related_name='storage_fee_payments')
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
     period_start = models.DateTimeField()
     period_end = models.DateTimeField()
     due_date = models.DateTimeField()
@@ -1125,12 +1126,12 @@ class Reservation(models.Model):
     buyer = models.ForeignKey(User, on_delete=models.CASCADE, related_name='reservations')
 
     quantity = models.PositiveIntegerField(default=1)
-    deposit_amount = models.DecimalField(max_digits=10, decimal_places=2)
-    total_price = models.DecimalField(max_digits=10, decimal_places=2)
+    deposit_amount = models.DecimalField(max_digits=14, decimal_places=2)
+    total_price = models.DecimalField(max_digits=14, decimal_places=2)
     # Charged to the buyer in full at complete() regardless of payment_type —
     # computed from the active delivery company's intra/inter-governorate
     # rate (0 if no active company at that time). See ReservationViewSet.complete.
-    delivery_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    delivery_fee = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0.00'))
     # Snapshot of item.warranty_days taken when the buyer reserves
     # (see wallet_utils.complete_reservation) — a later edit to the item's
     # warranty by the seller must not retroactively change the terms of an
@@ -1185,7 +1186,7 @@ class Reservation(models.Model):
         help_text='The representative assignment used for this sale'
     )
     commission_amount = models.DecimalField(
-        max_digits=10,
+        max_digits=14,
         decimal_places=2,
         null=True,
         blank=True,
@@ -1201,7 +1202,7 @@ class Reservation(models.Model):
     platform_commission_percent = models.DecimalField(
         max_digits=5, decimal_places=2, default=Decimal('0.00'))
     platform_commission_amount = models.DecimalField(
-        max_digits=10, decimal_places=2, default=Decimal('0.00'))
+        max_digits=14, decimal_places=2, default=Decimal('0.00'))
 
     # NEW: Transfer-related fields
     is_transfer_resale = models.BooleanField(
@@ -1217,7 +1218,7 @@ class Reservation(models.Model):
         help_text="The transfer this reservation is part of (if applicable)"
     )
     original_owner_commission = models.DecimalField(
-        max_digits=10,
+        max_digits=14,
         decimal_places=2,
         null=True,
         blank=True,
@@ -1245,7 +1246,7 @@ class Reservation(models.Model):
         help_text='The collected store coupon redeemed for this reservation'
     )
     coupon_discount = models.DecimalField(
-        max_digits=10, decimal_places=2, default=Decimal('0.00'),
+        max_digits=14, decimal_places=2, default=Decimal('0.00'),
         help_text='Amount discounted from total_price by the applied coupon'
     )
 
@@ -1319,7 +1320,8 @@ class Reservation(models.Model):
         if not self.is_deposit_only:
             return self.total_price + self.delivery_fee
         charged = self.deposit_amount
-        outbound = self.delivery_orders.filter(direction='outbound', cash_collected=True).first()
+        outbound = next((o for o in self.delivery_orders.all()
+                         if o.direction == 'outbound' and o.cash_collected), None)
         if outbound:
             # cash_due_to_platform, not cash_to_collect: the company kept its
             # own share of the fee out of the cash, so that part never
@@ -1334,8 +1336,8 @@ class Reservation(models.Model):
         # Once the courier has the goods there is nothing to pull back, however
         # recent the order and even if the seller had agreed: a cancel here
         # refunded the buyer while the goods kept travelling to them.
-        if self.delivery_orders.filter(direction='outbound').exclude(
-                status__in=['assigned', 'cancelled', 'failed']).exists():
+        if any(o.direction == 'outbound' and o.status not in ('assigned', 'cancelled', 'failed')
+               for o in self.delivery_orders.all()):
             return False
         time_since_reservation = timezone.now() - self.reserved_at
         within_two_hours = time_since_reservation.total_seconds() <= 7200  # 2 hours
@@ -1358,12 +1360,9 @@ class Reservation(models.Model):
         when the seller hasn't sent it to a delivery company at all), in
         which case can_release_payment() can only succeed via buyer_approved.
         """
-        outbound = self.delivery_orders.filter(
-            direction='outbound',
-            status__in=['delivered', 'confirmed'],
-            delivered_at__isnull=False,
-        ).order_by('-delivered_at').first()
-        return outbound.delivered_at if outbound else None
+        return max((o.delivered_at for o in self.delivery_orders.all()
+                    if o.direction == 'outbound' and o.delivered_at
+                    and o.status in ('delivered', 'confirmed')), default=None)
 
     def can_release_payment(self):
         """Check if payment can be released to seller"""
@@ -1569,11 +1568,11 @@ class DeliveryCompany(models.Model):
     # crosses into a different one. Charged to the buyer at Reservation
     # completion — see ReservationViewSet.complete.
     intra_governorate_fee = models.DecimalField(
-        max_digits=10, decimal_places=2, default=Decimal('0.00'),
+        max_digits=14, decimal_places=2, default=Decimal('0.00'),
         help_text='رسم التوصيل داخل نفس محافظة البائع'
     )
     inter_governorate_fee = models.DecimalField(
-        max_digits=10, decimal_places=2, default=Decimal('0.00'),
+        max_digits=14, decimal_places=2, default=Decimal('0.00'),
         help_text='رسم التوصيل إلى محافظة مختلفة عن محافظة البائع'
     )
     # What الشورجة keeps out of this company's delivery fee. Negotiated per
@@ -1625,7 +1624,7 @@ class CashSettlement(models.Model):
     which payment, by whom, and when.
     """
     company = models.ForeignKey(DeliveryCompany, on_delete=models.CASCADE, related_name='cash_settlements')
-    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
     settled_by = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, related_name='cash_settlements_recorded'
     )
@@ -1660,7 +1659,7 @@ class DeliveryBatch(models.Model):
     company = models.ForeignKey(
         DeliveryCompany, on_delete=models.SET_NULL, null=True, related_name='delivery_batches'
     )
-    combined_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    combined_fee = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0.00'))
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -1689,7 +1688,7 @@ class DeliveryRate(models.Model):
     package_size = models.CharField(
         max_length=10, choices=PACKAGE_SIZE_CHOICES, blank=True,
         help_text='فارغ = أي حجم')
-    fee = models.DecimalField(max_digits=10, decimal_places=2,
+    fee = models.DecimalField(max_digits=14, decimal_places=2,
                               validators=[MinValueValidator(0)])
     is_active = models.BooleanField(default=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1787,7 +1786,7 @@ class DeliveryOrder(models.Model):
     special_notes = models.TextField(blank=True)
     # Only meaningful on outbound legs with is_deposit_only reservations —
     # the amount the company must collect in cash from the buyer.
-    cash_to_collect = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    cash_to_collect = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0.00'))
     # Set when the company confirms it physically collected cash_to_collect
     # from the buyer (bundled into mark_arrived — see DeliveryOrderViewSet).
     # This is what makes the remainder part of Reservation.amount_charged,
@@ -1803,7 +1802,7 @@ class DeliveryOrder(models.Model):
     )
     # Snapshot of Reservation.delivery_fee at the moment this outbound leg
     # was created — the gross fee for this trip, before the platform's cut.
-    delivery_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    delivery_fee = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0.00'))
     # The platform's cut of delivery_fee, frozen from
     # DeliveryCompany.platform_commission_percent when this leg was created —
     # same rule as the seller's commission: a later renegotiation never
@@ -1811,7 +1810,7 @@ class DeliveryOrder(models.Model):
     platform_commission_percent = models.DecimalField(
         max_digits=5, decimal_places=2, default=Decimal('0.00'))
     platform_commission_amount = models.DecimalField(
-        max_digits=10, decimal_places=2, default=Decimal('0.00'))
+        max_digits=14, decimal_places=2, default=Decimal('0.00'))
     # What the company must actually hand over out of the cash it collected.
     #
     # The company nets its own earnings out of the cash on the spot — it
@@ -1822,7 +1821,7 @@ class DeliveryOrder(models.Model):
     # See DeliveryCompany.outstanding_cash_liability and
     # DeliveryOrderAdmin.settle_cash_action, which both use this field.
     cash_due_to_platform = models.DecimalField(
-        max_digits=10, decimal_places=2, default=Decimal('0.00'))
+        max_digits=14, decimal_places=2, default=Decimal('0.00'))
 
     failure_reason = models.TextField(blank=True)
 
@@ -1926,7 +1925,7 @@ class Transaction(models.Model):
 
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='transactions')
     transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPE_CHOICES)
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
 
     # Relationships
@@ -2006,7 +2005,7 @@ class Message(models.Model):
 
     # For offers — offer_amount is the total price for offer_quantity items
     # (not a per-unit price)
-    offer_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    offer_amount = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
     offer_quantity = models.PositiveIntegerField(null=True, blank=True, default=1)
     # Which combination the price was offered for; null for a plain item.
     offer_variant = models.ForeignKey(
@@ -2076,7 +2075,7 @@ class ProductReview(models.Model):
     item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name='product_reviews')
     score = models.PositiveSmallIntegerField(validators=[MinValueValidator(1), MaxValueValidator(5)])
     comment = models.TextField(blank=True)
-    image = models.ImageField(upload_to='review_images/', null=True, blank=True)
+    image = models.ImageField(upload_to='review_images/', validators=[validate_image], null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -2155,12 +2154,12 @@ class StoreCoupon(models.Model):
     code = models.CharField(max_length=40)
     # discount value in IQD (the amount shown on the coupon card)
     amount = models.DecimalField(
-        max_digits=12, decimal_places=2, default=Decimal('0.00'),
+        max_digits=14, decimal_places=2, default=Decimal('0.00'),
         validators=[MinValueValidator(0)]
     )
     # minimum order value required to use the coupon (للطلبات فوق ...)
     min_order_amount = models.DecimalField(
-        max_digits=12, decimal_places=2, default=Decimal('0.00'),
+        max_digits=14, decimal_places=2, default=Decimal('0.00'),
         validators=[MinValueValidator(0)]
     )
     description = models.CharField(max_length=200, blank=True)
@@ -2219,7 +2218,7 @@ class LiveSession(models.Model):
     store = models.ForeignKey(UserStore, on_delete=models.CASCADE, related_name='live_sessions')
     title = models.CharField(max_length=200)
     description = models.TextField(blank=True)
-    thumbnail = models.ImageField(upload_to='live_thumbnails/', null=True, blank=True)
+    thumbnail = models.ImageField(upload_to='live_thumbnails/', validators=[validate_image], null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='scheduled')
 
     # Public stream name on the media server. Media never passes through
@@ -2280,8 +2279,8 @@ class LiveSessionItem(models.Model):
     session = models.ForeignKey(LiveSession, on_delete=models.CASCADE, related_name='items')
     item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name='live_session_entries')
 
-    price = models.DecimalField(max_digits=10, decimal_places=2)
-    deposit_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    price = models.DecimalField(max_digits=14, decimal_places=2)
+    deposit_amount = models.DecimalField(max_digits=14, decimal_places=2)
 
     order = models.PositiveIntegerField(default=0, help_text="Queue position")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='queued')
@@ -2616,9 +2615,9 @@ class Wallet(models.Model):
         on_delete=models.CASCADE,
         related_name='wallet'
     )
-    balance = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    balance = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0.00'))
     # Money locked in pending withdrawals (can't be spent or withdrawn twice)
-    held_balance = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    held_balance = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0.00'))
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -2747,7 +2746,7 @@ class DepositRequest(models.Model):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='deposits'
     )
-    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     # Simulated card details (store ONLY last 4 in real life — never full PAN)
     card_last4 = models.CharField(max_length=4, blank=True)
@@ -2773,7 +2772,7 @@ class WithdrawalRequest(models.Model):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='withdrawals'
     )
-    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     card_last4 = models.CharField(max_length=4, blank=True)  # destination card
     # Where to send the money. Kept only while the request is open — the admin
@@ -2943,7 +2942,7 @@ class PaymentIntent(models.Model):
         max_length=32, choices=PURPOSE_CHOICES, default=PURPOSE_WALLET_TOPUP
     )
 
-    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
     currency = models.CharField(max_length=8, default='IQD')
     description = models.CharField(max_length=255, blank=True)
 
@@ -3083,29 +3082,29 @@ class InstallmentPlan(models.Model):
     )
 
     # ما مُوّل فعلاً: ثمن المنتج + أجرة التوصيل، أي ما كان سيُخصم من المحفظة.
-    principal = models.DecimalField(max_digits=12, decimal_places=2)
+    principal = models.DecimalField(max_digits=14, decimal_places=2)
     months = models.PositiveSmallIntegerField(default=10)
     # نسبة المموّل من المشتري — تُضاف على سعره ولا تدخل حساب المنصة أبداً.
     customer_fee_percent = models.DecimalField(max_digits=5, decimal_places=2,
                                                default=Decimal('0.00'))
-    customer_fee_amount = models.DecimalField(max_digits=12, decimal_places=2,
+    customer_fee_amount = models.DecimalField(max_digits=14, decimal_places=2,
                                               default=Decimal('0.00'))
     # ما يدفعه المشتري إجمالاً، وقسطه الشهري. جدول المموّل هو المرجع إن
     # أعاده نداؤه؛ هذه قيم العرض والتدقيق.
-    total_payable = models.DecimalField(max_digits=12, decimal_places=2)
-    monthly_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    total_payable = models.DecimalField(max_digits=14, decimal_places=2)
+    monthly_amount = models.DecimalField(max_digits=14, decimal_places=2)
 
     # نسبة المموّل من التاجر (upfront فقط)، وما يصل حساب المنصة بعدها.
     merchant_fee_percent = models.DecimalField(max_digits=5, decimal_places=2,
                                                default=Decimal('0.00'))
-    merchant_fee_amount = models.DecimalField(max_digits=12, decimal_places=2,
+    merchant_fee_amount = models.DecimalField(max_digits=14, decimal_places=2,
                                               default=Decimal('0.00'))
     # ما يُخصم من حصّة البائع عند التحرير. صفر في كل خطة جديدة: الزبون صار
     # يحمل نسبة المموّل من التاجر (انظر qi_amount)؛ يبقى الحقل لخطط قديمة
     # حُسبت حين كان البائع يحملها.
-    seller_fee_amount = models.DecimalField(max_digits=12, decimal_places=2,
+    seller_fee_amount = models.DecimalField(max_digits=14, decimal_places=2,
                                             default=Decimal('0.00'))
-    platform_settlement = models.DecimalField(max_digits=12, decimal_places=2,
+    platform_settlement = models.DecimalField(max_digits=14, decimal_places=2,
                                               default=Decimal('0.00'))
 
     # المبلغ الذي يُكتب في كي كارد. أكبر من principal لأن الزبون يحمل كل
@@ -3114,25 +3113,25 @@ class InstallmentPlan(models.Model):
     #     qi_amount = (principal + platform_fee) ÷ (1 − merchant_fee%)
     # ونسبة الزبون تُضاف فوقه (total_payable). صفر في خطط قديمة — هناك كان
     # المبلغ المكتوب هو principal نفسه (انظر amount_at_qi).
-    qi_amount = models.DecimalField(max_digits=12, decimal_places=2,
+    qi_amount = models.DecimalField(max_digits=14, decimal_places=2,
                                     default=Decimal('0.00'))
     # رسم المنصة على البيعة المقسّطة — نسبة من principal يدفعها الزبون ضمن
     # أقساطه، وتُقيَّد لحساب المنصة عند تحرير المبلغ للبائع.
     platform_fee_percent = models.DecimalField(max_digits=5, decimal_places=2,
                                                default=Decimal('0.00'))
-    platform_fee_amount = models.DecimalField(max_digits=12, decimal_places=2,
+    platform_fee_amount = models.DecimalField(max_digits=14, decimal_places=2,
                                               default=Decimal('0.00'))
 
     # ما استُقطع من المشتري ووصل حساب المنصة فعلاً (مجموع InstallmentCollection).
     # في upfront يبقى صفراً: المموّل سدّد مرّة واحدة ويحصّل لنفسه.
-    collected_amount = models.DecimalField(max_digits=12, decimal_places=2,
+    collected_amount = models.DecimalField(max_digits=14, decimal_places=2,
                                            default=Decimal('0.00'))
-    reversed_amount = models.DecimalField(max_digits=12, decimal_places=2,
+    reversed_amount = models.DecimalField(max_digits=14, decimal_places=2,
                                           default=Decimal('0.00'))
     # ما أُعيد من المحصَّل إلى محفظة المشتري. حقل قائم بذاته لأن الاسترداد
     # قد يتجزّأ (نزاع بتسوية جزئية ثم إلغاء): بلا عدّاد، كل استرداد يعيد
     # كامل collected_amount فيُدفع المال مرّتين.
-    buyer_refunded_amount = models.DecimalField(max_digits=12, decimal_places=2,
+    buyer_refunded_amount = models.DecimalField(max_digits=14, decimal_places=2,
                                                 default=Decimal('0.00'))
 
     # رقم حساب كي كارد كما أرسله المشتري — المسار اليدوي وحده يحفظه، لأن
@@ -3269,7 +3268,7 @@ class InstallmentCollection(models.Model):
         InstallmentPlan, on_delete=models.CASCADE, related_name='collections'
     )
     sequence = models.PositiveSmallIntegerField(help_text='رقم القسط 1..months')
-    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
     collected_at = models.DateTimeField()
     provider_reference = models.CharField(max_length=128, blank=True)
     raw = models.JSONField(null=True, blank=True)
@@ -3310,7 +3309,7 @@ class InstallmentReversal(models.Model):
     plan = models.ForeignKey(
         InstallmentPlan, on_delete=models.CASCADE, related_name='reversals'
     )
-    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
     state = models.CharField(max_length=16, choices=STATE_CHOICES,
                              default=STATE_PENDING, db_index=True)
     reason = models.CharField(max_length=255, blank=True)

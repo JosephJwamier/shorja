@@ -29,3 +29,7 @@ class LiveMediaProvider:
     def play_credentials(self, session, user):
         """What a viewer's app needs to watch."""
         raise NotImplementedError
+
+    def disconnect(self, session, *, user_id=None):
+        """Cut connections already open on this session's stream: one
+        viewer's, or everyone's, the broadcaster included. Best effort."""

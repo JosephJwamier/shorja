@@ -21,6 +21,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.core.validators import MinValueValidator
+from core.uploads import validate_image
 from django.db import models
 from django.db.models import Case, DecimalField, F, Sum, Value, When
 from django.db.models.functions import Coalesce
@@ -143,7 +144,7 @@ class LedgerEntry(models.Model):
     )
     kind = models.CharField('النوع', max_length=15, choices=KIND_CHOICES)
     amount = models.DecimalField(
-        'المبلغ', max_digits=12, decimal_places=2,
+        'المبلغ', max_digits=14, decimal_places=2,
         validators=[MinValueValidator(Decimal('0.01'))],
     )
     # PROTECT: a contact with history is archived, never deleted.
@@ -172,9 +173,9 @@ class LedgerEntry(models.Model):
     # Cost of the goods in this sale, frozen at write time from the
     # variant's cost price so a later cost change doesn't rewrite history.
     cost_amount = models.DecimalField(
-        'الكلفة', max_digits=12, decimal_places=2, null=True, blank=True,
+        'الكلفة', max_digits=14, decimal_places=2, null=True, blank=True,
     )
-    receipt = models.ImageField('صورة الوصل', upload_to='ledger_receipts/', null=True, blank=True)
+    receipt = models.ImageField('صورة الوصل', upload_to='ledger_receipts/', validators=[validate_image], null=True, blank=True)
 
     source = models.CharField('المصدر', max_length=10, choices=SOURCE_CHOICES, default=SOURCE_MANUAL)
     reservation = models.OneToOneField(

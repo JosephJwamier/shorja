@@ -226,9 +226,16 @@ class UserViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'], url_path='update-fcm-token')
     def update_fcm_token(self, request):
         """Register or update the Firebase Cloud Messaging (FCM) device token"""
-        fcm_token = request.data.get('fcm_token', '').strip()
+        fcm_token = str(request.data.get('fcm_token') or '').strip()
         if not fcm_token:
             return Response({'success': False, 'message': 'رمز الإشعارات مطلوب'}, status=status.HTTP_400_BAD_REQUEST)
+        # A token is a device, and a device has one person signed in: whoever
+        # used it before (and left without a clean sign-out) stops receiving
+        # their private notifications on someone else's screen.
+        for previous in User.objects.filter(fcm_token=fcm_token).exclude(pk=request.user.pk):
+            previous.fcm_token = None
+            previous.save(update_fields=['fcm_token'])
+            sync_user_fcm_token(previous)
         request.user.fcm_token = fcm_token
         request.user.save(update_fields=['fcm_token'])
         sync_user_fcm_token(request.user)
@@ -370,6 +377,7 @@ class ItemViewSet(viewsets.ModelViewSet):
         queryset = super().get_queryset()
         if self.action not in ('list', 'retrieve'):
             return queryset
+        queryset = item_related(queryset)
         user = self.request.user
         if user.is_authenticated and user.is_staff:
             return queryset
@@ -468,14 +476,21 @@ class ItemViewSet(viewsets.ModelViewSet):
         created_images = []
         errors = []
 
+        if len(images) > MAX_IMAGES_PER_REQUEST:
+            errors.append('%d صورة كحد أقصى' % MAX_IMAGES_PER_REQUEST)
+            images = images[:MAX_IMAGES_PER_REQUEST]
+
         for idx, image in enumerate(images):
             try:
+                validate_image(image)
                 item_image = ItemImage.objects.create(
                     item=item,
                     image=image,
                     order=idx
                 )
                 created_images.append(item_image)
+            except DjangoValidationError as exc:
+                errors.append(exc.messages[0])
             except Exception:
                 # The storage error's text (bucket, endpoint) is for the log.
                 logger.exception('Image %s of item %s failed to upload', idx + 1, item.id)
@@ -710,6 +725,13 @@ class ItemViewSet(viewsets.ModelViewSet):
             with transaction.atomic():
                 created_images, errors = self.handle_image_uploads(item, request)
 
+            if not created_images:
+                return Response({
+                    'success': False,
+                    'message': errors[0] if errors else 'تعذّر رفع الصور',
+                    'image_errors': errors,
+                }, status=status.HTTP_400_BAD_REQUEST)
+
             return Response({
                 'success': True,
                 'message': f'رُفعت {len(created_images)} صورة',
@@ -933,7 +955,7 @@ class ItemViewSet(viewsets.ModelViewSet):
             # walking the ids over one's own item read out where every other
             # user lives, buyers' delivery addresses included.
             location = Location.objects.get(id=current_location_id, user=request.user)
-        except Location.DoesNotExist:
+        except (Location.DoesNotExist, TypeError, ValueError):
             return Response({
                 'success': False,
                 'message': 'الموقع غير موجود',
@@ -1023,6 +1045,12 @@ class FixedPriceListingViewSet(SafeRankingCacheMixin, viewsets.ReadOnlyModelView
     search_fields = ['item__title', 'item__name_ar', 'item__description']
     ordering_fields = ['price', 'created_at', 'item__sold_count', 'item__rating']
     pagination_class = ItemStandardPagination
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if self.action in ('list', 'retrieve'):
+            queryset = item_related(queryset, 'item')
+        return queryset
 
     SIMILAR_DEFAULT_LIMIT = 10
     SIMILAR_MAX_LIMIT = 50
@@ -1262,6 +1290,9 @@ from .notifications import (
 )
 from .models import DeliveryOrder
 from .serializers import DeliveryOrderSerializer
+from django.core.exceptions import ValidationError as DjangoValidationError
+from .uploads import MAX_IMAGES_PER_REQUEST, validate_image
+from .querysets import item_related, reservation_related, user_related, with_store_numbers
 from .delivery_utils import hand_over_batch_fee, record_receipt
 from .delivery_utils import (
     create_outbound_delivery_order,
@@ -1299,6 +1330,9 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset()
+        if self.action in ('list', 'retrieve'):
+            queryset = user_related(item_related(queryset, 'item'), 'winner').prefetch_related(
+                'bids__bidder__store__badges')
         if self.request.query_params.get('active_only') == 'true':
             now = timezone.now()
             queryset = queryset.filter(
@@ -2891,6 +2925,9 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
         if created:
             broadcast_live_event(session.id, 'viewer_banned', {'user_id': target_user_id})
+            # The picture they are already watching, not only the way back in.
+            from .services.live_media import disconnect
+            disconnect(session, user_id=target_user_id)
 
         return Response({
             'success': True,
@@ -3074,7 +3111,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 'message': 'رصيدك لا يكفي للعربون',
                 'errors': str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
-        except Location.DoesNotExist:
+        except (Location.DoesNotExist, TypeError, ValueError):
             return Response({
                 'success': False,
                 'message': 'عنوان التوصيل غير موجود'
@@ -3899,6 +3936,8 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
         # serializer — without it the list grows one query per row, and the
         # orders screen is the most-opened screen in the app.
         base = Reservation.objects.prefetch_related('installment_plans__collections')
+        if self.action == 'list':
+            base = reservation_related(base)
 
         if self.request.user.is_staff or self.request.user.is_superuser:
             return base.all().order_by('-reserved_at')
@@ -4167,7 +4206,7 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
                             id=delivery_location_id,
                             user=request.user, is_active=True
                         )
-                    except Location.DoesNotExist:
+                    except (Location.DoesNotExist, TypeError, ValueError):
                         pass
 
                 # Create reservation — this only holds a spot and records the
@@ -4284,7 +4323,7 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
                 reservation.delivery_location = Location.objects.get(
                     id=delivery_location_id, user=request.user, is_active=True
                 )
-            except Location.DoesNotExist:
+            except (Location.DoesNotExist, TypeError, ValueError):
                 return Response({
                     'success': False,
                     'message': 'عنوان التوصيل غير موجود'
@@ -4391,7 +4430,7 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
 
         try:
             location = Location.objects.get(id=delivery_location_id, user=request.user, is_active=True)
-        except Location.DoesNotExist:
+        except (Location.DoesNotExist, TypeError, ValueError):
             return Response({
                 'success': False,
                 'message': 'عنوان التوصيل غير موجود'
@@ -4531,6 +4570,16 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
 
         try:
             with transaction.atomic():
+                # Under the lock: four taps at once each saw no order yet and
+                # sent four couriers, each to collect the cash.
+                reservation = Reservation.objects.select_for_update().select_related(
+                    'item', 'buyer', 'delivery_location').get(pk=reservation.pk)
+                if (reservation.status != 'completed'
+                        or reservation.delivery_orders.filter(direction='outbound').exists()):
+                    return Response({
+                        'success': False,
+                        'message': 'أُرسل الطلب للتوصيل مسبقاً'
+                    }, status=status.HTTP_400_BAD_REQUEST)
                 delivery_order = create_outbound_delivery_order(reservation)
 
             return Response({
@@ -4557,6 +4606,11 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
                 'success': False,
                 'message': 'يجب اختيار حجزين على الأقل للدمج'
             }, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            reservation_ids = [int(x) for x in reservation_ids]
+        except (TypeError, ValueError):
+            return Response({'success': False, 'message': 'طلب غير صالح'},
+                            status=status.HTTP_400_BAD_REQUEST)
 
         reservations = list(
             Reservation.objects.filter(id__in=reservation_ids)
@@ -4610,6 +4664,15 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
 
         try:
             with transaction.atomic():
+                # Same order everywhere, so two batches cannot deadlock.
+                locked = list(Reservation.objects.select_for_update().filter(
+                    id__in=[r.pk for r in reservations]).order_by('pk'))
+                if any(r.status != 'completed' for r in locked) or DeliveryOrder.objects.filter(
+                        reservation__in=locked, direction='outbound').exists():
+                    return Response({
+                        'success': False,
+                        'message': 'تغيّرت حالة بعض الطلبات — حدّث الصفحة'
+                    }, status=status.HTTP_400_BAD_REQUEST)
                 results = [combine_deliveries(group, company) for group in groups]
         except Exception:
             return server_error('فشل دمج التوصيل')
@@ -5248,11 +5311,16 @@ class DisputeViewSet(viewsets.ModelViewSet):
         if getattr(self, 'swagger_fake_view', False):
             return Dispute.objects.none()
 
+        disputes = Dispute.objects.all()
+        if self.action == 'list':
+            disputes = user_related(reservation_related(item_related(disputes, 'item'), 'reservation'),
+                                    'complainant', 'defendant')
+
         # Users see disputes they're involved in
         if self.request.user.is_staff:
-            return Dispute.objects.all()
+            return disputes
 
-        return Dispute.objects.filter(
+        return disputes.filter(
             Q(complainant=self.request.user) |
             Q(defendant=self.request.user)
         )
@@ -5361,20 +5429,26 @@ class DisputeViewSet(viewsets.ModelViewSet):
                         'message': 'انتهت مدة الضمان، ولا يمكن فتح نزاع على هذا الطلب'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
-            dispute = Dispute.objects.create(
-                item=item,
-                reservation=reservation,
-                complainant=request.user,
-                defendant=defendant,
-                title=title,
-                description=description,
-                reason=reason
-            )
-
-            # Update reservation status if dispute is on a reservation
-            if reservation:
-                reservation.status = 'disputed'
-                reservation.save(update_fields=['status'])
+            with transaction.atomic():
+                if reservation:
+                    reservation = Reservation.objects.select_for_update().get(pk=reservation.pk)
+                    if reservation.status not in ('completed', 'confirmed'):
+                        return Response({
+                            'success': False,
+                            'message': 'يوجد نزاع على هذا الطلب مسبقاً'
+                        }, status=status.HTTP_400_BAD_REQUEST)
+                dispute = Dispute.objects.create(
+                    item=item,
+                    reservation=reservation,
+                    complainant=request.user,
+                    defendant=defendant,
+                    title=title,
+                    description=description,
+                    reason=reason
+                )
+                if reservation:
+                    reservation.status = 'disputed'
+                    reservation.save(update_fields=['status'])
 
             return Response({
                 'success': True,
@@ -5616,9 +5690,12 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
             ).select_related('item', 'owner', 'representative')
 
         # For other actions, show requests where user is owner OR representative
-        return Representative.objects.filter(
+        requests = Representative.objects.filter(
             Q(owner=user) | Q(representative=user)
         ).select_related('item', 'owner', 'representative')
+        if self.action in ('list', 'received_requests', 'sent_requests', 'active'):
+            requests = user_related(item_related(requests, 'item'), 'owner', 'representative')
+        return requests
 
     def get_serializer_class(self):
         if self.action == 'create_request':
@@ -6282,8 +6359,12 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
         return (
             ItemTransfer.objects
             .filter(Q(from_user=user) | Q(to_user=user))
-            .select_related('item', 'from_user', 'to_user', 'resulting_item')
-            .prefetch_related('storage_fee_payments', 'item__images')
+            .select_related('item', 'from_user', 'to_user', 'resulting_item',
+                            'item__fixed_listing', 'resulting_item__fixed_listing',
+                            'item__auction_listing', 'resulting_item__auction_listing',
+                            'from_user__store', 'to_user__store')
+            .prefetch_related('storage_fee_payments', 'item__images', 'resulting_item__images',
+                              'from_user__store__badges', 'to_user__store__badges')
         )
 
     def get_serializer_class(self):
@@ -6422,6 +6503,9 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
         serializer = ResaleRejectSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         with transaction.atomic():
+            transfer = ItemTransfer.objects.select_for_update().get(pk=transfer.pk)
+            if transfer.status != 'pending':
+                return Response({'success': False, 'message': 'لا يمكن رفض هذه الاتفاقية'}, status=status.HTTP_400_BAD_REQUEST)
             transfer.status = 'rejected'
             transfer.rejected_at = timezone.now()
             transfer.rejection_reason = serializer.validated_data.get('rejection_reason', '')
@@ -6448,6 +6532,12 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
                 'message': f'لا تنتهي الاتفاقية قبل {transfer.agreement_end_date:%Y-%m-%d}',
             }, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
+            # What was cancellable a moment ago may have been approved and
+            # paid for since: the decision is made on the locked row.
+            seen = transfer.status
+            transfer = ItemTransfer.objects.select_for_update().get(pk=transfer.pk)
+            if transfer.status != seen:
+                return Response({'success': False, 'message': 'تغيّرت حالة الاتفاقية — حدّث الصفحة'}, status=status.HTTP_400_BAD_REQUEST)
             transfer.status = 'cancelled'
             transfer.cancelled_at = timezone.now()
             transfer.save(update_fields=['status', 'cancelled_at'])
@@ -6479,6 +6569,9 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
                 'message': f'لا تنتهي الاتفاقية قبل {transfer.agreement_end_date:%Y-%m-%d}',
             }, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
+            transfer = ItemTransfer.objects.select_for_update().get(pk=transfer.pk)
+            if transfer.status != 'active':
+                return Response({'success': False, 'message': 'لا يمكن إغلاق هذه الاتفاقية'}, status=status.HTTP_400_BAD_REQUEST)
             transfer.status = 'completed'
             transfer.completed_at = timezone.now()
             transfer.save(update_fields=['status', 'completed_at'])
@@ -6531,7 +6624,9 @@ class ChatViewSet(viewsets.ModelViewSet):
         user = self.request.user
         queryset = Chat.objects.filter(
             Q(buyer=user) | Q(seller=user)
-        ).select_related('item', 'buyer', 'seller')
+        ).select_related('item', 'buyer', 'seller', 'store')
+        if self.action == 'list':
+            queryset = user_related(item_related(queryset, 'item'), 'buyer', 'seller')
 
         # Only `list` splits by archived/non-archived (the inbox vs. "الأرشيف"
         # screens). Every detail action — retrieve, send_message, messages,
@@ -7380,7 +7475,11 @@ class UserStoreViewSet(viewsets.ModelViewSet):
 
         # Public views - only show active stores
         if self.action in ['list', 'retrieve', 'public_store']:
-            return UserStore.objects.filter(is_active=True).select_related('user', 'default_location')
+            stores = UserStore.objects.filter(is_active=True).select_related('user', 'default_location')
+            if self.action == 'list':
+                stores = with_store_numbers(
+                    stores.select_related('default_location__user__store'), self.request.user)
+            return stores
 
         # User's own stores
         if self.request.user.is_authenticated:
@@ -7457,7 +7556,7 @@ class UserStoreViewSet(viewsets.ModelViewSet):
                             id=location_id,
                             user=request.user, is_active=True
                         )
-                    except Location.DoesNotExist:
+                    except (Location.DoesNotExist, TypeError, ValueError):
                         return Response({
                             'success': False,
                             'message': 'العنوان غير موجود'
@@ -8030,6 +8129,12 @@ class UserStoreViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
+            validate_image(logo)
+        except DjangoValidationError as exc:
+            return Response({'success': False, 'message': exc.messages[0]},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        try:
             # Delete old logo if exists
             if store.logo:
                 store.logo.delete(save=False)
@@ -8095,7 +8200,7 @@ class UserStoreViewSet(viewsets.ModelViewSet):
                 'data': UserStoreSerializer(store).data
             }, status=status.HTTP_200_OK)
 
-        except Location.DoesNotExist:
+        except (Location.DoesNotExist, TypeError, ValueError):
             return Response({
                 'success': False,
                 'message': 'العنوان غير موجود'
@@ -8526,7 +8631,7 @@ class ProductReviewViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         if getattr(self, 'swagger_fake_view', False):
             return ProductReview.objects.none()
-        return ProductReview.objects.select_related('reviewer', 'item').all()
+        return user_related(ProductReview.objects.select_related('item'), 'reviewer')
 
     def update(self, request, *args, **kwargs):
         instance = self.get_object()
@@ -8543,7 +8648,8 @@ class ProductReviewViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], url_path='my-review/(?P<item_id>[^/.]+)')
     def my_review(self, request, item_id=None):
         """جلب تقييمي الخاص لمنتج معين"""
-        review = ProductReview.objects.filter(reviewer=request.user, item_id=item_id).first()
+        review = (ProductReview.objects.filter(reviewer=request.user, item_id=item_id).first()
+                  if str(item_id).isdigit() else None)
         if not review:
             return Response({'detail': 'لم تقيّم هذا المنتج بعد'}, status=status.HTTP_404_NOT_FOUND)
         return Response(ProductReviewSerializer(review, context={'request': request}).data)
@@ -8588,7 +8694,7 @@ class StoreReviewViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], url_path='my-review/(?P<store_id>[^/.]+)')
     def my_review(self, request, store_id=None):
         """جلب تقييمي الخاص لمتجر معين"""
-        review = StoreReview.objects.filter(reviewer=request.user, store_id=store_id).first()
+        review = (StoreReview.objects.filter(reviewer=request.user, store_id=store_id).first() if str(store_id).isdigit() else None)
         if not review:
             return Response({'detail': 'لم تقيّم هذا المتجر بعد'}, status=status.HTTP_404_NOT_FOUND)
         return Response(StoreReviewSerializer(review, context={'request': request}).data)
@@ -8607,7 +8713,8 @@ class TransactionViewSet(viewsets.ReadOnlyModelViewSet):
         # Fix: Handle swagger schema generation
         if getattr(self, 'swagger_fake_view', False):
             return Transaction.objects.none()
-        return Transaction.objects.filter(user=self.request.user)
+        return user_related(item_related(Transaction.objects.all(), 'item'), 'user').filter(
+            user=self.request.user)
 
 
 class CategoryViewSet(viewsets.ModelViewSet):  # Changed from ReadOnlyModelViewSet
@@ -8634,7 +8741,7 @@ class CategoryViewSet(viewsets.ModelViewSet):  # Changed from ReadOnlyModelViewS
             if parent_param.lower() == 'null':
                 qs = qs.filter(parent__isnull=True)
             else:
-                qs = qs.filter(parent_id=parent_param)
+                qs = qs.filter(parent_id=parent_param) if parent_param.isdigit() else qs.none()
         return qs
 
     def get_serializer_context(self):

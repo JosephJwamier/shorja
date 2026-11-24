@@ -46,7 +46,7 @@ class PaymentIntentSerializer(serializers.ModelSerializer):
 
 class CreatePaymentSerializer(serializers.Serializer):
     provider = serializers.CharField()
-    amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    amount = serializers.DecimalField(max_digits=14, decimal_places=2)
 
     def validate_amount(self, value):
         if value < MIN_AMOUNT or value > MAX_AMOUNT:

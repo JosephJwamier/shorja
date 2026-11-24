@@ -163,3 +163,45 @@ class SrsProvider(LiveMediaProvider):
             "ice_servers": self._ice_servers(user),
             "expires_in": self.ttl,
         }
+
+    # -- cutting open connections ----------------------------------------
+    #
+    # The hooks decide who may *start* watching or publishing; a connection
+    # already open is not asked again. SRS lists its clients and drops one on
+    # DELETE /api/v1/clients/<id>. Which user a client is comes from the play
+    # hook, which saw both (see remember_client).
+
+    def disconnect(self, session, *, user_id=None):
+        import requests
+        from django.core.cache import cache
+
+        origin = (_setting("SRS_API_ORIGIN") or "").rstrip("/")
+        if not origin:
+            return
+        stream = stream_name_of(session)
+        listed = requests.get(origin + "/api/v1/clients/", params={"count": 5000}, timeout=3)
+        listed.raise_for_status()
+        for client in listed.json().get("clients") or []:
+            # `name` is the stream; `url` ("/live/<stream>") covers builds
+            # that leave it out.
+            on_stream = (client.get("name") == stream
+                         or str(client.get("url") or "").rsplit("/", 1)[-1] == stream)
+            if not on_stream:
+                continue
+            if user_id is not None and cache.get(client_key(client.get("id"))) != user_id:
+                continue
+            requests.delete("%s/api/v1/clients/%s" % (origin, client["id"]), timeout=3)
+
+
+CLIENT_TTL_SECONDS = 12 * 3600
+
+
+def client_key(client_id):
+    return "live:srs:client:%s" % client_id
+
+
+def remember_client(client_id, user_id):
+    """Called by the play hook: this connection is this user's."""
+    from django.core.cache import cache
+    if client_id:
+        cache.set(client_key(client_id), user_id, CLIENT_TTL_SECONDS)

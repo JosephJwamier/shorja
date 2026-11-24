@@ -17,6 +17,11 @@ def end_live_session(session, reason='manual'):
 
     session.items.filter(status__in=['queued', 'now_showing']).update(status='skipped')
 
+    # The stream itself, broadcaster included: the hooks refuse whoever comes
+    # next but do not touch a connection already open.
+    from .services.live_media import disconnect
+    disconnect(session)
+
     # Products first shown on air have nothing selling them from here on.
     from .models import Item
     from .wallet_utils import park_if_unlisted

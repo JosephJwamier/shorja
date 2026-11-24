@@ -40,6 +40,15 @@ api.shorjeh.com {
 			roll_size 50mb
 			roll_keep 5
 		}
+		# رموز الدخول والبثّ تسافر في الرابط، والسجلّ يعيش أطول منها.
+		format filter {
+			wrap json
+			fields {
+				request>uri query {
+					replace token REDACTED
+				}
+			}
+		}
 	}
 }
 
@@ -144,6 +153,15 @@ live.shorjeh.com {
 		output file /data/live-access.log {
 			roll_size 50mb
 			roll_keep 5
+		}
+		# رموز الدخول والبثّ تسافر في الرابط، والسجلّ يعيش أطول منها.
+		format filter {
+			wrap json
+			fields {
+				request>uri query {
+					replace token REDACTED
+				}
+			}
 		}
 	}
 }

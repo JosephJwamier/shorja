@@ -37,7 +37,7 @@ from rest_framework.views import APIView
 from .models import LiveSession
 from .services.live_media.base import MediaProviderError
 from .services.live_media.srs import (
-    ROLE_PUBLISHER, ROLE_SUBSCRIBER, make_stream_token, verify_stream_token,
+    ROLE_PUBLISHER, ROLE_SUBSCRIBER, make_stream_token, remember_client, verify_stream_token,
 )
 
 logger = logging.getLogger(__name__)
@@ -148,7 +148,10 @@ class SrsHookView(APIView):
                                       role=ROLE_SUBSCRIBER)
         if user_id is None:
             return Response(DENY)
-        return Response(OK if _may_play(session, user_id) else DENY)
+        if not _may_play(session, user_id):
+            return Response(DENY)
+        remember_client(str(body.get("client_id") or ""), user_id)
+        return Response(OK)
 
     def handle_on_stop(self, session, token, body):
         return Response(OK)

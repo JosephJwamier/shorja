@@ -154,7 +154,8 @@ def recompute_level(store, *, now=None):
 
 def badges_for_store(store):
     """Ordered badge kinds: granted ones (display order) then the level."""
-    kinds = set(active_badges(store).values_list('kind', flat=True))
+    # Off the prefetched rows on a list; one query otherwise.
+    kinds = {b.kind for b in store.badges.all() if b.revoked_at is None}
     out = [k for k in DISPLAY_ORDER if k in kinds]
     if store.level:
         out.append(store.level)

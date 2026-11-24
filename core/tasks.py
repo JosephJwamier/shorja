@@ -567,6 +567,37 @@ def finalize_live_auction(auction_id):
 
 
 @shared_task
+def sync_pending_payments(days=7, limit=60):
+    """Asks the gateway about wallet top-ups it never called back about.
+
+    The webhook and the app's own polling both stop: a lost callback and a
+    customer who closed the app left paid money 'pending' for good (the manual
+    refresh looks back 48 hours). Oldest checks first, a bounded number per
+    run; an unpaid one is simply asked about until it is a week old."""
+    from .models import PaymentIntent
+    from .services.payments.base import ProviderError
+    from .services.payments.service import sync_intent
+
+    now = timezone.now()
+    settled = 0
+    stuck = PaymentIntent.objects.filter(
+        applied_at__isnull=True,
+        created_at__gte=now - timedelta(days=days),
+        created_at__lte=now - timedelta(minutes=10),
+    ).exclude(state__in=(PaymentIntent.STATE_FAILED, PaymentIntent.STATE_CANCELLED,
+                         PaymentIntent.STATE_SUCCEEDED)
+    ).exclude(provider_payment_id='').order_by('updated_at')[:limit]
+    for intent in stuck:
+        try:
+            settled += sync_intent(intent).applied_at is not None
+        except ProviderError as e:
+            logger.warning(f"pending payment {intent.reference} not synced: {e}")
+        except Exception as e:
+            logger.error(f"pending payment {intent.reference} failed to sync: {e}")
+    return f"Settled {settled} pending payment(s)"
+
+
+@shared_task
 def collect_storage_fees():
     """Charges the storage fees due on active wholesale agreements."""
     from .models import ItemTransfer

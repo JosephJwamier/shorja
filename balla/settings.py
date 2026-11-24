@@ -306,6 +306,12 @@ CELERY_BEAT_SCHEDULE = {
         'schedule': crontab(hour='10,17', minute=0),
     },
 
+    # شحنات المحفظة التي لم يصل خبرها من البوّابة
+    'sync-pending-payments': {
+        'task': 'core.tasks.sync_pending_payments',
+        'schedule': crontab(minute='*/20'),
+    },
+
     # رسوم التخزين في اتفاقيات الجملة
     'collect-storage-fees': {
         'task': 'core.tasks.collect_storage_fees',
@@ -716,6 +722,8 @@ SRS_HOOK_SECRET = os.environ.get('SRS_HOOK_SECRET', '')              # same valu
 # network while Django is in a compose container, hence host.docker.internal
 # there — the same way Caddy reaches it.
 SRS_HLS_ORIGIN = os.environ.get('SRS_HLS_ORIGIN', 'http://127.0.0.1:8080')
+# SRS's own HTTP API, on the same box: used to drop open connections.
+SRS_API_ORIGIN = os.environ.get('SRS_API_ORIGIN', SRS_HLS_ORIGIN.replace(':8080', ':1985'))
 LIVE_TOKEN_SECRET = os.environ.get('LIVE_TOKEN_SECRET', '')          # signs publish/play tokens
 LIVE_TOKEN_TTL_SECONDS = int(os.environ.get('LIVE_TOKEN_TTL_SECONDS', '3600'))
 TURN_HOST = os.environ.get('TURN_HOST', '')                          # live.example.com

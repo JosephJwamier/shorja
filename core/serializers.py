@@ -11,6 +11,7 @@ import uuid
 
 from .phone_utils import to_e164
 from django.db.models import Q
+from .uploads import validate_image
 from .models import (
     Item, ItemImage, ItemVariant, FixedPriceListing, AuctionListing,
     Bid, Reservation, Representative, ItemTransfer, Category,
@@ -85,6 +86,22 @@ class UserSerializer(serializers.ModelSerializer):
         read_only_fields = ['trust_score', 'total_sales', 'total_purchases',
                             'email_verified', 'phone_verified', 'identity_verified',
                             'store_badges', 'date_joined']
+
+    def validate_phone(self, value):
+        # As at sign-up: canonical, and a taken number is a field error, not
+        # the database's.
+        if not value:
+            return None
+        canonical = to_e164(value)
+        if not canonical:
+            raise serializers.ValidationError(
+                'رقم هاتف عراقي غير صالح — يجب أن يبدأ بـ 075 أو 077 أو 078 أو 079')
+        taken = User.objects.filter(phone=canonical)
+        if self.instance is not None:
+            taken = taken.exclude(pk=self.instance.pk)
+        if taken.exists():
+            raise serializers.ValidationError('هذا الرقم مسجّل في حساب آخر')
+        return canonical
 
     def validate_username(self, value):
         # Someone already holding the name may still save the rest of a form.
@@ -467,7 +484,7 @@ class ItemListSerializer(serializers.ModelSerializer):
         return bool(obj.options)
 
     def get_image(self, obj):
-        first_image = obj.images.order_by('order').first()
+        first_image = min(obj.images.all(), key=lambda i: i.order, default=None)
         if not first_image:
             return None
         request = self.context.get('request')
@@ -616,7 +633,11 @@ class ItemSerializer(serializers.ModelSerializer):
         return fixed_listing.discount_percentage if fixed_listing else 0
 
     def get_total_reviews(self, obj):
-        return obj.product_reviews.count()
+        # One item can appear many times on a page (an order, its dispute...).
+        counts = self.context.setdefault('_item_reviews', {})
+        if obj.pk not in counts:
+            counts[obj.pk] = obj.product_reviews.count()
+        return counts[obj.pk]
 
     def get_distance_km(self, obj):
         return getattr(obj, 'distance_km', None)
@@ -625,7 +646,11 @@ class ItemSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         if not request or not request.user.is_authenticated:
             return False
-        return obj.favorited_by.filter(user=request.user).exists()
+        favorites = self.context.get('_favorite_item_ids')
+        if favorites is None:
+            favorites = set(request.user.favorites.values_list('item_id', flat=True))
+            self.context['_favorite_item_ids'] = favorites
+        return obj.pk in favorites
 
 
 class ItemCreateSerializer(serializers.ModelSerializer):
@@ -886,7 +911,7 @@ class BidSerializer(serializers.ModelSerializer):
 
 class CreateBidSerializer(serializers.Serializer):
     """Serializer for creating a bid"""
-    amount = serializers.DecimalField(max_digits=10, decimal_places=2)
+    amount = serializers.DecimalField(max_digits=14, decimal_places=2)
 
     def validate_amount(self, value):
         if value <= 0:
@@ -910,7 +935,7 @@ class AuctionListingSerializer(serializers.ModelSerializer):
                   'time_remaining', 'created_at']
 
     def get_bid_count(self, obj):
-        return obj.bids.count()
+        return len(obj.bids.all())
 
     def get_time_remaining(self, obj):
         if obj.status == 'active':
@@ -1022,6 +1047,21 @@ class StorageFeePaymentSerializer(serializers.ModelSerializer):
         return delta.days if delta.days > 0 else 0
 
 
+def _latest_leg(reservation, direction=None):
+    """The newest delivery leg, off the prefetched list when there is one."""
+    return max((o for o in reservation.delivery_orders.all()
+                if direction is None or o.direction == direction),
+               key=lambda o: (o.assigned_at, o.pk), default=None)
+
+
+def _active_company(context):
+    """One answer for the whole response, not one query per row."""
+    if '_active_company' not in context:
+        from .delivery_utils import get_active_delivery_company
+        context['_active_company'] = get_active_delivery_company()
+    return context['_active_company']
+
+
 class ReservationSerializer(serializers.ModelSerializer):
     """Reservation serializer - ENHANCED with transfer support"""
     item = ItemSerializer(read_only=True)
@@ -1123,10 +1163,10 @@ class ReservationSerializer(serializers.ModelSerializer):
         return 0
 
     def get_has_dispute(self, obj):
-        return obj.disputes.exists()
+        return bool(obj.disputes.all())
 
     def get_dispute_status(self, obj):
-        dispute = obj.disputes.order_by('-created_at').first()
+        dispute = max(obj.disputes.all(), key=lambda d: d.created_at, default=None)
         if dispute:
             return {
                 'id': dispute.id,
@@ -1153,7 +1193,7 @@ class ReservationSerializer(serializers.ModelSerializer):
         if obj.item.owner_id == user.id or obj.item.current_holder_id == user.id:
             # Not once the delivery company has already picked the item up
             # from the seller — matches ReservationViewSet.cancel.
-            outbound = obj.delivery_orders.filter(direction='outbound').order_by('-assigned_at').first()
+            outbound = _latest_leg(obj, 'outbound')
             if outbound and outbound.status != 'assigned':
                 return False
             return True
@@ -1174,13 +1214,11 @@ class ReservationSerializer(serializers.ModelSerializer):
         approval the moment payment clears, before the buyer has anything
         in hand.
         """
-        from .delivery_utils import get_active_delivery_company
-
         request = self.context.get('request')
         user = getattr(request, 'user', None) if request else None
         if user is None or obj.buyer_id != user.id:
             return False
-        outbound = obj.delivery_orders.filter(direction='outbound').order_by('-assigned_at').first()
+        outbound = _latest_leg(obj, 'outbound')
         if outbound:
             if outbound.status != 'confirmed':
                 # Once a delivery company is handling this sale, the buyer must
@@ -1189,7 +1227,7 @@ class ReservationSerializer(serializers.ModelSerializer):
                 # becomes an available choice — releasing money before the buyer
                 # has even confirmed they hold the item defeats the escrow.
                 return False
-        elif get_active_delivery_company() is not None:
+        elif _active_company(self.context) is not None:
             # A delivery company is available and will eventually carry this
             # sale — the seller just hasn't sent it off yet (send_to_delivery
             # not called), so the buyer has nothing in hand to confirm.
@@ -1203,7 +1241,7 @@ class ReservationSerializer(serializers.ModelSerializer):
     def get_delivery_order(self, obj):
         """The most recent delivery leg (outbound or a return) for this
         reservation, if the seller ever sent it to the delivery company."""
-        delivery_order = obj.delivery_orders.order_by('-assigned_at').first()
+        delivery_order = _latest_leg(obj)
         if not delivery_order:
             return None
         return DeliveryOrderSerializer(delivery_order).data
@@ -1212,8 +1250,6 @@ class ReservationSerializer(serializers.ModelSerializer):
         """Mirrors ReservationViewSet.send_to_delivery's eligibility rules —
         seller-only, while paid and not already handed off, and only if
         there's actually an active delivery company to hand it to."""
-        from .delivery_utils import get_active_delivery_company
-
         request = self.context.get('request')
         user = getattr(request, 'user', None) if request else None
         if user is None:
@@ -1221,9 +1257,9 @@ class ReservationSerializer(serializers.ModelSerializer):
         is_seller = obj.item.owner_id == user.id or obj.item.current_holder_id == user.id
         if not is_seller or obj.status != 'completed' or not obj.delivery_location_id:
             return False
-        if not get_active_delivery_company():
+        if not _active_company(self.context):
             return False
-        return not obj.delivery_orders.filter(direction='outbound').exists()
+        return _latest_leg(obj, 'outbound') is None
 
     def get_can_request_payment_release(self, obj):
         """
@@ -1241,8 +1277,6 @@ class ReservationSerializer(serializers.ModelSerializer):
         no active delivery company to send it to in the first place (the
         old direct hand-off flow, where paying is the only fulfilment step).
         """
-        from .delivery_utils import get_active_delivery_company
-
         request = self.context.get('request')
         user = getattr(request, 'user', None) if request else None
         if user is None:
@@ -1252,9 +1286,9 @@ class ReservationSerializer(serializers.ModelSerializer):
         )
         if not is_seller or obj.status != 'completed' or obj.payment_released_to_seller:
             return False
-        if obj.delivery_orders.filter(direction='outbound').exists():
+        if _latest_leg(obj, 'outbound') is not None:
             return True
-        return get_active_delivery_company() is None
+        return _active_company(self.context) is None
 
     def get_payment_status(self, obj):
         if obj.payment_released_to_seller:
@@ -1476,7 +1510,7 @@ class ResolveDisputeSerializer(serializers.Serializer):
     )
     admin_notes = serializers.CharField(required=False, allow_blank=True)
     partial_refund_amount = serializers.DecimalField(
-        max_digits=10,
+        max_digits=14,
         decimal_places=2,
         required=False,
         allow_null=True
@@ -1768,7 +1802,7 @@ class ResaleAgreementCreateSerializer(serializers.Serializer):
         choices=ItemTransfer.STORAGE_FEE_TYPE_CHOICES, default='none'
     )
     storage_fee_amount = serializers.DecimalField(
-        max_digits=10, decimal_places=2, required=False, allow_null=True, min_value=0
+        max_digits=14, decimal_places=2, required=False, allow_null=True, min_value=0
     )
     storage_fee_period_days = serializers.IntegerField(default=30, min_value=1, max_value=365)
     duration_days = serializers.IntegerField(required=False, allow_null=True, min_value=1, max_value=730)
@@ -1908,7 +1942,7 @@ class MessageCreateSerializer(serializers.Serializer):
 
 class MessageOfferSerializer(serializers.Serializer):
     """Serializer for sending price offers"""
-    offer_amount = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('1'))
+    offer_amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('1'))
     # Required when the item has options — see views._resolve_variant.
     variant_id = serializers.IntegerField(required=False, allow_null=True)
     quantity = serializers.IntegerField(default=1, min_value=1)
@@ -1949,7 +1983,7 @@ class ChatSerializer(serializers.ModelSerializer):
         latest = obj.messages.filter(
             is_deleted_by_sender=False,
             is_deleted_by_receiver=False
-        ).last()
+        ).select_related('sender').last()
         if latest:
             return {
                 'id': latest.id,
@@ -2237,9 +2271,11 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     # يبقى عموداً في قاعدة البيانات: USERNAME_FIELD في جانغو، وتعتمد
     # عليه لوحة الإدارة والبحث فيها في ٢٧٠ موضعاً. يُولَّد صامتاً هنا
     # ولا يظهر في أي شاشة — كـ id تماماً.
-    username = serializers.CharField(required=False, allow_blank=True)
+    username = serializers.CharField(required=False, allow_blank=True, max_length=150)
 
     def validate_username(self, value):
+        if value and User.objects.filter(username=value).exists():
+            raise serializers.ValidationError('اسم المستخدم محجوز لحساب آخر')
         return check_username(value)
 
     class Meta:
@@ -2367,11 +2403,13 @@ class UserStoreCreateSerializer(serializers.Serializer):
         help_text="Brief description of your store"
     )
     logo = serializers.ImageField(
+        validators=[validate_image],
         required=False,
         allow_null=True,
         help_text="Store logo image"
     )
     cover_image = serializers.ImageField(
+        validators=[validate_image],
         required=False,
         allow_null=True,
         help_text="Store cover/banner image"
@@ -2515,10 +2553,14 @@ class UserStoreSerializer(serializers.ModelSerializer):
 
     def get_total_items(self, obj):
         """Count total items owned by this user"""
+        if hasattr(obj, 'n_items'):
+            return obj.n_items
         return Item.objects.filter(owner=obj.user).count()
 
     def get_total_active_items(self, obj):
         """Count active items (including those being resold)"""
+        if hasattr(obj, 'n_owned_active'):
+            return obj.n_owned_active + obj.n_held_active
         from django.db.models import Q
         return Item.objects.filter(
             Q(owner=obj.user) | Q(current_holder=obj.user)
@@ -2534,20 +2576,24 @@ class UserStoreSerializer(serializers.ModelSerializer):
         return None
 
     def get_total_reviews(self, obj):
-        return obj.store_reviews.count()
+        return obj.n_reviews if hasattr(obj, 'n_reviews') else obj.store_reviews.count()
 
     def get_is_following(self, obj):
         """Whether the current user follows this store"""
         request = self.context.get('request')
         if not request or not request.user or not request.user.is_authenticated:
             return False
+        if hasattr(obj, 'n_following'):
+            return obj.n_following
         return obj.followers.filter(follower=request.user).exists()
 
     def get_followers_count(self, obj):
-        return obj.followers.count()
+        return obj.n_followers if hasattr(obj, 'n_followers') else obj.followers.count()
 
     def get_positive_review_percent(self, obj):
         """Percent of store reviews rated 4 stars or higher"""
+        if hasattr(obj, 'n_reviews'):
+            return round(obj.n_positive * 100.0 / obj.n_reviews, 1) if obj.n_reviews else 0.0
         reviews = obj.store_reviews.all()
         total = reviews.count()
         if not total:
@@ -2566,6 +2612,8 @@ class UserStoreSerializer(serializers.ModelSerializer):
     def get_live_session_id(self, obj):
         """ID of this store's currently-live session, if any (drives the
         pulsing "مباشر" indicator on the store's avatar in the app)."""
+        if hasattr(obj, 'n_live_id'):
+            return obj.n_live_id
         live_session = obj.live_sessions.filter(status='live').only('id').first()
         return live_session.id if live_session else None
 
@@ -2915,8 +2963,8 @@ class LiveSessionItemSerializer(serializers.ModelSerializer):
 class LiveSessionItemCreateSerializer(serializers.Serializer):
     """Add a product to a live session's queue with a live-only price/deposit"""
     item_id = serializers.IntegerField()
-    price = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('0.01'))
-    deposit_amount = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('0.00'))
+    price = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('0.01'))
+    deposit_amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('0.00'))
     order = serializers.IntegerField(required=False, default=0)
 
     def validate_item_id(self, value):
@@ -3000,7 +3048,7 @@ class LiveSessionCreateSerializer(serializers.Serializer):
     """Validates input for starting/scheduling a new live session"""
     title = serializers.CharField(max_length=200)
     description = serializers.CharField(required=False, allow_blank=True, default='')
-    thumbnail = serializers.ImageField(required=False, allow_null=True)
+    thumbnail = serializers.ImageField(required=False, allow_null=True, validators=[validate_image])
     scheduled_at = serializers.DateTimeField(required=False, allow_null=True)
     start_immediately = serializers.BooleanField(default=False)
 
@@ -3009,7 +3057,7 @@ class ReserveLiveItemSerializer(serializers.Serializer):
     """Validates input for the one-tap 'reserve' action during a live session"""
     queue_item_id = serializers.IntegerField()
     quantity = serializers.IntegerField(default=1, min_value=1)
-    screenshot = serializers.ImageField()
+    screenshot = serializers.ImageField(validators=[validate_image])
     delivery_location_id = serializers.IntegerField(required=False, allow_null=True)
 
     def validate_delivery_location_id(self, value):
@@ -3107,11 +3155,11 @@ class ShowLiveItemSerializer(serializers.Serializer):
     item that's already listed for sale."""
     item_id = serializers.IntegerField()
     price = serializers.DecimalField(
-        max_digits=10, decimal_places=2, min_value=Decimal('0.01'),
+        max_digits=14, decimal_places=2, min_value=Decimal('0.01'),
         required=False, allow_null=True
     )
     deposit_amount = serializers.DecimalField(
-        max_digits=10, decimal_places=2, min_value=Decimal('0.00'),
+        max_digits=14, decimal_places=2, min_value=Decimal('0.00'),
         required=False, allow_null=True
     )
 
@@ -3122,8 +3170,8 @@ class QuickShowItemSerializer(serializers.Serializer):
     right here; a minimal backing Item is created transparently so the
     seller never has to visit a separate 'add product' screen first."""
     title = serializers.CharField(max_length=200)
-    price = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('0.01'))
-    deposit_amount = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('0.00'))
+    price = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('0.01'))
+    deposit_amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('0.00'))
     quantity = serializers.IntegerField(default=1, min_value=1)
     category_id = serializers.IntegerField(required=False, allow_null=True)
     condition = serializers.ChoiceField(choices=Item.CONDITION_CHOICES, required=False, default='unknown')
@@ -3148,9 +3196,9 @@ class QuickLiveAuctionSerializer(serializers.Serializer):
     QuickShowItemSerializer, but viewers bid instead of instantly reserving.
     A minimal backing Item is created the same way (see _create_quick_live_item)."""
     title = serializers.CharField(max_length=200)
-    starting_price = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('0.01'))
-    minimum_increment = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('0.01'))
-    bid_deposit = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('0.00'))
+    starting_price = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('0.01'))
+    minimum_increment = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('0.01'))
+    bid_deposit = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('0.00'))
     quantity = serializers.IntegerField(default=1, min_value=1)
     category_id = serializers.IntegerField(required=False, allow_null=True)
     condition = serializers.ChoiceField(choices=Item.CONDITION_CHOICES, required=False, default='unknown')
@@ -3231,7 +3279,7 @@ from .models import Wallet, DepositRequest, WithdrawalRequest
 
 
 class WalletSerializer(serializers.ModelSerializer):
-    available_balance = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    available_balance = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
 
     class Meta:
         model = Wallet
@@ -3239,7 +3287,7 @@ class WalletSerializer(serializers.ModelSerializer):
 
 
 class DepositCreateSerializer(serializers.Serializer):
-    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('1.00'))
+    amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('1.00'))
     card_last4 = serializers.CharField(max_length=4, required=False, allow_blank=True)
 
 
@@ -3250,7 +3298,7 @@ class DepositRequestSerializer(serializers.ModelSerializer):
 
 
 class WithdrawalCreateSerializer(serializers.Serializer):
-    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('1.00'))
+    amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('1.00'))
     account_number = serializers.CharField(max_length=40, write_only=True)
     holder_name = serializers.CharField(max_length=120)
 
@@ -3384,7 +3432,7 @@ class InstallmentPlanSerializer(serializers.ModelSerializer):
     state_label = serializers.CharField(source='get_state_display', read_only=True)
     # Everything the buyer pays above the order total: Qi's two fees and the
     # platform's, shown to them as one "رسوم التقسيط" line.
-    fees_amount = serializers.DecimalField(max_digits=12, decimal_places=2,
+    fees_amount = serializers.DecimalField(max_digits=14, decimal_places=2,
                                            read_only=True)
 
     class Meta:
