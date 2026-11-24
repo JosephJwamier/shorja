@@ -43,7 +43,8 @@ def _real_users():
 
 
 def _registration_counts(now):
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    # Baghdad midnight, not UTC midnight — same day boundary TruncDate uses below.
+    today_start = timezone.localtime(now).replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = today_start - timedelta(days=today_start.weekday())
     month_start = today_start.replace(day=1)
     prev_week_start = week_start - timedelta(days=7)
@@ -136,7 +137,7 @@ def _fill_daily_series(start_date, days, values_by_date, default=0.0):
 
 
 def registrations_timeseries(days=30):
-    since_date = (timezone.now() - timedelta(days=days - 1)).date()
+    since_date = timezone.localdate() - timedelta(days=days - 1)
     rows = (
         _real_users().filter(created_at__date__gte=since_date)
         .annotate(day=TruncDate('created_at'))
@@ -148,7 +149,7 @@ def registrations_timeseries(days=30):
 
 
 def sales_timeseries(days=30):
-    since_date = (timezone.now() - timedelta(days=days - 1)).date()
+    since_date = timezone.localdate() - timedelta(days=days - 1)
     rows = (
         Reservation.objects.filter(status__in=SOLD_STATUSES, completed_at__date__gte=since_date)
         .annotate(day=TruncDate('completed_at'))
@@ -160,7 +161,7 @@ def sales_timeseries(days=30):
 
 
 def top_categories(limit=5, days=30):
-    since_date = (timezone.now() - timedelta(days=days)).date()
+    since_date = timezone.localdate() - timedelta(days=days)
     rows = (
         Reservation.objects.filter(status__in=SOLD_STATUSES, completed_at__date__gte=since_date)
         .values('item__category__name_ar', 'item__category__name')
@@ -178,7 +179,7 @@ def top_categories(limit=5, days=30):
 
 
 def top_stores(limit=5, days=30):
-    since_date = (timezone.now() - timedelta(days=days)).date()
+    since_date = timezone.localdate() - timedelta(days=days)
     rows = (
         Reservation.objects.filter(status__in=SOLD_STATUSES, completed_at__date__gte=since_date)
         .values('item__owner__store__name')
@@ -195,7 +196,7 @@ def active_governorates(limit=None, days=30):
     """Every one of Iraq's 18 governorates, ranked by order count in the
     window — governorates with zero orders still appear (at zero), so this
     reads as coverage, not just a top-N leaderboard."""
-    since_date = (timezone.now() - timedelta(days=days)).date()
+    since_date = timezone.localdate() - timedelta(days=days)
     rows = (
         Reservation.objects.filter(
             status__in=SOLD_STATUSES, completed_at__date__gte=since_date,

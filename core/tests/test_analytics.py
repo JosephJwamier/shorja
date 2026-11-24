@@ -5,7 +5,7 @@ Aggregation bugs are invisible until someone eyeballs a number that looks
 wrong on the dashboard, so every figure here gets a test that builds a
 known scenario and checks the exact number, not just "it returns something".
 """
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 
 import pytest
@@ -60,32 +60,24 @@ def clear_cache():
 # ---------------------------------------------------------------------------
 
 def test_registration_counts_bucket_by_today_week_month():
-    now = timezone.now()
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start = today_start - timedelta(days=today_start.weekday())
+    # Fixed mid-month Wednesday: near a month start the week can reach into
+    # the previous month, so "this week" may legitimately exceed "this month".
+    now = datetime(2026, 11, 25, 12, 0, tzinfo=dt_timezone.utc)
 
-    u_today = make_user('reg_today')
-    backdate_user(u_today, today_start + timedelta(hours=1))
-
-    u_this_week_not_today = make_user('reg_week')
-    if week_start < today_start:
-        backdate_user(u_this_week_not_today, week_start)
-    else:
-        # Monday — "this week, not today" is impossible; fold into today instead.
-        backdate_user(u_this_week_not_today, today_start + timedelta(hours=2))
-
-    u_last_month = make_user('reg_old')
-    backdate_user(u_last_month, today_start - timedelta(days=40))
+    backdate_user(make_user('reg_today'), now - timedelta(hours=1))
+    backdate_user(make_user('reg_week'), now - timedelta(days=1))
+    backdate_user(make_user('reg_month'), now - timedelta(days=10))
+    backdate_user(make_user('reg_old'), now - timedelta(days=40))
 
     counts = analytics._registration_counts(now)
-    assert counts['today'] >= 1
-    assert counts['this_week'] >= counts['today']
-    assert counts['this_month'] >= counts['this_week']
+    assert counts['today'] == 1
+    assert counts['this_week'] == 2
+    assert counts['this_month'] == 3
 
 
 def test_registration_growth_pct_compares_this_week_to_last_week():
     now = timezone.now()
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = timezone.localtime(now).replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = today_start - timedelta(days=today_start.weekday())
     prev_week_start = week_start - timedelta(days=7)
 
@@ -245,7 +237,7 @@ def test_wallet_anomaly_count_catches_negative_and_overheld():
 def test_registrations_timeseries_fills_every_day_including_zeros():
     series = analytics.registrations_timeseries(days=7)
     assert len(series) == 7
-    assert series[-1]['date'] == timezone.now().date().isoformat()
+    assert series[-1]['date'] == timezone.localdate().isoformat()
     assert all('value' in point for point in series)
 
 
@@ -257,6 +249,40 @@ def test_sales_timeseries_places_totals_on_the_right_day():
     series = analytics.sales_timeseries(days=7)
     assert series[-1]['value'] == 20.0
     assert sum(point['value'] for point in series[:-1]) == 0.0
+
+
+@pytest.fixture
+def after_midnight_in_baghdad(monkeypatch):
+    """22:30 UTC on Sunday 22 Nov = 01:30 Baghdad on Monday 23 Nov: the UTC
+    and local dates (and weeks) disagree."""
+    moment = datetime(2026, 11, 22, 22, 30, tzinfo=dt_timezone.utc)
+    monkeypatch.setattr('django.utils.timezone.now', lambda: moment)
+    return moment
+
+
+def test_timeseries_end_on_the_baghdad_day_after_local_midnight(after_midnight_in_baghdad):
+    now = after_midnight_in_baghdad
+    owner, buyer = make_user('mid_owner'), make_user('mid_buyer')
+    make_reservation(owner=owner, buyer=buyer, total_price=Decimal('20'), status='confirmed', completed_at=now)
+
+    sales = analytics.sales_timeseries(days=7)
+    assert sales[-1] == {'date': '2026-11-23', 'value': 20.0}
+    assert len(sales) == 7
+
+    registrations = analytics.registrations_timeseries(days=7)
+    assert registrations[-1] == {'date': '2026-11-23', 'value': 2}
+
+
+def test_registration_counts_start_at_baghdad_midnight(after_midnight_in_baghdad):
+    now = after_midnight_in_baghdad
+    backdate_user(make_user('mid_today'), now - timedelta(hours=1))      # 00:30 Baghdad, Monday
+    backdate_user(make_user('mid_yesterday'), now - timedelta(hours=2))  # 23:30 Baghdad, Sunday
+
+    counts = analytics._registration_counts(now)
+    assert counts['today'] == 1
+    assert counts['this_week'] == 1
+    assert counts['this_month'] == 2
+    assert counts['growth_pct'] == 0.0
 
 
 # ---------------------------------------------------------------------------
