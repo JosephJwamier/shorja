@@ -299,6 +299,16 @@ def record_installment_fee(reservation, amount):
     )
 
 
+def void_platform_commission(reservation, reason):
+    """The sale was refunded in full after release and the platform gave its
+    cut back, so the expense leaves the seller's book too."""
+    for entry in LedgerEntry.objects.filter(
+            kind=LedgerEntry.KIND_EXPENSE, expense_category='commission',
+            source=LedgerEntry.SOURCE_APP, is_void=False,
+            note__startswith='عمولة #%d ' % reservation.id):
+        entry.void(reason)
+
+
 def void_app_sale(reservation, reason):
     """The reservation was cancelled/refunded after completing: retire its
     ledger row so the book matches the money. Stock is handed back by the

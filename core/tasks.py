@@ -27,7 +27,8 @@ def process_expired_reservations():
     expiring (see auto_complete_unclaimed_auction_reservations), since they
     already committed real money by winning the bid.
     """
-    from .models import ItemVariant, Reservation, Transaction
+    from .models import ItemVariant, Reservation
+    from .wallet_utils import cancel_pending_commission, release_promotions
 
     now = timezone.now()
     # A reservation with an open installment request is not expiring: the
@@ -61,15 +62,14 @@ def process_expired_reservations():
                     if variant is not None:
                         variant = ItemVariant.objects.select_for_update().get(pk=variant.pk)
                         variant.return_stock(reservation.quantity)
-                    Transaction.objects.filter(
-                        reservation=reservation, transaction_type='commission', status='pending'
-                    ).update(status='cancelled')
+                    cancel_pending_commission(reservation)
+                release_promotions(reservation)
 
                 processed_count += 1
                 logger.info(f"Processed expired reservation {reservation.id}")
 
         except Exception as e:
-            logger.error(f"Error processing reservation {reservation.id}: {str(e)}")
+            logger.error(f"Error processing reservation {reservation_id}: {str(e)}")
 
     return f"Processed {processed_count} expired reservations"
 
@@ -85,8 +85,10 @@ def auto_complete_unclaimed_auction_reservations():
     this should not simply expire and release the item.
     """
     from .models import Reservation
-    from .wallet_utils import complete_reservation
-    from .notifications import notify_reservation_completed
+    from .wallet_utils import (
+        OutOfStockError, complete_reservation, settle_cancelled_auction_win,
+    )
+    from .notifications import notify_reservation_cancelled_by_seller, notify_reservation_completed
 
     now = timezone.now()
     unclaimed = Reservation.objects.filter(
@@ -109,6 +111,20 @@ def auto_complete_unclaimed_auction_reservations():
                 notify_reservation_completed(reservation)
             except Exception as e:
                 logger.error(f"Failed to send auto-complete notification for reservation {reservation.id}: {e}")
+        except OutOfStockError:
+            # Nothing left to hand over: the winner gets the deposit back.
+            with transaction.atomic():
+                locked = Reservation.objects.select_for_update().get(pk=reservation.pk)
+                if locked.status != 'pending':
+                    continue
+                locked.status = 'cancelled'
+                locked.save(update_fields=['status'])
+                settle_cancelled_auction_win(locked, forfeit=False)
+            logger.warning(f"Auction reservation {reservation.id} cancelled: out of stock")
+            try:
+                notify_reservation_cancelled_by_seller(locked)
+            except Exception as e:
+                logger.error(f"Failed to notify auction winner of reservation {reservation.id}: {e}")
         except Exception as e:
             logger.error(f"Error auto-completing reservation {reservation.id}: {str(e)}")
 
@@ -505,6 +521,12 @@ def finalize_live_auction(auction_id):
     reservation = None
     try:
         with transaction.atomic():
+            # Re-read under the lock: end_early or the minute sweep may have
+            # settled it since, and settling twice refunds deposits twice.
+            auction = AuctionListing.objects.select_for_update().select_related(
+                'item__owner').get(pk=auction_id)
+            if auction.status != 'active':
+                return f"Auction {auction_id} already settled — skipping"
             auction.status = 'ended'
             auction.save(update_fields=['status'])
 
@@ -528,6 +550,23 @@ def finalize_live_auction(auction_id):
     except Exception as e:
         logger.error(f"Error finalizing live auction {auction_id}: {str(e)}")
         return f"Error finalizing live auction {auction_id}: {str(e)}"
+
+
+@shared_task
+def collect_storage_fees():
+    """Charges the storage fees due on active wholesale agreements."""
+    from .models import ItemTransfer
+    from .services.storage_fees import collect_due_storage_fees
+
+    paid = 0
+    for transfer_id in list(ItemTransfer.objects.filter(
+            status='active', next_storage_fee_due__lte=timezone.now(),
+    ).exclude(storage_fee_type='none').values_list('id', flat=True)):
+        try:
+            paid += collect_due_storage_fees(transfer_id)
+        except Exception as e:
+            logger.error(f"Error collecting storage fees for transfer {transfer_id}: {e}")
+    return f"Collected {paid} storage fee(s)"
 
 
 @shared_task

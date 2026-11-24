@@ -938,7 +938,7 @@ class ItemTransfer(models.Model):
     def activate(self):
         """
         Owner approves → deducts the requested quantity from their item's stock,
-        charges the reseller's wallet at the item's listed per-unit price, pays
+        charges the reseller's wallet at the per-unit price they asked at, pays
         the owner that price less the platform commission, and creates a new,
         fully independent Item owned by the reseller.
         """
@@ -961,9 +961,13 @@ class ItemTransfer(models.Model):
         if self.quantity > variant.quantity:
             raise ValueError(f"Insufficient stock. Only {variant.quantity} available")
 
-        # A variant can carry its own price; wholesale is struck on whatever
-        # the buyer would actually pay for that combination.
+        # The price the reseller saw when asking (frozen by create_agreement),
+        # not the one on the listing now: the owner could raise it between the
+        # request and their own approval and charge the reseller's wallet a
+        # price nobody agreed to. A price that came down since is passed on.
         wholesale_price_per_unit = variant.price if variant.price is not None else fixed_listing.price
+        if self.wholesale_price_per_unit is not None:
+            wholesale_price_per_unit = min(self.wholesale_price_per_unit, wholesale_price_per_unit)
         total_price = wholesale_price_per_unit * self.quantity
 
         variant.take_stock(self.quantity)
@@ -1325,6 +1329,12 @@ class Reservation(models.Model):
 
     def can_buyer_cancel(self):
         """Check if buyer can cancel (within 2 hours or seller approved)"""
+        # Once the courier has the goods there is nothing to pull back, however
+        # recent the order and even if the seller had agreed: a cancel here
+        # refunded the buyer while the goods kept travelling to them.
+        if self.delivery_orders.filter(direction='outbound').exclude(
+                status__in=['assigned', 'cancelled', 'failed']).exists():
+            return False
         time_since_reservation = timezone.now() - self.reserved_at
         within_two_hours = time_since_reservation.total_seconds() <= 7200  # 2 hours
         return within_two_hours or self.seller_cancellation_approved

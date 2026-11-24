@@ -19,7 +19,9 @@ from .notifications import (
     notify_return_pickup_assigned,
     notify_return_refund_released,
 )
-from .wallet_utils import credit_earnings, debit_balance, refund_to_buyer
+from .wallet_utils import (
+    cancel_pending_commission, claw_back_release, credit_earnings, refund_to_buyer,
+)
 
 
 def get_active_delivery_company():
@@ -356,13 +358,7 @@ def execute_return_refund(delivery_order):
 
     if refund_amount > 0:
         if reservation.payment_released_to_seller:
-            debit_balance(
-                user=reservation.item.owner,
-                amount=refund_amount,
-                transaction_type='refund',
-                item=reservation.item,
-                reservation=reservation,
-            )
+            claw_back_release(reservation, refund_amount)
         refund_to_buyer(
             reservation, refund_amount,
             reason='إرجاع المنتج — حجز #%d' % reservation.pk,
@@ -430,6 +426,7 @@ def execute_return_refund(delivery_order):
         item.status = 'draft' if reservation.auction_id else 'active'
         item.save(update_fields=['status'])
 
+    cancel_pending_commission(reservation)
     reservation.status = 'refunded'
     reservation.save(update_fields=['status'])
 

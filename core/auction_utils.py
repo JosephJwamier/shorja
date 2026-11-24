@@ -80,11 +80,19 @@ def create_winner_reservation(auction, winning_bid):
 
     from .services.commission import commission_for
     platform_percent, platform_amount = commission_for(auction.item, winning_bid.amount)
+    # A deposit larger than the winning price (an older auction, or one whose
+    # price was lowered) is more than the order: the excess goes straight back.
+    charged = auction.bid_deposit or Decimal('0.00')
+    deposit = min(charged, winning_bid.amount)
+    if charged > deposit:
+        from .wallet_utils import credit_earnings
+        credit_earnings(user=winner, amount=charged - deposit,
+                        transaction_type='refund', auction=auction)
     reservation = Reservation.objects.create(
         item=auction.item,
         buyer=winner,
         quantity=1,
-        deposit_amount=auction.bid_deposit or Decimal('0.00'),
+        deposit_amount=deposit,
         total_price=winning_bid.amount,
         expires_at=timezone.now() + timedelta(hours=WINNER_RESPONSE_WINDOW_HOURS),
         delivery_location=delivery_location,

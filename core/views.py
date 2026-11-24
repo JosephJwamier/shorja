@@ -4,8 +4,19 @@ ReSell Trust - Django REST Framework ViewSets (Fixed)
 """
 import logging
 import uuid
-from .wallet_utils import (credit_earnings, debit_balance, refund_to_buyer,
-                           release_reservation_payment, complete_reservation)
+from .wallet_utils import (
+    credit_earnings,
+    debit_balance,
+    refund_to_buyer,
+    release_reservation_payment,
+    complete_reservation,
+    OutOfStockError,
+    cancel_pending_commission,
+    forfeit_deposit,
+    release_promotions,
+    settle_cancelled_auction_win,
+    unlist_auction_item,
+)
 from .services.disputes import resolve_dispute, DisputeResolutionError
 from .services.withdrawals import approve_withdrawal, reject_withdrawal, WithdrawalReviewError
 from .services.support import start_support_chat
@@ -4177,6 +4188,13 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 'data': ReservationSerializer(reservation, context={'request': request}).data
             }, status=status.HTTP_200_OK)
 
+        except OutOfStockError as e:
+            return Response({
+                'success': False,
+                'code': 'out_of_stock',
+                'message': 'نفدت الكمية قبل إتمام الدفع، ولم يُخصم منك شيء',
+                'errors': str(e)
+            }, status=status.HTTP_400_BAD_REQUEST)
         except ValueError as e:
             # رمز ثابت يقرأه التطبيق ليحوّل المشتري إلى شحن محفظته.
             # مطابقة نصّ الرسالة كانت ستنكسر عند أول إعادة صياغة أو ترجمة.
@@ -4509,6 +4527,25 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                         'success': False,
                         'message': f'Reservation cannot be cancelled. Current status: {reservation.status}'
                     }, status=status.HTTP_400_BAD_REQUEST)
+                # The courier's leg is settled with the order: taken, it blocks
+                # the cancel; not yet taken, it is called off — an order left
+                # 'assigned' still sent the driver for a cancelled sale.
+                outbound = DeliveryOrder.objects.select_for_update().filter(
+                    reservation=reservation, direction='outbound',
+                ).exclude(status__in=['cancelled', 'failed']).first()
+                if outbound and outbound.status != 'assigned':
+                    return Response({
+                        'success': False,
+                        'message': 'لا يمكن الإلغاء — استلمت شركة التوصيل المنتج بالفعل'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                if outbound:
+                    outbound.status = 'cancelled'
+                    outbound.save(update_fields=['status'])
+                # An auction winner backing out alone forfeits the deposit, as
+                # a refusal at the door does; with the seller's agreement, or
+                # by the seller, it comes back.
+                forfeit = bool(reservation.auction_id and is_buyer
+                               and not reservation.seller_cancellation_approved)
                 old_status = reservation.status
                 # Stock is normally taken at completion; a represented sale
                 # takes it at creation, so it comes back on cancel either way.
@@ -4537,9 +4574,11 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                         ).update(status='queued')
                 else:
                     item = reservation.item
+                unlist_auction_item(item, reservation)
 
                 reservation.status = 'cancelled'
                 reservation.save(update_fields=['status'])
+                release_promotions(reservation)
                 # An installment request still waiting for the admin's call
                 # dies with the order — otherwise the admin could activate a
                 # plan at Qi for a reservation that no longer exists.
@@ -4547,14 +4586,19 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 cancel_open_requests(reservation, 'أُلغي الحجز')
                 # A represented sale booked its commission as a pending row
                 # at creation; nothing will ever release it now.
-                Transaction.objects.filter(
-                    reservation=reservation, transaction_type='commission', status='pending'
-                ).update(status='cancelled')
+                cancel_pending_commission(reservation)
+                if reservation.auction_id and old_status == 'pending':
+                    settle_cancelled_auction_win(reservation, forfeit=forfeit)
 
                 # Refund buyer's wallet for whatever they'd actually paid
                 # The money is still in escrow (release is blocked above), so
                 # the refund comes from the platform's held funds, nobody's wallet.
                 refund_amount = reservation.amount_charged
+                if forfeit and refund_amount > 0:
+                    lost = min(reservation.deposit_amount, refund_amount)
+                    if lost > 0:
+                        forfeit_deposit(reservation, lost)
+                        refund_amount -= lost
                 if refund_amount > 0:
                     # Not necessarily the buyer's wallet: a financed order
                     # goes back to the financier instead, since that is who
@@ -4743,6 +4787,18 @@ class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
 
         try:
             with transaction.atomic():
+                # Same order as cancel(): reservation, then its leg.
+                reservation = Reservation.objects.select_for_update().get(
+                    pk=delivery_order.reservation_id)
+                delivery_order = DeliveryOrder.objects.select_for_update().get(
+                    pk=delivery_order.pk)
+                if delivery_order.status != 'assigned' or (
+                        delivery_order.direction == 'outbound'
+                        and reservation.status in ('cancelled', 'refunded')):
+                    return Response({
+                        'success': False,
+                        'message': 'أُلغي هذا الطلب ولا يُستلم'
+                    }, status=status.HTTP_400_BAD_REQUEST)
                 delivery_order.status = 'picked_up'
                 delivery_order.picked_up_at = timezone.now()
                 delivery_order.save(update_fields=['status', 'picked_up_at'])
@@ -5679,10 +5735,17 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                         'message': f'Item is not available for reservation. Current status: {item.status}'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
-                if quantity > item.quantity:
+                # The combination the buyer picked, as in create_reservation:
+                # this path sold the default one at the listing price.
+                variant, variant_error = _resolve_variant(
+                    item, serializer.validated_data.get('variant_id'))
+                if variant_error:
+                    return Response({'success': False, 'message': variant_error},
+                                    status=status.HTTP_400_BAD_REQUEST)
+                if quantity > variant.quantity:
                     return Response({
                         'success': False,
-                        'message': f'Insufficient quantity. Only {item.quantity} item(s) available, but {quantity} requested'
+                        'message': f'Insufficient quantity. Only {variant.quantity} item(s) available, but {quantity} requested'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 # Check for existing active reservation by this user
@@ -5699,8 +5762,12 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 # Calculate amounts
-                total_price = fixed_listing.price * quantity
-                deposit_amount = fixed_listing.deposit_amount * quantity
+                if variant.price is not None:
+                    total_price = variant.price * quantity
+                    deposit_amount = total_price * fixed_listing.deposit_percentage / Decimal('100')
+                else:
+                    total_price = fixed_listing.price * quantity
+                    deposit_amount = fixed_listing.deposit_amount * quantity
 
                 # Commission is calculated on total sale price, not on deposit
                 commission_amount = (total_price * representative_assignment.commission_percentage) / 100
@@ -5715,6 +5782,7 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                 platform_percent, platform_amount = commission_for(item, total_price)
                 reservation = Reservation.objects.create(
                     item=item,
+                    variant=variant,
                     buyer=request.user,
                     quantity=quantity,
                     deposit_amount=deposit_amount,
@@ -6004,8 +6072,20 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
         item = Item.objects.get(id=v['item_id'])
 
         with transaction.atomic():
+            variant, variant_error = _resolve_variant(item, v.get('variant_id'))
+            if variant_error:
+                return Response({'success': False, 'message': variant_error},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if v.get('quantity', 1) > variant.quantity:
+                return Response({'success': False,
+                                 'message': f'المتوفّر {variant.quantity} فقط'},
+                                status=status.HTTP_400_BAD_REQUEST)
             transfer = ItemTransfer.objects.create(
                 item=item,
+                variant=variant,
+                # What the reseller is agreeing to pay — see activate().
+                wholesale_price_per_unit=(variant.price if variant.price is not None
+                                          else item.fixed_listing.price),
                 from_user=item.owner,
                 to_user=request.user,
                 quantity=v.get('quantity', 1),

@@ -68,7 +68,7 @@ def test_losing_bidder_who_bid_many_times_is_refunded_exactly_once(client):
     seller = make_user('aud_seller')
     loser = make_user('aud_loser', balance='10000')
     winner = make_user('aud_winner', balance='10000')
-    auction = make_auction(seller)
+    auction = make_auction(seller, deposit='100.00')
 
     bid(client, loser, auction, '110')
     bid(client, winner, auction, '120')
@@ -76,8 +76,8 @@ def test_losing_bidder_who_bid_many_times_is_refunded_exactly_once(client):
     bid(client, winner, auction, '140')
     bid(client, loser, auction, '150')
     bid(client, winner, auction, '160')
-    assert balance(loser) == Decimal('9000'), 'deposit charged once'
-    assert balance(winner) == Decimal('9000'), 'deposit charged once'
+    assert balance(loser) == Decimal('9900'), 'deposit charged once'
+    assert balance(winner) == Decimal('9900'), 'deposit charged once'
 
     AuctionListing.objects.filter(pk=auction.pk).update(end_time=timezone.now() - timedelta(seconds=1))
     process_ended_auctions()
@@ -86,8 +86,8 @@ def test_losing_bidder_who_bid_many_times_is_refunded_exactly_once(client):
     assert balance(loser) == Decimal('10000')
     # The winner's deposit stays committed to the sale; their earlier,
     # outbid rows must not be "refunded" as if they were losers.
-    assert balance(winner) == Decimal('9000')
-    assert Reservation.objects.get(auction=auction, buyer=winner).deposit_amount == Decimal('1000')
+    assert balance(winner) == Decimal('9900')
+    assert Reservation.objects.get(auction=auction, buyer=winner).deposit_amount == Decimal('100')
 
 
 def test_ending_an_auction_twice_refunds_nobody_twice():

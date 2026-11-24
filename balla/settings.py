@@ -306,6 +306,12 @@ CELERY_BEAT_SCHEDULE = {
         'schedule': crontab(hour='10,17', minute=0),
     },
 
+    # رسوم التخزين في اتفاقيات الجملة
+    'collect-storage-fees': {
+        'task': 'core.tasks.collect_storage_fees',
+        'schedule': crontab(hour=9, minute=0),
+    },
+
     # Reservation Management
     'process-expired-reservations': {
         'task': 'core.tasks.process_expired_reservations',

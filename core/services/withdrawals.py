@@ -12,7 +12,7 @@ instantly), so there's no second implementation for it to drift from.
 from django.db import transaction
 from django.utils import timezone
 
-from ..models import Transaction, Wallet
+from ..models import Transaction, Wallet, WithdrawalRequest
 
 
 class WithdrawalReviewError(Exception):
@@ -20,13 +20,19 @@ class WithdrawalReviewError(Exception):
     earlier action, so reviewing it again would double-settle the hold."""
 
 
+def _lock_pending(withdrawal):
+    """The status that counts is the row's under the lock, not the one the
+    caller read earlier: two reviews of one request each saw 'pending'."""
+    current = WithdrawalRequest.objects.select_for_update().get(pk=withdrawal.pk)
+    if current.status != 'pending':
+        raise WithdrawalReviewError(f'Already {current.status}')
+
+
 def approve_withdrawal(withdrawal, *, reviewed_by, admin_notes=''):
     """Settle the held funds (removes from both held_balance and balance)
     and record the payout. Raises WithdrawalReviewError if not pending."""
-    if withdrawal.status != 'pending':
-        raise WithdrawalReviewError(f'Already {withdrawal.status}')
-
     with transaction.atomic():
+        _lock_pending(withdrawal)
         wallet = Wallet.objects.select_for_update().get(user=withdrawal.user)
         wallet.settle_hold(withdrawal.amount)
 
@@ -48,10 +54,8 @@ def approve_withdrawal(withdrawal, *, reviewed_by, admin_notes=''):
 def reject_withdrawal(withdrawal, *, reviewed_by, admin_notes=''):
     """Release the held funds back to spendable balance. Raises
     WithdrawalReviewError if not pending."""
-    if withdrawal.status != 'pending':
-        raise WithdrawalReviewError(f'Already {withdrawal.status}')
-
     with transaction.atomic():
+        _lock_pending(withdrawal)
         wallet = Wallet.objects.select_for_update().get(user=withdrawal.user)
         wallet.release_hold(withdrawal.amount)
 

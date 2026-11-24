@@ -890,6 +890,16 @@ class AuctionListingSerializer(serializers.ModelSerializer):
         return 0
 
 
+def _check_bid_deposit(attrs, auction=None):
+    """The deposit is the first part of the price: one larger than the lowest
+    possible win cannot be."""
+    deposit = attrs.get('bid_deposit', getattr(auction, 'bid_deposit', None))
+    starting = attrs.get('starting_price', getattr(auction, 'starting_price', None))
+    if deposit > starting:
+        raise serializers.ValidationError(
+            {'bid_deposit': 'عربون المزايدة لا يمكن أن يتجاوز السعر الافتتاحي.'})
+
+
 class AuctionListingCreateSerializer(serializers.ModelSerializer):
     """Create auction listing serializer"""
 
@@ -920,8 +930,9 @@ class AuctionListingCreateSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         now = timezone.now()
-        start_time = attrs.get('start_time')
-        end_time = attrs.get('end_time')
+        # A partial update sends only what changed; the rest is the auction's.
+        start_time = attrs.get('start_time') or getattr(self.instance, 'start_time', None)
+        end_time = attrs.get('end_time') or getattr(self.instance, 'end_time', None)
 
         if start_time >= end_time:
             raise serializers.ValidationError(
@@ -932,6 +943,8 @@ class AuctionListingCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"end_time": "End time must be in the future."}
             )
+
+        _check_bid_deposit(attrs, self.instance)
 
         return attrs
 
@@ -1676,7 +1689,7 @@ class ItemTransferSerializer(serializers.ModelSerializer):
         # ما وصل البائع فعلاً: الثمن ناقص عمولة المنصة. فارغ قبل الموافقة
         # لأن الثمن نفسه لم يُثبَّت بعد.
         total = obj.total_wholesale_price
-        if total is None:
+        if total is None or obj.approved_at is None:
             return None
         return float(total - (obj.platform_commission_amount or 0))
 
@@ -1715,6 +1728,8 @@ class ResaleAgreementCreateSerializer(serializers.Serializer):
     """Reseller requests a quantity of the owner's item for wholesale ownership transfer"""
     item_id = serializers.IntegerField()
     quantity = serializers.IntegerField(min_value=1, default=1)
+    # Required when the item has options — see views._resolve_variant.
+    variant_id = serializers.IntegerField(required=False, allow_null=True)
     storage_fee_type = serializers.ChoiceField(
         choices=ItemTransfer.STORAGE_FEE_TYPE_CHOICES, default='none'
     )
@@ -3074,6 +3089,10 @@ class QuickLiveAuctionSerializer(serializers.Serializer):
     category_id = serializers.IntegerField(required=False, allow_null=True)
     condition = serializers.ChoiceField(choices=Item.CONDITION_CHOICES, required=False, default='unknown')
     description = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate(self, attrs):
+        _check_bid_deposit(attrs)
+        return attrs
 
     def validate_category_id(self, value):
         if value:

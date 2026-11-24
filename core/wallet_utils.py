@@ -132,6 +132,142 @@ def refund_to_buyer(reservation, amount, item=None, reason=''):
     return {'to_buyer': to_buyer, 'to_financier': to_financier}
 
 
+class OutOfStockError(ValueError):
+    """What the buyer is paying for was sold while they were deciding."""
+
+
+def cancel_pending_commission(reservation):
+    """The representative's pending row: this sale will never pay it."""
+    Transaction.objects.filter(
+        reservation=reservation, transaction_type='commission', status='pending',
+    ).update(status='cancelled')
+
+
+def release_promotions(reservation):
+    """An order that did not happen gives its coupon and its accepted offer
+    back: both are one-to-one, so a dead order would hold them forever."""
+    if reservation.applied_coupon_id or reservation.applied_offer_id:
+        reservation.applied_coupon = None
+        reservation.applied_offer = None
+        reservation.save(update_fields=['applied_coupon', 'applied_offer'])
+
+
+def delivery_fee_in_pot(reservation):
+    """How much of amount_charged is the delivery fee's. On COD the company
+    kept its share out of the cash, so only the platform's cut of the fee was
+    ever collected; prepaid, the whole fee was."""
+    outbound = reservation.delivery_orders.filter(direction='outbound').first()
+    if outbound and outbound.cash_collected and outbound.cash_to_collect > 0:
+        return outbound.platform_commission_amount
+    return reservation.delivery_fee
+
+
+def settle_cancelled_auction_win(reservation, *, forfeit):
+    """The winner's deposit was charged while bidding, so it is not part of
+    amount_charged on a pending win and no ordinary refund would return it.
+
+    `forfeit`: the winner walked away on their own, and the deposit goes to
+    the seller, as it does for a refusal at the door. Otherwise (the seller
+    cancelled, agreed to it, or had nothing to hand over) it goes back.
+
+    Call inside transaction.atomic(), on the locked pending reservation."""
+    deposit = reservation.deposit_amount
+    if deposit <= 0:
+        return
+    links = {'item': reservation.item, 'reservation': reservation}
+    if forfeit:
+        forfeit_deposit(reservation, deposit)
+    else:
+        credit_earnings(reservation.buyer, deposit, 'refund',
+                        auction=reservation.auction, **links)
+
+
+def forfeit_deposit(reservation, deposit):
+    """A buyer's lost commitment: the seller's, with a trace for the buyer."""
+    Transaction.objects.create(
+        user=reservation.buyer, transaction_type='penalty', amount=deposit,
+        status='completed', item=reservation.item, reservation=reservation,
+        auction=reservation.auction,
+    )
+    credit_earnings(reservation.item.owner, deposit, 'payout',
+                    item=reservation.item, reservation=reservation)
+
+
+def unlist_auction_item(item, reservation):
+    """An auction's listing ended when it was won; with nothing left selling
+    the item it goes back to draft for the seller to relist."""
+    if reservation.auction_id and getattr(item, 'fixed_listing', None) is None:
+        item.status = 'draft'
+        item.save(update_fields=['status'])
+
+
+def claw_back_release(reservation, amount):
+    """Takes `amount` back, after release, from the people who received it.
+
+    Charging all of it to the seller made them repay the platform's and the
+    representative's cut as well, money that never reached them. Each gives
+    back the same share of what they got; the seller gives the rest (which
+    includes the delivery fee: the courier did the trip).
+
+    A representative who already spent it gives what they have and the seller
+    who hired them covers the remainder, so a buyer's refund is never blocked
+    by a third party's empty wallet.
+
+    Raises ValueError if the seller (or the platform) cannot cover its part.
+    Call inside transaction.atomic()."""
+    from django.db.models import Sum
+    from .services.commission import platform_account
+    from .services.installments.service import live_plan_for
+
+    amount = Decimal(str(amount))
+    goods = reservation.amount_charged - delivery_fee_in_pot(reservation)
+    ratio = min(amount / goods, Decimal('1')) if goods > 0 else Decimal('1')
+    links = {'item': reservation.item, 'reservation': reservation}
+    platform = platform_account()
+
+    def received(user, kind):
+        return Transaction.objects.filter(
+            user=user, transaction_type=kind, reservation=reservation, status='completed',
+        ).aggregate(t=Sum('amount'))['t'] or Decimal('0.00')
+
+    def share(value):
+        return (max(value, Decimal('0.00')) * ratio).quantize(Decimal('0.01'))
+
+    # The delivery company's commission is the platform's for a trip that
+    # happened; only the cut of the sale itself is given back.
+    outbound = reservation.delivery_orders.filter(direction='outbound').first()
+    trip_cut = (outbound.platform_commission_amount
+                if outbound and reservation.delivery_fee > 0 else Decimal('0.00'))
+    remaining = amount
+
+    commission = min(share(received(platform, 'commission') - trip_cut), remaining)
+    debit_balance(platform, commission, 'refund', **links)
+    remaining -= commission
+
+    # The installment fee: the seller's part came out of the pot; the
+    # platform's own part came from the financier on top of it, and goes back
+    # the same way (see installments.service.request_reversal).
+    plan = live_plan_for(reservation)
+    fees = received(platform, 'installment_fee')
+    if plan is not None and fees > 0:
+        from_seller = min(share(min(fees, plan.seller_fee_amount)), remaining)
+        debit_balance(platform, share(fees - min(fees, plan.seller_fee_amount)) + from_seller,
+                      'refund', **links)
+        remaining -= from_seller
+
+    if reservation.representative_id and reservation.commission_paid:
+        rep = reservation.representative
+        owed = min(share(received(rep, 'commission')), remaining)
+        taken = max(min(owed, get_or_create_wallet(rep).available_balance), Decimal('0.00'))
+        debit_balance(rep, taken, 'refund', **links)
+        remaining -= taken
+
+    debit_balance(reservation.item.owner, remaining, 'refund', **links)
+    if ratio == 1:
+        from ledger.services import void_platform_commission
+        void_platform_commission(reservation, 'استُردّ ثمن الطلب')
+
+
 def complete_reservation(reservation, payment_type):
     """
     Charge whatever the buyer still owes for their chosen payment_type and
@@ -153,6 +289,17 @@ def complete_reservation(reservation, payment_type):
     # Continue on the caller's instance so its in-memory fields (a delivery
     # location attached moments ago) are what get saved.
     reservation.status = locked.status
+
+    # Stock first, before a dinar moves: pending reservations hold none, so
+    # two buyers can both be paying for the last piece. This used to clamp to
+    # what was left and charge the second one for nothing.
+    # Represented sales are the exception: theirs was taken at creation.
+    from .models import ItemVariant
+    variant = reservation.stock_variant
+    if variant is not None and not reservation.representative_id:
+        variant = ItemVariant.objects.select_for_update().get(pk=variant.pk)
+        if variant.quantity < reservation.quantity:
+            raise OutOfStockError('المتوفّر الآن %d فقط' % variant.quantity)
 
     if reservation.auction_id:
         # Winning an auction already charged deposit_amount as the winning
@@ -202,17 +349,9 @@ def complete_reservation(reservation, payment_type):
     reservation.completed_at = timezone.now()
     reservation.save(update_fields=['status', 'is_deposit_only', 'completed_at', 'delivery_fee', 'warranty_days'])
 
-    # Stock is only taken now — not at reservation creation — so lock and
-    # re-read it fresh (another reservation on the same item may have
-    # completed in the meantime). Represented sales are the one exception:
-    # their stock was already taken when the reservation was created.
-    from .models import ItemVariant
-    variant = reservation.stock_variant
+    # Locked and checked above, before the charge.
     if variant is not None and not reservation.representative_id:
-        variant = ItemVariant.objects.select_for_update().get(pk=variant.pk)
-        # Clamp rather than raise: the reservation is already committed and
-        # paid for by this point, and the old code clamped to zero here too.
-        variant.take_stock(min(reservation.quantity, variant.quantity))
+        variant.take_stock(reservation.quantity)
     item = Item.objects.select_for_update().get(id=reservation.item_id)
     item.sold_count += reservation.quantity
     item.save(update_fields=['sold_count'])
@@ -306,13 +445,8 @@ def release_reservation_payment(reservation, amount=None):
     # installment fee to another.
     payout_scale = Decimal('1')
     if amount is not None:
-        # Mirror of the subtraction above: on COD only the platform's cut of
-        # the fee was ever part of amount_charged.
-        outbound_for_base = reservation.delivery_orders.filter(direction='outbound').first()
-        fee_in_pot = reservation.delivery_fee
-        if outbound_for_base and outbound_for_base.cash_collected and outbound_for_base.cash_to_collect > 0:
-            fee_in_pot = outbound_for_base.platform_commission_amount
-        base_total = reservation.amount_charged - fee_in_pot
+        # Mirror of the subtraction above.
+        base_total = reservation.amount_charged - delivery_fee_in_pot(reservation)
         payout_scale = (charged / base_total) if base_total > 0 else Decimal('1')
 
     # Platform commission comes off the seller's side, never the buyer's,
@@ -381,7 +515,12 @@ def release_reservation_payment(reservation, amount=None):
             )
 
     if reservation.representative and reservation.commission_amount:
-        seller_net = charged - reservation.commission_amount
+        # Scaled like every other cut on a partial refund, and never more than
+        # is left: the shares come out of one pot, and a representative paid
+        # in full out of a shrunken one was paid with money that did not exist.
+        rep_cut = min((reservation.commission_amount * payout_scale).quantize(Decimal('0.01')),
+                      max(charged, Decimal('0.00')))
+        seller_net = charged - rep_cut
 
         # Seller receives net amount (total minus representative commission)
         credit_earnings(
@@ -392,8 +531,8 @@ def release_reservation_payment(reservation, amount=None):
             reservation=reservation
         )
 
-        reservation.commission_paid = True
-        reservation.commission_paid_at = timezone.now()
+        reservation.commission_paid = rep_cut > 0
+        reservation.commission_paid_at = timezone.now() if rep_cut > 0 else None
         update_fields.extend(['commission_paid', 'commission_paid_at'])
 
         pending_commission = Transaction.objects.filter(
@@ -403,16 +542,19 @@ def release_reservation_payment(reservation, amount=None):
             status='pending'
         ).first()
 
-        if pending_commission:
+        if rep_cut <= 0:
+            cancel_pending_commission(reservation)
+        elif pending_commission:
             # Mark transaction completed and credit wallet atomically
             pending_commission.status = 'completed'
-            pending_commission.save(update_fields=['status'])
+            pending_commission.amount = rep_cut
+            pending_commission.save(update_fields=['status', 'amount'])
             rep_wallet = get_or_create_wallet(reservation.representative)
-            rep_wallet.credit(reservation.commission_amount)
+            rep_wallet.credit(rep_cut)
         else:
             credit_earnings(
                 user=reservation.representative,
-                amount=reservation.commission_amount,
+                amount=rep_cut,
                 transaction_type='commission',
                 item=reservation.item,
                 reservation=reservation

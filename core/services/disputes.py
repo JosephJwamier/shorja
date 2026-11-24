@@ -11,8 +11,10 @@ from django.db import transaction
 from django.utils import timezone
 
 from ..delivery_utils import create_return_delivery_order, get_active_delivery_company
+from ..models import Dispute, Reservation
 from ..wallet_utils import (
-    credit_earnings, debit_balance, refund_to_buyer, release_reservation_payment,
+    cancel_pending_commission, claw_back_release, delivery_fee_in_pot,
+    refund_to_buyer, release_reservation_payment,
 )
 
 
@@ -37,21 +39,36 @@ def resolve_dispute(dispute, *, resolution_action, resolution='', admin_notes=''
     balance can't cover a clawback — the transaction rolls back, so the
     dispute is left exactly as it was before this call.
     """
-    reservation = dispute.reservation
-
-    # Reject actions that don't make sense before touching anything
-    if resolution_action == 'pay_seller' and reservation and not reservation.completed_at:
-        raise DisputeResolutionError(
-            'لا يمكن الدفع للبائع — الزبون لم يُتمّ دفع الحجز بعد'
-        )
-
-    if resolution_action == 'partial_refund' and reservation:
-        if partial_refund_amount is None:
-            raise DisputeResolutionError('partial_refund_amount is required for partial_refund')
-        if partial_refund_amount > reservation.amount_charged:
-            raise DisputeResolutionError('partial_refund_amount cannot exceed the amount charged')
-
     with transaction.atomic():
+        # Decided under the lock: two admins, or one double click, would each
+        # otherwise see an open dispute and each move the money.
+        locked = Dispute.objects.select_for_update().get(pk=dispute.pk)
+        if locked.status in ('resolved', 'closed'):
+            raise DisputeResolutionError('حُسم هذا النزاع مسبقاً')
+        reservation = None
+        if locked.reservation_id:
+            reservation = Reservation.objects.select_for_update().select_related(
+                'item').get(pk=locked.reservation_id)
+            dispute.reservation = reservation
+            if reservation.status in ('refunded', 'cancelled'):
+                raise DisputeResolutionError('سُوّي مال هذا الحجز مسبقاً')
+
+        # Reject actions that don't make sense before touching anything
+        if resolution_action == 'pay_seller' and reservation and not reservation.completed_at:
+            raise DisputeResolutionError(
+                'لا يمكن الدفع للبائع — الزبون لم يُتمّ دفع الحجز بعد'
+            )
+
+        if resolution_action == 'partial_refund' and reservation:
+            if partial_refund_amount is None:
+                raise DisputeResolutionError('partial_refund_amount is required for partial_refund')
+            if partial_refund_amount <= 0:
+                raise DisputeResolutionError('مبلغ الاسترداد الجزئي يجب أن يكون أكبر من صفر')
+            # The courier's fee was earned by the trip: only the goods' part
+            # can be given back while the buyer keeps the goods.
+            if partial_refund_amount > reservation.amount_charged - delivery_fee_in_pot(reservation):
+                raise DisputeResolutionError('partial_refund_amount cannot exceed the amount charged')
+
         dispute.status = 'resolved'
         dispute.resolution = resolution
         dispute.resolution_action = resolution_action
@@ -100,13 +117,7 @@ def resolve_dispute(dispute, *, resolution_action, resolution='', admin_notes=''
                         # Seller already holds the funds — claw them back
                         # first (raises ValueError if their balance can't
                         # cover it, which rolls back this whole resolution).
-                        debit_balance(
-                            user=reservation.item.owner,
-                            amount=refund_amount,
-                            transaction_type='refund',
-                            item=reservation.item,
-                            reservation=reservation
-                        )
+                        claw_back_release(reservation, refund_amount)
                     refund_to_buyer(
                         reservation, refund_amount,
                         reason='استرداد بعد نزاع #%d' % dispute.pk,
@@ -123,6 +134,7 @@ def resolve_dispute(dispute, *, resolution_action, resolution='', admin_notes=''
                         stock_variant.return_stock(reservation.quantity)
                     from ledger.services import void_app_sale
                     void_app_sale(reservation, 'استرداد بعد نزاع')
+                cancel_pending_commission(reservation)
 
                 reservation.status = 'refunded'
                 reservation.save(update_fields=['status'])
@@ -147,13 +159,7 @@ def resolve_dispute(dispute, *, resolution_action, resolution='', admin_notes=''
             if reservation.payment_released_to_seller:
                 # Seller already holds the funds — claw back the
                 # partial amount first.
-                debit_balance(
-                    user=reservation.item.owner,
-                    amount=partial_refund_amount,
-                    transaction_type='refund',
-                    item=reservation.item,
-                    reservation=reservation
-                )
+                claw_back_release(reservation, partial_refund_amount)
                 refund_to_buyer(
                     reservation, partial_refund_amount,
                     reason='استرداد جزئي بعد نزاع #%d' % dispute.pk,
