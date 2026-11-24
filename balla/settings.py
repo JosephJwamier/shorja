@@ -603,6 +603,7 @@ UNFOLD = {
             {
                 'title': 'التسويق والعروض',
                 'items': [
+                    {'title': 'الكتيّبات والباركود', 'icon': 'qr_code_2', 'link': reverse_lazy('admin:core_campaign_changelist')},
                     {'title': 'كوبونات المتاجر', 'icon': 'confirmation_number', 'link': reverse_lazy('admin:core_storecoupon_changelist')},
                     {'title': 'الكوبونات المُجمَّعة', 'icon': 'redeem', 'link': reverse_lazy('admin:core_couponcollection_changelist')},
                 ],
@@ -790,6 +791,8 @@ WEVLIX_TEMPLATE_HANDOVER_REMINDER = os.environ.get(
 # «قادم قريباً» بدل زرّ يقود إلى 404. يُضبط في .env يوم النشر بلا تعديل كود.
 PLAY_STORE_URL = os.environ.get('PLAY_STORE_URL', '')
 APP_STORE_URL = os.environ.get('APP_STORE_URL', '')
+# تحميل مباشر لملف APK في صفحات الكتيّبات (core/campaign_views.py). فارغ = لا زرّ.
+APK_DOWNLOAD_URL = os.environ.get('APK_DOWNLOAD_URL', '')
 
 # أقدم رقم بنية (`+N` في pubspec) ما زال يُخدم. أقدم منه يرى «حدّث
 # التطبيق» عند الإقلاع — انظر core/app_version_views.py. صفر = لا منع.

@@ -1,0 +1,8 @@
+{% if links.ios %}
+  <a class="btn {% if main %}main{% endif %}" href="{% url 'campaign-download' campaign.code 'ios' %}{{ source_query }}" rel="nofollow">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 20h16"/></svg>
+    حمّل من App Store
+  </a>
+{% else %}
+  <span class="btn soon">آيفون — قريباً هنا</span>
+{% endif %}

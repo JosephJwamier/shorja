@@ -1,10 +1,11 @@
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
 from django.contrib import admin, messages
 from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 from django.core.exceptions import PermissionDenied
-from django.db.models import F, Q, Sum
+from django.db.models import Count, F, Q, Sum
 from django.shortcuts import get_object_or_404, redirect
 from django.template.response import TemplateResponse
 from django.urls import path, reverse
@@ -29,6 +30,7 @@ from .models import (
     ItemVariant, PaymentIntent, StoreBadge, DeliveryRate,
     InstallmentPlan, InstallmentCollection, InstallmentReversal,
     LiveSessionViewer, LiveSessionBan, LiveSessionModerator, UserCategoryAffinity,
+    Campaign, CampaignEvent,
 )
 from .services.disputes import resolve_dispute, DisputeResolutionError
 from .services.withdrawals import approve_withdrawal, reject_withdrawal, WithdrawalReviewError
@@ -1848,3 +1850,78 @@ class DeliveryRateAdmin(ImportExportModelAdmin, ModelAdmin):
     search_fields = ('company__name',)
     raw_id_fields = ('company',)
     list_select_related = ('company',)
+
+
+@admin.register(Campaign)
+class CampaignAdmin(ModelAdmin):
+    """أيّ كتيّب ينجح: من فتح، ومن ضغط التحميل، وكم لكل نسخة موزّعة."""
+    list_display = ('code', 'name', 'audience', 'visitors', 'opens', 'clicks',
+                    'click_rate', 'per_copy', 'last_week', 'printed_copies', 'is_active')
+    list_filter = ('audience', 'is_active')
+    list_editable = ('printed_copies',)
+    search_fields = ('code', 'name')
+
+    def get_readonly_fields(self, request, obj=None):
+        # الرمز مطبوع على الورق؛ تغييره يُميت كل نسخة وُزّعت.
+        return ('code',) if obj else ()
+
+    def has_delete_permission(self, request, obj=None):
+        # الحذف يمحو أرقام الكتيّب ويُضيّع المقارنة؛ is_active يكفي للإيقاف.
+        return False
+
+    def get_queryset(self, request):
+        week = timezone.now() - timedelta(days=7)
+        new_scan = Q(events__kind=CampaignEvent.SCAN, events__is_new=True)
+        click = Q(events__kind=CampaignEvent.CLICK)
+        return super().get_queryset(request).annotate(
+            n_opens=Count('events', filter=Q(events__kind=CampaignEvent.SCAN)),
+            n_visitors=Count('events', filter=new_scan),
+            n_print=Count('events', filter=new_scan & Q(events__source=CampaignEvent.QR)),
+            n_week=Count('events', filter=new_scan & Q(events__created_at__gte=week)),
+            n_clicks=Count('events', filter=click),
+            n_android=Count('events', filter=click & Q(events__platform=CampaignEvent.ANDROID)),
+            n_ios=Count('events', filter=click & Q(events__platform=CampaignEvent.IOS)),
+        )
+
+    @admin.display(description='زوّار', ordering='n_visitors')
+    def visitors(self, obj):
+        return obj.n_visitors
+
+    @admin.display(description='مرات الفتح', ordering='n_opens')
+    def opens(self, obj):
+        return obj.n_opens
+
+    @admin.display(description='ضغط التحميل', ordering='n_clicks')
+    def clicks(self, obj):
+        return f'{obj.n_clicks} (أندرويد {obj.n_android} · آيفون {obj.n_ios})'
+
+    @admin.display(description='ضغط لكل ١٠٠ زائر')
+    def click_rate(self, obj):
+        return f'{obj.n_clicks * 100 / obj.n_visitors:.0f}' if obj.n_visitors else '—'
+
+    @admin.display(description='مسح لكل ١٠٠ نسخة')
+    def per_copy(self, obj):
+        # كتيّب وُزّعت منه ألف نسخة لا يُقارَن بعدد مسحاته بكتيّب من مئة.
+        return f'{obj.n_print * 100 / obj.printed_copies:.1f}' if obj.printed_copies else '—'
+
+    @admin.display(description='زوّار آخر ٧ أيام', ordering='n_week')
+    def last_week(self, obj):
+        return obj.n_week
+
+
+@admin.register(CampaignEvent)
+class CampaignEventAdmin(ModelAdmin):
+    """سجلّ للقراءة: رقم يُعدَّل باليد لا يُبنى عليه قرار."""
+    list_display = ('created_at', 'campaign', 'kind', 'platform', 'source', 'is_new')
+    list_filter = ('campaign', 'kind', 'platform', 'source')
+    list_select_related = ('campaign',)
+    date_hierarchy = 'created_at'
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

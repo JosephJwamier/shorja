@@ -3317,3 +3317,64 @@ class InstallmentReversal(models.Model):
 
     def __str__(self):
         return "Reversal %s %s [%s]" % (self.plan.reference, self.amount, self.state)
+
+
+class Campaign(models.Model):
+    """كتيّب مطبوع له باركود خاص: shorjeh.com/f/<code>.
+
+    النصوص هنا لا في القالب، فتُعدَّل من لوحة الإدارة بعد الطباعة."""
+    CUSTOMER, MERCHANT = 'customer', 'merchant'
+    AUDIENCE_CHOICES = [(CUSTOMER, 'زبائن'), (MERCHANT, 'بائعون')]
+
+    code = models.SlugField('الرمز', max_length=20, unique=True,
+                            help_text='يظهر في الباركود. لا يتغيّر بعد الحفظ.')
+    name = models.CharField('الاسم', max_length=80)
+    audience = models.CharField('الجمهور', max_length=10, choices=AUDIENCE_CHOICES)
+    headline = models.CharField('العنوان', max_length=90)
+    lede = models.CharField('الوصف', max_length=220)
+    points = models.TextField('النقاط', blank=True, help_text='كل نقطة في سطر.')
+    image_name = models.SlugField('الصورة', max_length=20, blank=True,
+                                  help_text='من c1 إلى c3 أو من m1 إلى m3.')
+    has_book = models.BooleanField('له كتيّب يُقلَّب', default=False)
+    printed_copies = models.PositiveIntegerField('النسخ الموزّعة', default=0,
+                                                 help_text='لحساب المسح لكل نسخة.')
+    is_active = models.BooleanField('مفعّل', default=True)
+    created_at = models.DateTimeField('أُنشئ', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'كتيّب تسويقي'
+        verbose_name_plural = 'الكتيّبات التسويقية'
+        ordering = ['code']
+
+    def __str__(self):
+        return f'{self.code} · {self.name}'
+
+    def save(self, *args, **kwargs):
+        # الصفحة تبحث بالأحرف الصغيرة، فرمزٌ بحرف كبير لا يُفتح أبداً.
+        self.code = self.code.lower()
+        super().save(*args, **kwargs)
+
+
+class CampaignEvent(models.Model):
+    """مسحة باركود أو ضغطة تحميل. بلا IP وبلا أيّ شيء يدلّ على شخص."""
+    SCAN, CLICK = 'scan', 'click'
+    KIND_CHOICES = [(SCAN, 'فتح الصفحة'), (CLICK, 'ضغط التحميل')]
+    ANDROID, IOS, OTHER = 'android', 'ios', 'other'
+    PLATFORM_CHOICES = [(ANDROID, 'أندرويد'), (IOS, 'آيفون'), (OTHER, 'غيرهما')]
+    QR, WEB = 'qr', 'web'
+    SOURCE_CHOICES = [(QR, 'باركود'), (WEB, 'كتيّب الويب')]
+
+    campaign = models.ForeignKey(Campaign, on_delete=models.CASCADE, related_name='events')
+    kind = models.CharField(max_length=5, choices=KIND_CHOICES)
+    target = models.CharField(max_length=5, blank=True)
+    platform = models.CharField(max_length=7, choices=PLATFORM_CHOICES)
+    source = models.CharField(max_length=3, choices=SOURCE_CHOICES, default=QR)
+    is_new = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'حدث كتيّب'
+        verbose_name_plural = 'أحداث الكتيّبات'
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['campaign', 'kind', 'created_at'],
+                                name='campaign_event_lookup')]

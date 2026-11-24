@@ -18,7 +18,7 @@ from drf_yasg import openapi
 from rest_framework import permissions
 from two_factor.urls import urlpatterns as tf_urls
 from core.legal_views import legal_document_page
-from core import share_views
+from core import campaign_views, share_views
 from core.admin_site import enrol_on_server
 from core.auth_tokens import PolicyTokenObtainPairSerializer
 from core.throttling import LoginUsernameThrottle
@@ -96,6 +96,10 @@ urlpatterns = [
     path('s/<int:store_id>', share_views.store, name='share-store'),
     path('a/<int:auction_id>', share_views.auction, name='share-auction'),
     path('l/<int:session_id>', share_views.live, name='share-live'),
+    # الكتيّبات المطبوعة. الرابط في الباركود، وكل حرف أقلّ يجعله أسهل مسحاً.
+    path('f/<slug:code>', campaign_views.campaign_landing, name='campaign-landing'),
+    path('f/<slug:code>/book', campaign_views.campaign_book, name='campaign-book'),
+    path('f/<slug:code>/get/<slug:target>', campaign_views.campaign_download, name='campaign-download'),
 
     path('legal/privacy/', legal_document_page, {'doc_type': 'privacy'}, name='legal-privacy'),
     path('legal/terms/', legal_document_page, {'doc_type': 'terms'}, name='legal-terms'),

@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ campaign.headline }} — الشورجة</title>
+<meta name="description" content="{{ campaign.lede }}">
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#e4611a">
+<link rel="canonical" href="{{ canonical }}">
+<link rel="icon" href="{{ icon_url }}">
+<link rel="apple-touch-icon" href="{{ icon_url }}">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="الشورجة">
+<meta property="og:locale" content="ar_IQ">
+<meta property="og:title" content="{{ campaign.headline }}">
+<meta property="og:description" content="{{ campaign.lede }}">
+<meta property="og:image" content="{{ image_url }}">
+<meta property="og:url" content="{{ canonical }}">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lalezar&family=Tajawal:wght@500;700;800&display=swap">
+<style>
+  :root { --orange: #e4611a; --deep: #b8440c; --cream: #ffecc9; --paper: #fff8ec; --ink: #2b1509; --soft: #6d5140; }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--paper); color: var(--ink); font: 500 1rem/1.75 Tajawal, system-ui, Tahoma, sans-serif;
+         padding-bottom: env(safe-area-inset-bottom); }
+  h1, h2 { font-family: Lalezar, Tajawal, sans-serif; font-weight: 400; line-height: 1.25; }
+  .wrap { max-width: 480px; margin: 0 auto; padding: 0 20px; }
+  header { background: var(--orange); color: var(--cream); text-align: center; padding: 18px 0 34px; }
+  .brand { display: inline-flex; align-items: center; gap: 10px; font: 400 1.5rem/1 Lalezar, sans-serif; }
+  .brand img { width: 46px; height: 46px; border-radius: 12px; }
+  h1 { font-size: clamp(2rem, 9vw, 2.7rem); margin: 12px 0 6px; color: #fff; text-wrap: balance; }
+  .lede { font-size: 1.05rem; text-wrap: balance; }
+  /* مظلّة الشعار: حدّها السفلي أنصاف دوائر، وتحتها مكان التحميل. */
+  .awning { height: 46px; margin-top: -1px;
+    background: repeating-linear-gradient(90deg, var(--cream) 0 30px, #f28a1c 30px 60px);
+    -webkit-mask: radial-gradient(15px at 15px 31px, #000 98%, transparent) 0 0/30px 100%, linear-gradient(#000 0 0) 0 0/100% 31px no-repeat;
+    mask: radial-gradient(15px at 15px 31px, #000 98%, transparent) 0 0/30px 100%, linear-gradient(#000 0 0) 0 0/100% 31px no-repeat; }
+  .get { background: #fff; border: 2px solid var(--cream); border-radius: 24px; padding: 22px 18px; margin-top: 14px;
+         box-shadow: 0 10px 30px rgba(107, 50, 12, .12); text-align: center; }
+  .get h2 { font-size: 1.6rem; color: var(--deep); margin-bottom: 12px; }
+  .btns { display: flex; flex-direction: column; gap: 12px; }
+  .btn { display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 64px; border-radius: 18px;
+         padding: 10px 16px; font-weight: 800; font-size: 1.15rem; text-decoration: none; }
+  a.btn { background: #fff; color: var(--deep); border: 2px solid var(--orange); }
+  a.btn.main { background: var(--deep); border-color: var(--deep); color: #fff; font-size: 1.25rem; min-height: 72px; }
+  a.btn:focus-visible { outline: 3px solid var(--ink); outline-offset: 3px; }
+  a.btn:active { transform: translateY(2px); }
+  .btn.soon { border: 2px dashed #d3a578; color: var(--soft); background: var(--paper); font-weight: 700; }
+  .btn svg { flex: none; }
+  .hint { margin-top: 14px; color: var(--soft); font-size: .95rem; }
+  .arch { display: block; width: min(100%, 360px); aspect-ratio: 4/5; object-fit: cover; margin: 34px auto 0;
+          border-radius: 50% 50% 20px 20px / 36% 36% 16px 16px; }
+  ul { list-style: none; padding: 0; margin: 26px 0; }
+  li { padding: 15px 0; border-bottom: 1px solid #efd9b4; font-weight: 700; font-size: 1.08rem; display: flex; gap: 12px; align-items: baseline; }
+  li::before { content: ""; flex: none; width: 11px; height: 14px; background: var(--orange); border-radius: 50% 50% 2px 2px; }
+  .again { text-align: center; margin: 8px 0 34px; }
+  footer { text-align: center; color: var(--soft); font-size: .9rem; padding: 8px 0 30px; }
+  footer a { color: var(--deep); padding: 10px; display: inline-block; }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div class="brand"><img src="{{ icon_url }}" alt="" width="46" height="46">الشورجة</div>
+    <h1>{{ campaign.headline }}</h1>
+    <p class="lede">{{ campaign.lede }}</p>
+  </div>
+</header>
+<div class="awning" aria-hidden="true"></div>
+
+<main class="wrap">
+  <section class="get" id="get">
+    <h2>حمّل التطبيق من هنا</h2>
+    <div class="btns">
+      {% if platform == 'ios' %}
+        {% include "share/_campaign_ios.html" with main=True %}
+        {% include "share/_campaign_android.html" with main=False %}
+      {% else %}
+        {% include "share/_campaign_android.html" with main=True %}
+        {% include "share/_campaign_ios.html" with main=False %}
+      {% endif %}
+    </div>
+    {% if any_link %}
+      <p class="hint">اضغط الزر ثم «تثبيت».</p>
+    {% else %}
+      <p class="hint">التطبيق في طريقه إلى المتاجر. احتفظ بهذه الصفحة، فمن هنا يكون التحميل.</p>
+    {% endif %}
+  </section>
+
+  <img class="arch" src="{{ image_url }}" alt="" width="360" height="450">
+
+  {% if points %}<ul>{% for point in points %}<li>{{ point }}</li>{% endfor %}</ul>{% endif %}
+  {% if any_link %}<p class="again"><a class="btn main" href="#get">حمّل التطبيق</a></p>{% endif %}
+</main>
+<footer>
+  {% if campaign.has_book %}<a href="{% url 'campaign-book' campaign.code %}">تصفّح الكتيّب</a>{% endif %}
+  <a href="{% url 'share-home' %}">موقع الشورجة</a>
+</footer>
+</body>
+</html>

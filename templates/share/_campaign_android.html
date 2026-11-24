@@ -1,0 +1,15 @@
+{% if links.play %}
+  <a class="btn {% if main %}main{% endif %}" href="{% url 'campaign-download' campaign.code 'play' %}{{ source_query }}" rel="nofollow">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M4 2.5v19l16-9.5z"/></svg>
+    حمّل من Google Play
+  </a>
+{% endif %}
+{% if links.apk %}
+  <a class="btn {% if main and not links.play %}main{% endif %}" href="{% url 'campaign-download' campaign.code 'apk' %}{{ source_query }}" rel="nofollow">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 20h16"/></svg>
+    تحميل مباشر لأندرويد
+  </a>
+{% endif %}
+{% if not links.play and not links.apk %}
+  <span class="btn soon">أندرويد — قريباً هنا</span>
+{% endif %}
