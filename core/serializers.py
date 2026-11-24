@@ -55,17 +55,25 @@ def store_badges_of(user):
     return store.badge_kinds()
 
 
+def store_name_of(user):
+    """The name a seller trades under, '' without an active store."""
+    store = getattr(user, 'store', None) if user is not None else None
+    return store.name if store is not None and store.is_active else ''
+
+
 class UserSerializer(serializers.ModelSerializer):
     """User serializer"""
     avatar_url = serializers.SerializerMethodField()
     store_badges = serializers.SerializerMethodField()
+    store_name = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = ['id', 'username', 'first_name', 'last_name', 'email', 'phone', 'trust_score',
                   'total_sales', 'total_purchases', 'email_verified',
                   'phone_verified', 'identity_verified', 'date_joined',
-                  'avatar', 'avatar_url', 'bio', 'date_of_birth', 'store_badges']
+                  'avatar', 'avatar_url', 'bio', 'date_of_birth', 'store_badges',
+                  'store_name']
         read_only_fields = ['trust_score', 'total_sales', 'total_purchases',
                             'email_verified', 'phone_verified', 'identity_verified',
                             'store_badges']
@@ -89,6 +97,12 @@ class UserSerializer(serializers.ModelSerializer):
             return store_badges_of(obj)
         except Exception:  # the store relation can be missing on stubs/fakes
             return []
+
+    def get_store_name(self, obj):
+        try:
+            return store_name_of(obj)
+        except Exception:  # same stubs/fakes as above
+            return ''
 
     def get_avatar_url(self, obj):
         """Get full URL for avatar"""
