@@ -22,6 +22,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from .auth_tokens import revoke_refresh_tokens
+from .identity_proof import take_attempt
 from .password_rules import password_error
 from .phone_utils import to_e164
 from .services.wevlix import (
@@ -147,6 +148,21 @@ class SendPhoneCodeView(APIView):
         })
 
 
+def _too_many_attempts():
+    return Response(
+        {'success': False, 'code': 'otp_too_many_attempts',
+         'message': 'محاولات خاطئة كثيرة — اطلب رمزاً جديداً'},
+        status=status.HTTP_400_BAD_REQUEST)
+
+
+def _give_back_attempt(key):
+    """عطلٌ عند Wevlix ليس تخميناً خاطئاً."""
+    try:
+        cache.decr(key)
+    except ValueError:
+        pass
+
+
 def _check_code(canonical, code):
     """(ok, error_response). يستهلك الرمز عند النجاح."""
     message_id = cache.get(_cache_key(canonical))
@@ -155,27 +171,32 @@ def _check_code(canonical, code):
             {'success': False, 'message': 'انتهت صلاحية الرمز — اطلب رمزاً جديداً'},
             status=status.HTTP_400_BAD_REQUEST)
 
+    # تُحجز المحاولة قبل فحصها لا بعده: عشرون طلباً معاً كانت كلّها تسأل
+    # Wevlix قبل أن تُحسب أولاها، فيصير الحدّ عشرين لا خمسة.
+    failures_key = _failures_key(canonical)
+    if not take_attempt(failures_key, OTP_MAX_FAILURES, settings.OTP_TTL_SECONDS):
+        cache.delete(_cache_key(canonical))
+        return False, _too_many_attempts()
+
     try:
         ok = verify_otp(message_id, code)
     except WevlixNotConfigured:
+        _give_back_attempt(failures_key)
         return False, _service_unavailable()
     except WevlixError as e:
+        _give_back_attempt(failures_key)
         return False, Response({'success': False, 'message': str(e)},
                                status=status.HTTP_502_BAD_GATEWAY)
 
     if not ok:
-        failures_key = _failures_key(canonical)
-        # add ثم incr: ذرّيّتان على Redis، فطلبان متزامنان لا يضيّعان عدّة.
-        cache.add(failures_key, 0, settings.OTP_TTL_SECONDS)
-        failures = cache.incr(failures_key)
+        failures = cache.get(failures_key) or 0
         if failures >= OTP_MAX_FAILURES:
-            cache.delete_many([_cache_key(canonical), failures_key])
+            # العدّاد يبقى حتى رمز جديد: حذفه هنا يفتح خمساً أخرى لطلبات
+            # قرأت الرمز قبل إبطاله.
+            cache.delete(_cache_key(canonical))
             logger.warning('OTP for %s burned after %d wrong attempts',
                            canonical[-4:], failures)
-            return False, Response(
-                {'success': False, 'code': 'otp_too_many_attempts',
-                 'message': 'محاولات خاطئة كثيرة — اطلب رمزاً جديداً'},
-                status=status.HTTP_400_BAD_REQUEST)
+            return False, _too_many_attempts()
         return False, Response(
             {'success': False, 'message': 'الرمز غير صحيح'},
             status=status.HTTP_400_BAD_REQUEST)

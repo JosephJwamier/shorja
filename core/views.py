@@ -332,6 +332,10 @@ class UserViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Last, so a refusal above does not use up a WhatsApp code.
+        from .identity_proof import require_proof
+        require_proof(request)
+
         with transaction.atomic():
             # Refresh tokens aren't checked against is_active by default, so a
             # deactivated user could otherwise still mint fresh access tokens.

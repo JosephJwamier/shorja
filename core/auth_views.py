@@ -31,6 +31,8 @@ from .notifications import NotificationService
 from .password_rules import (
     WEAK_PASSWORD_CODE, WEAK_PASSWORD_MESSAGE, password_error,
 )
+from .login_identifier import account_for
+from .identity_proof import ProofRequired, check_own_password, take_attempt
 from .phone_utils import to_e164
 from .models import Location  # NEW: Import Location
 
@@ -114,24 +116,8 @@ class LoginView(generics.GenericAPIView):
         identifier = (serializer.validated_data['username'] or '').strip()
         password = serializer.validated_data['password']
 
-        # Resolve whatever was typed down to a username. A real username
-        # always wins, so adding these fallbacks cannot change the meaning
-        # of an existing login; only unmatched input is tried as an email
-        # or a phone.
-        #
-        # (The previous version left `username` unbound when an '@' string
-        # matched no account, raising UnboundLocalError — a 500 on what is
-        # simply a wrong address.)
-        username = identifier
-        if not User.objects.filter(username=identifier).exists():
-            if '@' in identifier:
-                match = User.objects.filter(email=identifier.lower()).first()
-            else:
-                # Any spelling of the number reaches the one stored form.
-                canonical = to_e164(identifier)
-                match = User.objects.filter(phone=canonical).first() if canonical else None
-            if match:
-                username = match.username
+        match = account_for(identifier)
+        username = match.username if match else identifier
 
         user = authenticate(request, username=username, password=password)
 
@@ -244,6 +230,13 @@ class VerifyEmailView(generics.GenericAPIView):
         if user.email_verified:
             return Response({'message': 'Email already verified'})
 
+        # Counted before it is judged, so parallel guesses are counted too.
+        key = self._failures_key(user)
+        if not take_attempt(key, self.MAX_FAILURES, 15 * 60):
+            user.clear_verification_code()
+            return Response({'error': 'Invalid or expired code'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
         if user.check_verification_code('email', code):
             user.email_verified = True
             user.save(update_fields=['email_verified'])
@@ -257,11 +250,10 @@ class VerifyEmailView(generics.GenericAPIView):
         # the WhatsApp code (otp_views.OTP_MAX_FAILURES): five wrong tries and
         # the code is gone.
         if user.verification_code and user.verification_code_purpose == 'email':
-            key = self._failures_key(user)
-            cache.add(key, 0, 15 * 60)
-            if cache.incr(key) >= self.MAX_FAILURES:
+            if (cache.get(key) or 0) >= self.MAX_FAILURES:
+                # The count stays until a new code: dropping it here would
+                # let in requests that loaded the code before it was cleared.
                 user.clear_verification_code()
-                cache.delete(key)
 
         return Response({
             'error': 'Invalid or expired code'
@@ -295,6 +287,7 @@ class ResendVerificationView(APIView):
                 'message': 'تفعيل البريد غير متاح حالياً',
             }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
+        cache.delete(VerifyEmailView._failures_key(user))  # new code, new count
         sent = send_email_verification_code(user)
         if not sent:
             return Response({
@@ -316,7 +309,12 @@ class ChangePasswordView(APIView):
         old_password = serializer.validated_data['old_password']
         new_password = serializer.validated_data['new_password']
 
-        if not user.check_password(old_password):
+        try:
+            right = check_own_password(user, old_password)
+        except ProofRequired as exc:
+            return Response({'error': str(exc.detail['message'])},
+                            status=status.HTTP_429_TOO_MANY_REQUESTS)
+        if not right:
             return Response({
                 'error': 'Old password is incorrect'
             }, status=status.HTTP_400_BAD_REQUEST)
@@ -530,6 +528,9 @@ def unique_username(email, name):
     base = (email.split('@')[0] if email else name) or 'user'
     base = re.sub(r'[^a-zA-Z0-9_]', '', base).lower() or 'user'
     base = base[:25]
+    if base.isdigit():
+        # All digits reads as a phone, with any suffix: the loop would not end.
+        base = 'user' + base
 
     username = base
     suffix = 1

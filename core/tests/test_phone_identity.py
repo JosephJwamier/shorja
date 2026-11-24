@@ -125,15 +125,22 @@ class TestLogin:
                         {'username': 'nobody@example.com', 'password': 'x'}, format='json')
         assert r.status_code == 401
 
-    def test_a_real_username_still_wins_over_a_phone_lookup(self, client):
-        # Someone whose username happens to look like a number must keep
-        # logging in with it.
-        named = User.objects.create_user(username='07701234567', password='Passw0rd!x')
-        User.objects.create_user(username='other', password='Other!123', phone='07701234567')
+    def test_the_phone_wins_over_a_username_shaped_like_it(self, client):
+        # The username used to win, so registering someone's number as a
+        # username locked them out of their own sign-in.
+        User.objects.create_user(username='07701234567', password='Passw0rd!x')
+        owner = User.objects.create_user(username='other', password='Zx9!kQ2#long', phone='07701234567')
         r = client.post(reverse('login'),
-                        {'username': '07701234567', 'password': 'Passw0rd!x'}, format='json')
+                        {'username': '07701234567', 'password': 'Zx9!kQ2#long'}, format='json')
         assert r.status_code == 200, r.data
-        assert r.data['user']['username'] == named.username
+        assert r.data['user']['username'] == owner.username
+
+    def test_a_username_with_letters_is_not_read_as_a_phone(self, client):
+        User.objects.create_user(username='ali07701234567', password='Passw0rd!x')
+        User.objects.create_user(username='other', password='Zx9!kQ2#long', phone='07701234567')
+        r = client.post(reverse('login'),
+                        {'username': 'ali07701234567', 'password': 'Passw0rd!x'}, format='json')
+        assert r.status_code == 200, r.data
 
 
 class TestPasswordResetByEmailNoLongerCrashes:

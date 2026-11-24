@@ -87,6 +87,19 @@ class UserSerializer(serializers.ModelSerializer):
                             'email_verified', 'phone_verified', 'identity_verified',
                             'store_badges', 'date_joined']
 
+    def validate(self, attrs):
+        # Where a reset would go, so adding one counts as changing it.
+        # See identity_proof.
+        request = self.context.get('request')
+        if self.instance is not None and request is not None:
+            for field in ('phone', 'email'):
+                before = getattr(self.instance, field) or ''
+                if field in attrs and (attrs[field] or '').lower() != before.lower():
+                    from .identity_proof import require_proof
+                    require_proof(request)
+                    break
+        return attrs
+
     def validate_phone(self, value):
         # As at sign-up: canonical, and a taken number is a field error, not
         # the database's.

@@ -40,6 +40,18 @@ class LoginUsernameThrottle(_RequestFieldThrottle):
     scope = 'auth_login_account'
     field = 'username'
 
+    def get_cache_key(self, request, view):
+        key = super().get_cache_key(request, view)
+        if key is None:
+            return None
+        # Per account, not per spelling: '0780…', '+964 780…' and the username
+        # each had a bucket of their own.
+        from .login_identifier import account_for
+        account = account_for(request.data.get(self.field))
+        if account is None:
+            return key
+        return self.cache_format % {'scope': self.scope, 'ident': 'account-%s' % account.pk}
+
 
 class PasswordResetEmailThrottle(_RequestFieldThrottle):
     """Reset-code requests and confirmations for one email — the confirm

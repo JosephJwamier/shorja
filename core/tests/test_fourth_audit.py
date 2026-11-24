@@ -90,8 +90,8 @@ def test_query_growth(w, url):
 
 def test_two_deleted_accounts(w):
     a, b = user('da'), user('db')
-    x = api(a).post('/api/users/delete-account/').status_code
-    y = api(b).post('/api/users/delete-account/').status_code
+    x = api(a).post('/api/users/delete-account/', {'current_password': 'x'}, format='json').status_code
+    y = api(b).post('/api/users/delete-account/', {'current_password': 'x'}, format='json').status_code
     assert (x, y) == (200, 200), (x, y)
 
 
