@@ -521,6 +521,9 @@ def _email_is_proven(decoded):
     return decoded.get('email_verified') is True and provider == 'google.com'
 
 
+from .reserved_names import is_reserved_username  # noqa: E402
+
+
 def unique_username(email, name):
     """A username derived from the email local-part, falling back to the
     display name, with a numeric suffix on collision."""
@@ -530,7 +533,7 @@ def unique_username(email, name):
 
     username = base
     suffix = 1
-    while User.objects.filter(username=username).exists():
+    while is_reserved_username(username) or User.objects.filter(username=username).exists():
         suffix += 1
         username = f"{base}{suffix}"
     return username

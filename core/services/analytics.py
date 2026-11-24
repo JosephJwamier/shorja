@@ -14,6 +14,7 @@ instead of a "platform revenue" figure that doesn't exist in the data.
 from datetime import timedelta
 from decimal import Decimal
 
+from django.conf import settings
 from django.core.cache import cache
 from django.db.models import Count, F, Q, Sum
 from django.db.models.functions import Coalesce, TruncDate
@@ -39,7 +40,8 @@ def _real_users():
     """Registered users, excluding the fixed system support account
     (core/services/support.py) — it's not a real signup and shouldn't
     inflate registration KPIs."""
-    return User.objects.exclude(username=SUPPORT_USERNAME)
+    return User.objects.exclude(
+        username__in=[SUPPORT_USERNAME, settings.PLATFORM_ACCOUNT_USERNAME])
 
 
 def _registration_counts(now):

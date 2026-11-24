@@ -10,6 +10,7 @@ from .wallet_utils import (
     refund_to_buyer,
     release_reservation_payment,
     complete_reservation,
+    ItemWithdrawnError,
     OutOfStockError,
     cancel_pending_commission,
     forfeit_deposit,
@@ -301,6 +302,19 @@ class UserViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        if AuctionListing.objects.filter(status='active').filter(
+                Q(item__owner=user) | Q(bids__bidder=user)).exists():
+            return Response(
+                {'success': False, 'message': 'لديك مزاد جارٍ أو مزايدة قائمة — انتظر انتهاء المزاد قبل حذف الحساب.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if Transaction.objects.filter(user=user, transaction_type='commission', status='pending').exists():
+            return Response(
+                {'success': False, 'message': 'لديك عمولة مندوب لم تُحرَّر بعد — انتظر تسويتها قبل حذف الحساب.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         has_open_dispute = Dispute.objects.filter(
             Q(reservation__buyer=user) | Q(reservation__item__owner=user),
             status__in=['open', 'investigating'],
@@ -382,6 +396,12 @@ class ItemViewSet(viewsets.ModelViewSet):
         # every other model just sees the item it already knows about).
         item = self.get_object()
 
+        if self._auction_is_being_bid_on(item):
+            return Response({
+                'success': False,
+                'message': 'لا يمكن حذف المنتج وعليه مزايدات — أنهِ المزاد أولاً',
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         if item.status != 'archived':
             reason = (request.data.get('reason') or '').strip() or 'حذف بواسطة المالك عبر التطبيق'
             archive_item(item, reason=reason, actor=request.user)
@@ -391,6 +411,19 @@ class ItemViewSet(viewsets.ModelViewSet):
             'message': 'تم حذف المنتج بنجاح',
             'data': None,
         })
+
+    @staticmethod
+    def _auction_is_being_bid_on(item):
+        return Bid.objects.filter(auction__item=item, auction__status='active').exists()
+
+    def update(self, request, *args, **kwargs):
+        # People have put money on what the listing says it is.
+        if self._auction_is_being_bid_on(self.get_object()):
+            return Response({
+                'success': False,
+                'message': 'لا يمكن تعديل المنتج وعليه مزايدات',
+            }, status=status.HTTP_400_BAD_REQUEST)
+        return super().update(request, *args, **kwargs)
 
     def perform_update(self, serializer):
         """
@@ -1214,6 +1247,7 @@ from .notifications import (
 )
 from .models import DeliveryOrder
 from .serializers import DeliveryOrderSerializer
+from .delivery_utils import hand_over_batch_fee, record_receipt
 from .delivery_utils import (
     create_outbound_delivery_order,
     create_return_delivery_order,
@@ -1828,7 +1862,7 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                 if winning_bid:
                     # Refund losers + turn the win into a reservation the winner must complete
                     reservation = self._finalize_auction_payments(auction)
-                else:
+                elif auction.item.status != 'archived':
                     auction.item.status = 'draft'
                     auction.item.save(update_fields=['status'])
 
@@ -3711,6 +3745,40 @@ def _mark_reservation_received(reservation):
     release_reservation_payment(reservation)
 
 
+class AddressNotChangeable(Exception):
+    """The new address costs a different fee that cannot be charged here."""
+
+
+def _reprice_delivery(reservation):
+    """The buyer moved a paid order before it was sent: what the trip to the new
+    address costs is what they pay. Prepaid, the difference moves now; on cash
+    it is in what the courier will collect. Raises ValueError when the wallet
+    cannot cover it. Caller holds the reservation's lock."""
+    from .delivery_utils import compute_delivery_fee
+    from .services.installments.service import live_plan_for
+
+    if reservation.status != 'completed':
+        # Not paid yet: the fee is computed at payment. But a request already
+        # priced at the financier must not move under them.
+        if reservation.installment_plans.filter(state__in=['requested', 'confirming']).exists():
+            raise AddressNotChangeable('لديك طلب تقسيط قيد المراجعة على هذا العنوان — ألغِه أولاً')
+        return
+    fee = compute_delivery_fee(reservation)
+    difference = fee - reservation.delivery_fee
+    if difference == 0:
+        return
+    if not reservation.is_deposit_only:
+        if live_plan_for(reservation) is not None:
+            raise AddressNotChangeable(
+                'أجرة التوصيل إلى هذا العنوان مختلفة، وطلبك مقسّط — اختر عنواناً في المحافظة نفسها')
+        if difference > 0:
+            debit_balance(reservation.buyer, difference, 'delivery_fee',
+                          item=reservation.item, reservation=reservation)
+        else:
+            refund_to_buyer(reservation, -difference, reason='فرق أجرة التوصيل')
+    reservation.delivery_fee = fee
+
+
 def _resolve_variant(item, variant_id):
     """Which combination a reservation is for.
 
@@ -3974,6 +4042,13 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                             'message': 'تم استخدام هذا العرض مسبقاً'
                         }, status=status.HTTP_400_BAD_REQUEST)
 
+                    # The seller said yes to a price for one combination.
+                    if item.options and offer_message.offer_variant_id != variant.pk:
+                        return Response({
+                            'success': False,
+                            'message': 'هذا العرض لخيار آخر من المنتج — قدّم عرضاً على الخيار الذي تريده'
+                        }, status=status.HTTP_400_BAD_REQUEST)
+
                     if quantity != offer_message.offer_quantity:
                         return Response({
                             'success': False,
@@ -4043,6 +4118,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                     applied_coupon=coupon_collection,
                     coupon_discount=coupon_discount,
                     applied_offer=offer_message,
+                    warranty_days=item.warranty_days,
                     platform_commission_percent=commission_percent,
                     platform_commission_amount=commission_amount_platform,
                 )
@@ -4188,6 +4264,13 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 'data': ReservationSerializer(reservation, context={'request': request}).data
             }, status=status.HTTP_200_OK)
 
+        except ItemWithdrawnError as e:
+            return Response({
+                'success': False,
+                'code': 'item_withdrawn',
+                'message': 'لم يعد المنتج معروضاً للبيع، ولم يُخصم منك شيء',
+                'errors': str(e)
+            }, status=status.HTTP_400_BAD_REQUEST)
         except OutOfStockError as e:
             return Response({
                 'success': False,
@@ -4244,8 +4327,28 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 'message': 'Delivery location not found or does not belong to you'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        reservation.delivery_location = location
-        reservation.save(update_fields=['delivery_location'])
+        try:
+            with transaction.atomic():
+                reservation = Reservation.objects.select_for_update().select_related(
+                    'item', 'buyer').get(pk=reservation.pk)
+                if reservation.status not in ('pending', 'completed') or \
+                        reservation.delivery_orders.filter(direction='outbound').exists():
+                    return Response({
+                        'success': False,
+                        'message': 'لا يمكن تغيير العنوان الآن'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                reservation.delivery_location = location
+                _reprice_delivery(reservation)
+                reservation.save(update_fields=['delivery_location', 'delivery_fee'])
+        except AddressNotChangeable as e:
+            return Response({'success': False, 'message': str(e)},
+                            status=status.HTTP_400_BAD_REQUEST)
+        except ValueError:
+            return Response({
+                'success': False,
+                'code': 'insufficient_balance',
+                'message': 'رصيدك لا يكفي لفرق أجرة التوصيل إلى العنوان الجديد'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         return Response({
             'success': True,
@@ -4539,6 +4642,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                         'message': 'لا يمكن الإلغاء — استلمت شركة التوصيل المنتج بالفعل'
                     }, status=status.HTTP_400_BAD_REQUEST)
                 if outbound:
+                    hand_over_batch_fee(reservation, outbound)
                     outbound.status = 'cancelled'
                     outbound.save(update_fields=['status'])
                 # An auction winner backing out alone forfeits the deposit, as
@@ -4884,16 +4988,16 @@ class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
                 'message': f'Cannot confirm receipt. Current status: {delivery_order.status}'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        delivery_order.status = 'confirmed'
-        delivery_order.confirmed_at = timezone.now()
-        update_fields = ['status', 'confirmed_at']
-
-        if delivery_order.cash_to_collect > 0:
-            delivery_order.cash_collected = True
-            delivery_order.cash_collected_at = timezone.now()
-            update_fields += ['cash_collected', 'cash_collected_at']
-
-        delivery_order.save(update_fields=update_fields)
+        with transaction.atomic():
+            # Re-read: a refusal may have landed since.
+            Reservation.objects.select_for_update().get(pk=delivery_order.reservation_id)
+            delivery_order = DeliveryOrder.objects.select_for_update().get(pk=delivery_order.pk)
+            if delivery_order.status != 'delivered':
+                return Response({
+                    'success': False,
+                    'message': f'Cannot confirm receipt. Current status: {delivery_order.status}'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            record_receipt(delivery_order)
 
         if delivery_order.cash_collected:
             try:
@@ -4941,6 +5045,19 @@ class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
 
         try:
             with transaction.atomic():
+                # Settled already (released, or received), there is nothing at
+                # the door to refuse: a complaint from here is a dispute.
+                # Refusing after release paid the seller the deposit again.
+                reservation = Reservation.objects.select_for_update().select_related(
+                    'item', 'buyer').get(pk=reservation.pk)
+                delivery_order = DeliveryOrder.objects.select_for_update().get(
+                    pk=delivery_order.pk)
+                if (delivery_order.status != 'delivered' or reservation.status != 'completed'
+                        or reservation.payment_released_to_seller):
+                    return Response({
+                        'success': False,
+                        'message': 'انتهت تسوية هذا الطلب — افتح نزاعاً إن كانت لديك مشكلة'
+                    }, status=status.HTTP_400_BAD_REQUEST)
                 delivery_order.status = 'refused'
                 delivery_order.refused_at = timezone.now()
                 delivery_order.failure_reason = reason
@@ -5097,6 +5214,19 @@ class DisputeViewSet(viewsets.ModelViewSet):
                     'success': False,
                     'message': f'Cannot file a dispute on this reservation. Current status: {reservation.status}'
                 }, status=status.HTTP_400_BAD_REQUEST)
+
+            # A settled sale stays settled: the warranty, plus a few days for
+            # a complaint about its last day.
+            if reservation and reservation.status == 'confirmed':
+                from django.conf import settings
+                since = (reservation.received_at or reservation.buyer_approved_at
+                         or reservation.payment_released_at or reservation.completed_at)
+                window = timedelta(days=reservation.warranty_days + settings.DISPUTE_GRACE_DAYS)
+                if since and timezone.now() > since + window:
+                    return Response({
+                        'success': False,
+                        'message': 'انتهت مدة الضمان، ولا يمكن فتح نزاع على هذا الطلب'
+                    }, status=status.HTTP_400_BAD_REQUEST)
 
             dispute = Dispute.objects.create(
                 item=item,
@@ -5790,6 +5920,7 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                     expires_at=expiry_time,
                     representative=representative_assignment.representative,
                     representative_assignment=representative_assignment,
+                    warranty_days=item.warranty_days,
                     commission_amount=commission_amount,
                     platform_commission_percent=platform_percent,
                     platform_commission_amount=platform_amount,
@@ -6600,14 +6731,24 @@ class ChatViewSet(viewsets.ModelViewSet):
         quantity = serializer.validated_data['quantity']
         message_text = serializer.validated_data.get('message', '')
 
-        if quantity > chat.item.quantity:
+        with transaction.atomic():
+            variant, variant_error = _resolve_variant(
+                chat.item, serializer.validated_data.get('variant_id'))
+        if variant_error:
+            return Response({'success': False, 'message': variant_error},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        if quantity > variant.quantity:
             return Response({
                 'success': False,
-                'message': f'الكمية المتوفرة من هذا المنتج {chat.item.quantity} فقط'
+                'message': f'الكمية المتوفرة من هذا المنتج {variant.quantity} فقط'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             content = f"Price offer: {offer_amount} for {quantity} item(s)"
+            if chat.item.options:
+                # The seller answers for what they can see.
+                content += ' — ' + ' / '.join(str(x) for x in (variant.attributes or {}).values())
             if message_text:
                 content += f"\n{message_text}"
 
@@ -6618,6 +6759,7 @@ class ChatViewSet(viewsets.ModelViewSet):
                 content=content,
                 offer_amount=offer_amount,
                 offer_quantity=quantity,
+                offer_variant=variant if chat.item.options else None,
                 offer_status='pending'
             )
 
@@ -8445,7 +8587,7 @@ class WalletViewSet(viewsets.ViewSet):
                             status=status.HTTP_400_BAD_REQUEST)
 
         amount = serializer.validated_data['amount']
-        card_last4 = serializer.validated_data.get('card_last4', '')
+        account_number = serializer.validated_data['account_number']
 
         try:
             with transaction.atomic():
@@ -8462,7 +8604,9 @@ class WalletViewSet(viewsets.ViewSet):
                 wd = WithdrawalRequest.objects.create(
                     user=request.user,
                     amount=amount,
-                    card_last4=card_last4,
+                    card_last4=account_number[-4:],
+                    account_number=account_number,
+                    holder_name=serializer.validated_data['holder_name'].strip(),
                     status='pending',
                 )
 

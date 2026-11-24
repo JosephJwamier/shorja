@@ -93,6 +93,7 @@ def create_winner_reservation(auction, winning_bid):
         buyer=winner,
         quantity=1,
         deposit_amount=deposit,
+        warranty_days=auction.item.warranty_days,
         total_price=winning_bid.amount,
         expires_at=timezone.now() + timedelta(hours=WINNER_RESPONSE_WINDOW_HOURS),
         delivery_location=delivery_location,

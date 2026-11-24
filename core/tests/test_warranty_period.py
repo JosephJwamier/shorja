@@ -174,14 +174,16 @@ def test_release_payments_after_week_skips_undelivered_reservation():
     assert reservation.status == 'completed'
 
 
-def test_complete_reservation_snapshots_item_warranty_days():
+def test_the_warranty_is_the_one_frozen_at_reservation():
     owner, buyer = make_user('owner4'), make_user('buyer4', balance=Decimal('1000.00'))
     item = make_item(owner, warranty_days=3)
     reservation = Reservation.objects.create(
         item=item, buyer=buyer, quantity=1,
         deposit_amount=Decimal('100.00'), total_price=Decimal('100.00'),
-        expires_at=timezone.now() + timedelta(days=1),
+        expires_at=timezone.now() + timedelta(days=1), warranty_days=3,
     )
+    item.warranty_days = 1
+    item.save(update_fields=['warranty_days'])
     complete_reservation(reservation, payment_type='full')
     reservation.refresh_from_db()
     assert reservation.warranty_days == 3

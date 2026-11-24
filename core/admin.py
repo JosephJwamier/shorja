@@ -1375,7 +1375,10 @@ class WithdrawalRequestAdmin(ModelAdmin):
     search_fields = ('user__username',)
     raw_id_fields = ('user', 'reviewed_by')
     list_select_related = ('user', 'reviewed_by')
-    readonly_fields = ('user', 'amount', 'card_last4', 'status', 'reviewed_by', 'reviewed_at', 'created_at')
+    readonly_fields = ('user', 'amount', 'holder_name', 'card_last4', 'status', 'reviewed_by',
+                       'reviewed_at', 'created_at')
+    # Shown on the review page alone, while there is something to pay.
+    exclude = ('account_number',)
 
     def has_add_permission(self, request):
         return False

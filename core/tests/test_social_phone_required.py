@@ -53,8 +53,8 @@ SUPPORT_USERNAME = 'الدعم_الفني'
 
 
 def accounts():
-    """Real accounts: everything but the seeded support user."""
-    return User.objects.exclude(username=SUPPORT_USERNAME)
+    """Real accounts: everything but the seeded system users."""
+    return User.objects.exclude(username__in=[SUPPORT_USERNAME, 'platform'])
 
 
 @pytest.fixture

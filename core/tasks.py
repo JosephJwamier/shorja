@@ -316,7 +316,9 @@ def release_payments_after_week():
     - Release payment to seller (minus commission if applicable)
     - Release commission to representative if applicable
     """
+    from .delivery_utils import presume_receipt
     from .models import Reservation, Dispute
+    from .notifications import notify_cash_collected
     from .wallet_utils import release_reservation_payment
 
     # Coarse pre-filter using the shortest possible warranty (1 day) so the
@@ -347,12 +349,23 @@ def release_payments_after_week():
                 had_commission = bool(reservation.representative and reservation.commission_amount)
 
                 with transaction.atomic():
+                    # Re-read under the lock: a dispute or a refusal may have
+                    # arrived since the list was built.
+                    locked = Reservation.objects.select_for_update().get(pk=reservation.pk)
+                    if not locked.can_release_payment():
+                        continue
+                    cash_order = presume_receipt(reservation)
                     release_reservation_payment(reservation)
                     # Warranty period passed with no dispute — the sale is settled.
                     reservation.status = 'confirmed'
                     reservation.save(update_fields=['status'])
 
                 logger.info(f"Auto-released payment for reservation {reservation.id}")
+                if cash_order is not None:
+                    try:
+                        notify_cash_collected(cash_order)
+                    except Exception as e:
+                        logger.error(f"Failed to send cash-collected notification: {e}")
                 if had_commission:
                     send_commission_paid_notification.delay(
                         reservation.id,
@@ -465,8 +478,9 @@ def process_ended_auctions():
                 else:
                     # No bids — mark ended and release item
                     auction.status = 'ended'
-                    auction.item.status = 'draft'
-                    auction.item.save(update_fields=['status'])
+                    if auction.item.status != 'archived':
+                        auction.item.status = 'draft'
+                        auction.item.save(update_fields=['status'])
                     auction.save(update_fields=['status'])
 
                 processed_count += 1
@@ -533,7 +547,7 @@ def finalize_live_auction(auction_id):
             winning_bid = auction.bids.filter(is_winning=True).first()
             if winning_bid:
                 reservation = AuctionViewSet._finalize_auction_payments(auction)
-            else:
+            elif auction.item.status != 'archived':
                 auction.item.status = 'draft'
                 auction.item.save(update_fields=['status'])
 

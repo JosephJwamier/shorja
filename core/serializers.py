@@ -10,6 +10,7 @@ import re
 import uuid
 
 from .phone_utils import to_e164
+from django.db.models import Q
 from .models import (
     Item, ItemImage, ItemVariant, FixedPriceListing, AuctionListing,
     Bid, Reservation, Representative, ItemTransfer, Category,
@@ -61,6 +62,13 @@ def store_name_of(user):
     return store.name if store is not None and store.is_active else ''
 
 
+def check_username(value):
+    from .reserved_names import is_reserved_username
+    if is_reserved_username(value):
+        raise serializers.ValidationError('هذا الاسم محجوز')
+    return value
+
+
 class UserSerializer(serializers.ModelSerializer):
     """User serializer"""
     avatar_url = serializers.SerializerMethodField()
@@ -77,6 +85,12 @@ class UserSerializer(serializers.ModelSerializer):
         read_only_fields = ['trust_score', 'total_sales', 'total_purchases',
                             'email_verified', 'phone_verified', 'identity_verified',
                             'store_badges']
+
+    def validate_username(self, value):
+        # Someone already holding the name may still save the rest of a form.
+        if self.instance is not None and value == self.instance.username:
+            return value
+        return check_username(value)
 
     # Fields that identify or reach the person. Shown only to the account
     # itself and to staff; stripped for everyone else, because this serializer
@@ -210,6 +224,18 @@ class LocationCreateUpdateSerializer(serializers.ModelSerializer):
         user = self.context.get('request').user
         is_primary = data.get('is_primary', False)
 
+        # A paid order still waiting to be sent was priced to this governorate.
+        # Moving the saved address under it would ship across the country for
+        # the price of across town; the order's own address change re-prices.
+        state = data.get('state')
+        if self.instance is not None and state and state != self.instance.state:
+            if Reservation.objects.filter(
+                    delivery_location=self.instance, status='completed').exclude(
+                    delivery_orders__direction='outbound').exists():
+                raise serializers.ValidationError({
+                    'state': 'هذا العنوان مستعمل في طلب مدفوع لم يُرسل بعد — أضف عنواناً جديداً '
+                             'وغيّر عنوان الطلب منه'})
+
         if is_primary:
             # If setting as primary, check if updating existing or creating new
             instance = self.instance
@@ -295,6 +321,8 @@ class ItemVariantSerializer(serializers.ModelSerializer):
         fields = ['id', 'attributes', 'sku', 'quantity', 'price', 'cost_price',
                   'effective_price', 'image', 'image_url', 'is_active']
         read_only_fields = ['id', 'effective_price', 'image_url']
+        extra_kwargs = {'price': {'min_value': Decimal('0.01')},
+                        'cost_price': {'min_value': Decimal('0')}}
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -502,8 +530,9 @@ class ItemSerializer(serializers.ModelSerializer):
             'current_location', 'location_history', 'images',
             'distance_km', 'created_at', 'updated_at', 'representative_info'
         ]
+        # is_daily_deal is the platform's pick, made in the admin.
         read_only_fields = ['owner', 'current_holder', 'status', 'current_location',
-                            'rating', 'sold_count']
+                            'rating', 'sold_count', 'is_daily_deal']
 
     def to_internal_value(self, data):
         return super().to_internal_value(decode_json_form_fields(data))
@@ -1802,11 +1831,11 @@ class MessageSerializer(serializers.ModelSerializer):
         model = Message
         fields = [
             'id', 'chat', 'sender', 'sender_name', 'message_type',
-            'content', 'offer_amount', 'offer_quantity', 'offer_status', 'attachment_url',
+            'content', 'offer_amount', 'offer_quantity', 'offer_variant', 'offer_status', 'attachment_url',
             'is_read', 'is_deleted_by_sender', 'is_deleted_by_receiver',
             'created_at', 'edited_at', 'can_edit', 'can_delete', 'is_redeemed'
         ]
-        read_only_fields = ['sender', 'message_type', 'created_at', 'edited_at']
+        read_only_fields = ['sender', 'message_type', 'offer_variant', 'created_at', 'edited_at']
 
     def get_is_redeemed(self, obj):
         return hasattr(obj, 'redeemed_in_reservation')
@@ -1872,7 +1901,9 @@ class MessageCreateSerializer(serializers.Serializer):
 
 class MessageOfferSerializer(serializers.Serializer):
     """Serializer for sending price offers"""
-    offer_amount = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
+    offer_amount = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('1'))
+    # Required when the item has options — see views._resolve_variant.
+    variant_id = serializers.IntegerField(required=False, allow_null=True)
     quantity = serializers.IntegerField(default=1, min_value=1)
     message = serializers.CharField(required=False, allow_blank=True)
 
@@ -2105,6 +2136,22 @@ class ChatCreateSerializer(serializers.Serializer):
         return data
 
 
+def has_bought(user, *, item=None, owner=None):
+    """Did `user` buy this item, or anything from this seller, and did it reach
+    the point of having an opinion: received, or paid for and fought over."""
+    sales = Reservation.objects.filter(buyer=user)
+    if item is not None:
+        sales = sales.filter(item=item)
+    if owner is not None:
+        sales = sales.filter(item__owner=owner)
+    return sales.filter(
+        Q(status='confirmed')
+        | Q(status__in=['disputed', 'refunded'], completed_at__isnull=False)
+        | Q(status='completed', delivery_orders__direction='outbound',
+            delivery_orders__status__in=['delivered', 'confirmed'])
+    ).exists()
+
+
 class RatingSerializer(serializers.ModelSerializer):
     """Rating serializer"""
     rater = UserSerializer(read_only=True)
@@ -2139,6 +2186,10 @@ class RatingCreateSerializer(serializers.ModelSerializer):
             request = self.context.get('request')
             if rated_user == request.user:
                 raise serializers.ValidationError("You cannot rate yourself")
+            # A rating is about a deal: one of the two sold to the other.
+            if not (has_bought(request.user, owner=rated_user)
+                    or has_bought(rated_user, owner=request.user)):
+                raise serializers.ValidationError("التقييم متاح بعد إتمام بيع بينكما")
 
             return data
         except User.DoesNotExist:
@@ -2180,6 +2231,9 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     # عليه لوحة الإدارة والبحث فيها في ٢٧٠ موضعاً. يُولَّد صامتاً هنا
     # ولا يظهر في أي شاشة — كـ id تماماً.
     username = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_username(self, value):
+        return check_username(value)
 
     class Meta:
         model = User
@@ -3185,7 +3239,15 @@ class DepositRequestSerializer(serializers.ModelSerializer):
 
 class WithdrawalCreateSerializer(serializers.Serializer):
     amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('1.00'))
-    card_last4 = serializers.CharField(max_length=4, required=False, allow_blank=True)
+    account_number = serializers.CharField(max_length=40, write_only=True)
+    holder_name = serializers.CharField(max_length=120)
+
+    def validate_account_number(self, value):
+        from .services.installments.cards import InvalidCardNumber, validate_account
+        try:
+            return validate_account(value)
+        except InvalidCardNumber as exc:
+            raise serializers.ValidationError(str(exc))
 
 
 class WithdrawalRequestSerializer(serializers.ModelSerializer):
@@ -3193,7 +3255,7 @@ class WithdrawalRequestSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = WithdrawalRequest
-        fields = ['id', 'username', 'amount', 'status', 'card_last4',
+        fields = ['id', 'username', 'amount', 'status', 'card_last4', 'holder_name',
                   'admin_notes', 'created_at', 'reviewed_at']
 
 
@@ -3241,7 +3303,14 @@ class ProductReviewCreateSerializer(serializers.ModelSerializer):
         item = data.get('item')
         if item and item.owner == request.user:
             raise serializers.ValidationError("لا يمكنك تقييم منتجك الخاص")
+        if self.instance is None and item and not has_bought(request.user, item=item):
+            raise serializers.ValidationError("يمكنك تقييم المنتج بعد شرائه واستلامه")
         return data
+
+    def update(self, instance, validated_data):
+        # An edit changes what was said, not what it was said about.
+        validated_data.pop('item', None)
+        return super().update(instance, validated_data)
 
     def create(self, validated_data):
         return ProductReview.objects.create(reviewer=self.context['request'].user, **validated_data)
@@ -3276,7 +3345,13 @@ class StoreReviewCreateSerializer(serializers.ModelSerializer):
         store = data.get('store')
         if store and store.user == request.user:
             raise serializers.ValidationError("لا يمكنك تقييم متجرك الخاص")
+        if self.instance is None and store and not has_bought(request.user, owner=store.user):
+            raise serializers.ValidationError("يمكنك تقييم المتجر بعد الشراء منه")
         return data
+
+    def update(self, instance, validated_data):
+        validated_data.pop('store', None)
+        return super().update(instance, validated_data)
 
     def create(self, validated_data):
         return StoreReview.objects.create(reviewer=self.context['request'].user, **validated_data)

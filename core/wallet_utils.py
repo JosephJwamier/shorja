@@ -136,6 +136,10 @@ class OutOfStockError(ValueError):
     """What the buyer is paying for was sold while they were deciding."""
 
 
+class ItemWithdrawnError(OutOfStockError):
+    """The item was taken down, by its seller or by a moderator."""
+
+
 def cancel_pending_commission(reservation):
     """The representative's pending row: this sale will never pay it."""
     Transaction.objects.filter(
@@ -196,7 +200,8 @@ def forfeit_deposit(reservation, deposit):
 def unlist_auction_item(item, reservation):
     """An auction's listing ended when it was won; with nothing left selling
     the item it goes back to draft for the seller to relist."""
-    if reservation.auction_id and getattr(item, 'fixed_listing', None) is None:
+    if (reservation.auction_id and item.status != 'archived'
+            and getattr(item, 'fixed_listing', None) is None):
         item.status = 'draft'
         item.save(update_fields=['status'])
 
@@ -295,6 +300,8 @@ def complete_reservation(reservation, payment_type):
     # what was left and charge the second one for nothing.
     # Represented sales are the exception: theirs was taken at creation.
     from .models import ItemVariant
+    if Item.objects.filter(pk=reservation.item_id, status='archived').exists():
+        raise ItemWithdrawnError('لم يعد المنتج معروضاً للبيع')
     variant = reservation.stock_variant
     if variant is not None and not reservation.representative_id:
         variant = ItemVariant.objects.select_for_update().get(pk=variant.pk)
@@ -334,9 +341,8 @@ def complete_reservation(reservation, payment_type):
             reservation=reservation
         )
     reservation.delivery_fee = delivery_fee
-    # Snapshot the item's current warranty period so a later edit by the
-    # seller doesn't retroactively change the terms of this order.
-    reservation.warranty_days = reservation.item.warranty_days
+    # warranty_days is not touched here: it was frozen when the buyer reserved.
+    # Copying it at payment let the seller shorten it in between.
 
     # 'completed' means the buyer finished their in-app payment step —
     # deposit-only (remainder collected in cash at delivery) or full —
@@ -347,7 +353,7 @@ def complete_reservation(reservation, payment_type):
     reservation.status = 'completed'
     reservation.is_deposit_only = (payment_type == 'deposit')
     reservation.completed_at = timezone.now()
-    reservation.save(update_fields=['status', 'is_deposit_only', 'completed_at', 'delivery_fee', 'warranty_days'])
+    reservation.save(update_fields=['status', 'is_deposit_only', 'completed_at', 'delivery_fee'])
 
     # Locked and checked above, before the charge.
     if variant is not None and not reservation.representative_id:

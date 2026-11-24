@@ -10,7 +10,9 @@ API's behavior.
 from django.db import transaction
 from django.utils import timezone
 
-from ..delivery_utils import create_return_delivery_order, get_active_delivery_company
+from ..delivery_utils import (
+    create_return_delivery_order, get_active_delivery_company, presume_receipt,
+)
 from ..models import Dispute, Reservation
 from ..wallet_utils import (
     cancel_pending_commission, claw_back_release, delivery_fee_in_pot,
@@ -68,6 +70,11 @@ def resolve_dispute(dispute, *, resolution_action, resolution='', admin_notes=''
             # can be given back while the buyer keeps the goods.
             if partial_refund_amount > reservation.amount_charged - delivery_fee_in_pot(reservation):
                 raise DisputeResolutionError('partial_refund_amount cannot exceed the amount charged')
+
+        # The goods stay with the buyer under all three, so a delivered order
+        # nobody confirmed is a received one, cash included.
+        if reservation and resolution_action in ('pay_seller', 'no_action', 'partial_refund'):
+            presume_receipt(reservation)
 
         dispute.status = 'resolved'
         dispute.resolution = resolution

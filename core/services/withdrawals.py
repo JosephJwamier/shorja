@@ -43,10 +43,11 @@ def approve_withdrawal(withdrawal, *, reviewed_by, admin_notes=''):
             status='completed',
         )
         withdrawal.status = 'approved'
+        withdrawal.account_number = ''
         withdrawal.reviewed_by = reviewed_by
         withdrawal.reviewed_at = timezone.now()
         withdrawal.admin_notes = admin_notes
-        withdrawal.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'admin_notes'])
+        withdrawal.save(update_fields=['status', 'account_number', 'reviewed_by', 'reviewed_at', 'admin_notes'])
 
     return withdrawal
 
@@ -60,9 +61,10 @@ def reject_withdrawal(withdrawal, *, reviewed_by, admin_notes=''):
         wallet.release_hold(withdrawal.amount)
 
         withdrawal.status = 'rejected'
+        withdrawal.account_number = ''
         withdrawal.reviewed_by = reviewed_by
         withdrawal.reviewed_at = timezone.now()
         withdrawal.admin_notes = admin_notes
-        withdrawal.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'admin_notes'])
+        withdrawal.save(update_fields=['status', 'account_number', 'reviewed_by', 'reviewed_at', 'admin_notes'])
 
     return withdrawal

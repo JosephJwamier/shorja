@@ -542,7 +542,9 @@ class Item(models.Model):
         total = self.variants.filter(is_active=True).aggregate(
             t=Sum('quantity'))['t'] or 0
         self.quantity = total
-        if self.status != 'draft':
+        # Nor does stock bring back what was taken down: an item a moderator
+        # archived was republished by editing its quantity, or by a cancel.
+        if self.status not in ('draft', 'archived'):
             self.status = 'sold' if total == 0 else 'active'
         self.save(update_fields=['quantity', 'status'])
 
@@ -1129,7 +1131,7 @@ class Reservation(models.Model):
     # computed from the active delivery company's intra/inter-governorate
     # rate (0 if no active company at that time). See ReservationViewSet.complete.
     delivery_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
-    # Snapshot of item.warranty_days taken when the reservation completes
+    # Snapshot of item.warranty_days taken when the buyer reserves
     # (see wallet_utils.complete_reservation) — a later edit to the item's
     # warranty by the seller must not retroactively change the terms of an
     # already in-flight order. See can_release_payment below.
@@ -2006,6 +2008,9 @@ class Message(models.Model):
     # (not a per-unit price)
     offer_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     offer_quantity = models.PositiveIntegerField(null=True, blank=True, default=1)
+    # Which combination the price was offered for; null for a plain item.
+    offer_variant = models.ForeignKey(
+        'ItemVariant', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     offer_status = models.CharField(
         max_length=20,
         choices=[
@@ -2771,6 +2776,11 @@ class WithdrawalRequest(models.Model):
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     card_last4 = models.CharField(max_length=4, blank=True)  # destination card
+    # Where to send the money. Kept only while the request is open — the admin
+    # needs it to pay, and nobody needs it after the decision (the same rule as
+    # an installment request's account number). Never returned by the API.
+    account_number = models.CharField(max_length=20, blank=True)
+    holder_name = models.CharField(max_length=120, blank=True)
     admin_notes = models.TextField(blank=True)
     reviewed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,

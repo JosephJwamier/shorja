@@ -39,10 +39,18 @@ def platform_account():
     (inactive for login) — nobody signs in as the platform."""
     User = get_user_model()
     username = getattr(settings, 'PLATFORM_ACCOUNT_USERNAME', 'platform')
+    # Never a person's account. The name is reserved (reserved_names) and the
+    # row is made by a migration; should a live account hold it all the same,
+    # the money goes to a system row beside it, not to them.
+    if User.objects.filter(username=username, is_active=True).exists():
+        username = '%s__system' % username
     account, created = User.objects.get_or_create(
         username=username,
         defaults={'is_active': False, 'first_name': 'الشورجة', 'last_name': 'المنصّة'},
     )
+    if created:
+        account.set_unusable_password()
+        account.save(update_fields=['password'])
     return account
 
 

@@ -1082,6 +1082,9 @@ INSTALLMENT_REVIEW_HOURS = int(os.environ.get('INSTALLMENT_REVIEW_HOURS', '72'))
 INSTALLMENT_ROUNDING_STEP = os.environ.get('INSTALLMENT_ROUNDING_STEP', '500')
 
 # =============================================================================
+# How long after the warranty ends a settled sale can still be disputed.
+DISPUTE_GRACE_DAYS = int(os.environ.get('DISPUTE_GRACE_DAYS', '3'))
+
 # Platform commission — what الشورجة keeps from each sale, taken from the
 # SELLER when escrow is released (never added on top of what the buyer pays).
 #

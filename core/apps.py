@@ -25,7 +25,8 @@ class CoreConfig(AppConfig):
         auditlog.register(Dispute)
         auditlog.register(Transaction)
         auditlog.register(Wallet)
-        auditlog.register(WithdrawalRequest)
+        # The log keeps every value forever; an account number must not.
+        auditlog.register(WithdrawalRequest, exclude_fields=['account_number'])
         auditlog.register(DepositRequest)
         auditlog.register(User, exclude_fields=[
             'password', 'verification_code', 'verification_code_sent_at', 'fcm_token',

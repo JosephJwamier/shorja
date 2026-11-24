@@ -186,6 +186,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             'attachment_url': event.get('attachment_url'),
             'offer_amount': event.get('offer_amount'),
             'offer_quantity': event.get('offer_quantity'),
+            'offer_variant': event.get('offer_variant'),
             'offer_status': event.get('offer_status'),
         }))
 
@@ -665,6 +666,7 @@ def broadcast_chat_message(message, attachment_url=None):
                 'attachment_url': attachment_url,
                 'offer_amount': str(message.offer_amount) if message.offer_amount is not None else None,
                 'offer_quantity': message.offer_quantity,
+                'offer_variant': message.offer_variant_id,
                 'offer_status': message.offer_status,
             }
         )

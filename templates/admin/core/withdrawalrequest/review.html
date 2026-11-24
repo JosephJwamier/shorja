@@ -16,8 +16,12 @@
         <dd class="font-semibold">{{ withdrawal.amount }}</dd>
       </div>
       <div>
-        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">البطاقة</dt>
-        <dd>•••• {{ withdrawal.card_last4|default:"—" }}</dd>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">رقم الحساب أو البطاقة</dt>
+        <dd dir="ltr" class="font-semibold">{% if withdrawal.account_number %}{{ withdrawal.account_number }}{% else %}•••• {{ withdrawal.card_last4|default:"—" }}{% endif %}</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">اسم صاحب الحساب</dt>
+        <dd>{{ withdrawal.holder_name|default:"—" }}</dd>
       </div>
       <div>
         <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">تاريخ الطلب</dt>

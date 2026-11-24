@@ -165,13 +165,13 @@ def create_outbound_delivery_order(reservation):
         company=company,
         status='assigned',
         from_name=(pickup.contact_person if pickup else seller.username),
-        from_phone=(pickup.contact_phone if pickup else seller.phone),
+        from_phone=(pickup.contact_phone if pickup else seller.phone) or '',
         from_address=(pickup.get_full_address() if pickup else ''),
         from_lat=(pickup.latitude if pickup else None),
         from_lng=(pickup.longitude if pickup else None),
         from_governorate=(pickup.state if pickup else ''),
         to_name=(dropoff.contact_person if dropoff else reservation.buyer.username),
-        to_phone=(dropoff.contact_phone if dropoff else reservation.buyer.phone),
+        to_phone=(dropoff.contact_phone if dropoff else reservation.buyer.phone) or '',
         to_address=(dropoff.get_full_address() if dropoff else ''),
         to_lat=(dropoff.latitude if dropoff else None),
         to_lng=(dropoff.longitude if dropoff else None),
@@ -267,6 +267,81 @@ def combine_deliveries(reservations, company):
     return batch, orders, total_refunded
 
 
+def presume_receipt(reservation):
+    """The goods reached the buyer's door, the buyer neither refused nor
+    disputed them, and the sale is being settled without their tap: record the
+    receipt they never confirmed, and with it the cash the courier took.
+
+    Releasing on 'delivered' alone paid the seller the deposit only: the cash
+    counts once the order says it was collected, and after release nothing
+    ever looked at it again. Returns the order if cash was recorded.
+    Call inside transaction.atomic(), before the release."""
+    order = DeliveryOrder.objects.select_for_update().filter(
+        reservation=reservation, direction='outbound', status='delivered').first()
+    if order is None:
+        return None
+    return order if record_receipt(order) else None
+
+
+def record_receipt(order):
+    """Marks a locked 'delivered' order received. True if cash changed hands."""
+    now = timezone.now()
+    order.status = 'confirmed'
+    order.confirmed_at = now
+    fields = ['status', 'confirmed_at']
+    if order.cash_to_collect > 0:
+        order.cash_collected = True
+        order.cash_collected_at = now
+        fields += ['cash_collected', 'cash_collected_at']
+    order.save(update_fields=fields)
+    return order.cash_collected
+
+
+def hand_over_batch_fee(reservation, order):
+    """`reservation` is being cancelled out of a combined trip whose one fee it
+    carries. The trip still runs for the others, so one of them takes the fee
+    over; otherwise the courier drives for nothing.
+
+    Prepaid to prepaid, the fee the buyer already paid moves with it (and is
+    left out of the refund). To a cash order it is collected at the door, and a
+    prepaid carrier's own fee is refunded with the rest. A cash carrier is never
+    moved onto a prepaid order: nobody ever paid that fee.
+    Call inside transaction.atomic(), before the refund is computed."""
+    from .services.commission import delivery_commission_for
+    from .services.installments.service import live_plan_for
+
+    if order is None or not order.batch_id or reservation.delivery_fee <= 0:
+        return
+    others = list(DeliveryOrder.objects.select_for_update().select_related('reservation').filter(
+        batch_id=order.batch_id, direction='outbound', status__in=['assigned', 'picked_up'],
+        reservation__status='completed').exclude(reservation=reservation))
+    cash = [o for o in others if o.reservation.is_deposit_only]
+    prepaid = [o for o in others if not o.reservation.is_deposit_only
+               and live_plan_for(o.reservation) is None]
+    financed = live_plan_for(reservation) is not None
+    moved = not reservation.is_deposit_only and not financed and bool(prepaid)
+    heir = prepaid[0] if moved else (cash[0] if cash else None)
+    if heir is None:
+        return
+
+    fee = reservation.delivery_fee
+    percent, commission = delivery_commission_for(heir.company, fee)
+    heir.delivery_fee = fee
+    heir.platform_commission_percent = percent
+    heir.platform_commission_amount = commission
+    if not moved:
+        heir.cash_to_collect += fee
+        heir.cash_due_to_platform = heir.cash_to_collect - fee + commission
+    heir.save(update_fields=['delivery_fee', 'platform_commission_percent',
+                             'platform_commission_amount', 'cash_to_collect',
+                             'cash_due_to_platform'])
+    heir.reservation.delivery_fee = fee
+    heir.reservation.save(update_fields=['delivery_fee'])
+    if moved:
+        reservation.delivery_fee = Decimal('0.00')
+        reservation.save(update_fields=['delivery_fee'])
+
+
 def create_return_delivery_order(reservation, dispute=None):
     """
     Spawn the reverse leg (buyer -> seller) for a refused delivery or a
@@ -289,13 +364,13 @@ def create_return_delivery_order(reservation, dispute=None):
         dispute=dispute,
         status='assigned',
         from_name=(pickup.contact_person if pickup else reservation.buyer.username),
-        from_phone=(pickup.contact_phone if pickup else reservation.buyer.phone),
+        from_phone=(pickup.contact_phone if pickup else reservation.buyer.phone) or '',
         from_address=(pickup.get_full_address() if pickup else ''),
         from_lat=(pickup.latitude if pickup else None),
         from_lng=(pickup.longitude if pickup else None),
         from_governorate=(pickup.state if pickup else ''),
         to_name=(dropoff.contact_person if dropoff else seller.username),
-        to_phone=(dropoff.contact_phone if dropoff else seller.phone),
+        to_phone=(dropoff.contact_phone if dropoff else seller.phone) or '',
         to_address=(dropoff.get_full_address() if dropoff else ''),
         to_lat=(dropoff.latitude if dropoff else None),
         to_lng=(dropoff.longitude if dropoff else None),
@@ -423,8 +498,9 @@ def execute_return_refund(delivery_order):
         # An auction's listing already ended when it was won — release the
         # item back to draft rather than 'active' (there's no live listing
         # selling it anymore, unlike a fixed-price/live-session item).
-        item.status = 'draft' if reservation.auction_id else 'active'
-        item.save(update_fields=['status'])
+        if item.status != 'archived':
+            item.status = 'draft' if reservation.auction_id else 'active'
+            item.save(update_fields=['status'])
 
     cancel_pending_commission(reservation)
     reservation.status = 'refunded'
