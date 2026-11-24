@@ -224,7 +224,7 @@ def test_finalize_rejects_another_stores_reel(mock_head, client):
         'duration_seconds': 10,
     }, format='json')
 
-    assert response.status_code == 403
+    assert response.status_code == 404  # unpublished: not even there for another store
     reel.refresh_from_db()
     assert reel.status == 'pending_upload'
 

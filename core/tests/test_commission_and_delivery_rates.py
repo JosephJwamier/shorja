@@ -102,7 +102,15 @@ def test_commission_is_frozen_on_the_reservation_at_creation(client):
     r = Reservation.objects.get(buyer=buyer)
     assert r.platform_commission_percent == Decimal('8.00')
     assert r.platform_commission_amount == Decimal('16000.00')
-    assert response.data['data']['seller_net'] == '184000.00'
+    # The seller's figure, so only in the seller's payload.
+    client.force_authenticate(user=seller)
+
+    def seller_net():
+        body = client.get(f'/api/reservations/{r.id}/').json()
+        return body.get('data', body)['seller_net']
+
+    assert response.data['data']['seller_net'] is None
+    assert seller_net() == '184000.00'
     # A later rate change does not touch it.
     child.parent.commission_percent = Decimal('20'); child.parent.save()
     r.refresh_from_db()

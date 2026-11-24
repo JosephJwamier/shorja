@@ -197,13 +197,24 @@ def forfeit_deposit(reservation, deposit):
                     item=reservation.item, reservation=reservation)
 
 
-def unlist_auction_item(item, reservation):
-    """An auction's listing ended when it was won; with nothing left selling
-    the item it goes back to draft for the seller to relist."""
-    if (reservation.auction_id and item.status != 'archived'
-            and getattr(item, 'fixed_listing', None) is None):
-        item.status = 'draft'
-        item.save(update_fields=['status'])
+def park_if_unlisted(item):
+    """An 'active' item nothing sells — no price, no running auction, not in a
+    running live stream — cannot be bought and, not being a draft, could not be
+    listed either. Back to draft, where the seller can price and publish it.
+
+    That is how a product first shown in a live stream ends up once the stream
+    does, and one whose auction was won and then called off."""
+    from .models import AuctionListing, LiveSessionItem
+
+    if item.status != 'active' or getattr(item, 'fixed_listing', None) is not None:
+        return
+    if AuctionListing.objects.filter(item=item, status__in=['active', 'upcoming']).exists():
+        return
+    if LiveSessionItem.objects.filter(item=item, session__status='live',
+                                      status__in=['queued', 'now_showing']).exists():
+        return
+    item.status = 'draft'
+    item.save(update_fields=['status'])
 
 
 def claw_back_release(reservation, amount):
@@ -361,6 +372,9 @@ def complete_reservation(reservation, payment_type):
     item = Item.objects.select_for_update().get(id=reservation.item_id)
     item.sold_count += reservation.quantity
     item.save(update_fields=['sold_count'])
+    if reservation.auction_id:
+        # What is left of the item has no listing any more.
+        park_if_unlisted(item)
 
     # The sale is real from here on: write it into the seller's book so the
     # dashboard counts it alongside what they sell over the counter.

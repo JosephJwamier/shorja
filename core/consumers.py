@@ -130,7 +130,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
         """Handle incoming chat message"""
         message_content = data.get('message', '').strip()
 
-        if not message_content:
+        if not message_content or len(message_content) > 4000:
             return
 
         # Save message to database

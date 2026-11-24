@@ -102,7 +102,7 @@ def _attach_location(request, reservation, location_id):
         return None
     try:
         reservation.delivery_location = Location.objects.get(
-            id=location_id, user=request.user)
+            id=location_id, user=request.user, is_active=True)
     except Location.DoesNotExist:
         return Response({'success': False,
                          'message': 'عنوان التسليم غير موجود أو ليس لك'},

@@ -16,7 +16,7 @@ from .wallet_utils import (
     forfeit_deposit,
     release_promotions,
     settle_cancelled_auction_win,
-    unlist_auction_item,
+    park_if_unlisted,
 )
 from .services.disputes import resolve_dispute, DisputeResolutionError
 from .services.withdrawals import approve_withdrawal, reject_withdrawal, WithdrawalReviewError
@@ -195,7 +195,7 @@ class UserViewSet(viewsets.ModelViewSet):
         # the real owner could then never register.
         return Response({
             'success': False,
-            'message': 'Use /auth/register/ to create an account.'
+            'message': 'أنشئ الحساب من شاشة التسجيل'
         }, status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
     def destroy(self, request, *args, **kwargs):
@@ -228,11 +228,11 @@ class UserViewSet(viewsets.ModelViewSet):
         """Register or update the Firebase Cloud Messaging (FCM) device token"""
         fcm_token = request.data.get('fcm_token', '').strip()
         if not fcm_token:
-            return Response({'success': False, 'message': 'fcm_token is required.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'success': False, 'message': 'رمز الإشعارات مطلوب'}, status=status.HTTP_400_BAD_REQUEST)
         request.user.fcm_token = fcm_token
         request.user.save(update_fields=['fcm_token'])
         sync_user_fcm_token(request.user)
-        return Response({'success': True, 'message': 'FCM token updated successfully.'})
+        return Response({'success': True, 'message': 'حُدّث رمز الإشعارات'})
 
     # Seed weight for an explicitly-chosen interest — higher than a single
     # behavioral signal (purchase +3, follow +1) since the user stated it directly.
@@ -269,7 +269,7 @@ class UserViewSet(viewsets.ModelViewSet):
         request.user.fcm_token = None
         request.user.save(update_fields=['fcm_token'])
         sync_user_fcm_token(request.user)
-        return Response({'success': True, 'message': 'FCM token removed.'})
+        return Response({'success': True, 'message': 'أُزيل رمز الإشعارات'})
 
     @action(detail=False, methods=['post'], url_path='delete-account')
     def delete_account(self, request):
@@ -365,6 +365,21 @@ class ItemViewSet(viewsets.ModelViewSet):
     search_fields = ['title', 'name_ar', 'description']
     ordering_fields = ['created_at', 'updated_at', 'sold_count', 'rating']
     pagination_class = ItemStandardPagination
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if self.action not in ('list', 'retrieve'):
+            return queryset
+        user = self.request.user
+        if user.is_authenticated and user.is_staff:
+            return queryset
+        # Not published, or taken down: its owner's, and whoever has an order
+        # on it (their order page still opens it). Nobody else's.
+        visible = ~Q(status__in=['draft', 'archived'])
+        if user.is_authenticated:
+            visible |= Q(owner=user) | Q(current_holder=user) | Q(
+                Exists(Reservation.objects.filter(item=OuterRef('pk'), buyer=user)))
+        return queryset.filter(visible)
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -527,7 +542,7 @@ class ItemViewSet(viewsets.ModelViewSet):
 
                 response_serializer = ItemSerializer(item, context={'request': request})
 
-                message = 'Item created successfully'
+                message = 'أُضيف المنتج'
                 if created_images:
                     message += f' with {len(created_images)} image(s)'
                 if image_errors:
@@ -544,12 +559,12 @@ class ItemViewSet(viewsets.ModelViewSet):
             else:
                 return Response({
                     'success': False,
-                    'message': 'Validation failed. Please check the required fields.',
+                    'message': 'البيانات غير مكتملة — راجع الحقول المطلوبة',
                     'errors': serializer.errors
                 }, status=status.HTTP_400_BAD_REQUEST)
 
         except Exception:
-            return server_error('Failed to create item')
+            return server_error('تعذّرت إضافة المنتج')
 
     @swagger_auto_schema(
         operation_description="Create a fixed price listing for an item",
@@ -570,19 +585,19 @@ class ItemViewSet(viewsets.ModelViewSet):
         if item.owner != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the owner can create listings'
+                'message': 'العرض للبيع لصاحب المنتج فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         if item.status != 'draft':
             return Response({
                 'success': False,
-                'message': f'Cannot create listing. Item status is "{item.status}". Only draft items can have listings created.'
+                'message': 'لا يمكن عرض المنتج — يُعرض المنتج المسوّدة فقط'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if hasattr(item, 'fixed_listing'):
             return Response({
                 'success': False,
-                'message': 'A fixed price listing already exists for this item'
+                'message': 'المنتج معروض بسعر ثابت مسبقاً'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = FixedPriceListingCreateSerializer(data=request.data)
@@ -595,16 +610,16 @@ class ItemViewSet(viewsets.ModelViewSet):
 
                 return Response({
                     'success': True,
-                    'message': 'Fixed price listing created successfully',
+                    'message': 'عُرض المنتج للبيع',
                     'data': FixedPriceListingSerializer(listing).data
                 }, status=status.HTTP_201_CREATED)
 
             except Exception:
-                return server_error('Failed to create listing')
+                return server_error('تعذّر عرض المنتج')
 
         return Response({
             'success': False,
-            'message': 'Validation failed',
+            'message': 'بيانات غير صالحة',
             'errors': serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -627,13 +642,13 @@ class ItemViewSet(viewsets.ModelViewSet):
         if item.owner != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the owner can update listings'
+                'message': 'تعديل العرض لصاحب المنتج فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         if not hasattr(item, 'fixed_listing'):
             return Response({
                 'success': False,
-                'message': 'No fixed price listing exists for this item'
+                'message': 'المنتج غير معروض بسعر ثابت'
             }, status=status.HTTP_404_NOT_FOUND)
 
         listing = item.fixed_listing
@@ -646,16 +661,16 @@ class ItemViewSet(viewsets.ModelViewSet):
 
                 return Response({
                     'success': True,
-                    'message': 'Fixed price listing updated successfully',
+                    'message': 'حُدّث السعر',
                     'data': FixedPriceListingSerializer(updated_listing).data
                 }, status=status.HTTP_200_OK)
 
             except Exception:
-                return server_error('Failed to update listing')
+                return server_error('تعذّر تحديث العرض')
 
         return Response({
             'success': False,
-            'message': 'Validation failed',
+            'message': 'بيانات غير صالحة',
             'errors': serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -681,14 +696,14 @@ class ItemViewSet(viewsets.ModelViewSet):
         if item.owner != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the owner can upload images'
+                'message': 'رفع الصور لصاحب المنتج فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         images = request.FILES.getlist('images')
         if not images:
             return Response({
                 'success': False,
-                'message': 'No images provided'
+                'message': 'لم تُرفق أي صورة'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
@@ -697,13 +712,13 @@ class ItemViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'success': True,
-                'message': f'{len(created_images)} image(s) uploaded successfully',
+                'message': f'رُفعت {len(created_images)} صورة',
                 'images_uploaded': len(created_images),
                 'image_errors': errors if errors else None,
                 'data': ItemImageSerializer(created_images, many=True).data
             }, status=status.HTTP_201_CREATED)
         except Exception:
-            return server_error('Failed to upload images')
+            return server_error('تعذّر رفع الصور')
 
     @swagger_auto_schema(
         operation_description="Create an auction listing for an item (only for single quantity items)",
@@ -723,20 +738,20 @@ class ItemViewSet(viewsets.ModelViewSet):
         if item.owner != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the owner can create auctions'
+                'message': 'إنشاء المزاد لصاحب المنتج فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         # Check if item quantity is 1
         if item.quantity != 1:
             return Response({
                 'success': False,
-                'message': f'Cannot create auction. Auctions are only allowed for items with quantity of 1. This item has quantity of {item.quantity}.'
+                'message': f'المزاد لقطعة واحدة فقط، وكمية هذا المنتج {item.quantity}'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if item.status != 'draft':
             return Response({
                 'success': False,
-                'message': f'Cannot create auction. Item status is "{item.status}". Only draft items can have auctions created.'
+                'message': 'لا يمكن إنشاء مزاد — يُنشأ للمنتج المسوّدة فقط'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = AuctionListingCreateSerializer(data=request.data)
@@ -755,16 +770,16 @@ class ItemViewSet(viewsets.ModelViewSet):
 
                 return Response({
                     'success': True,
-                    'message': 'Auction created successfully',
+                    'message': 'أُنشئ المزاد',
                     'data': AuctionListingSerializer(auction).data
                 }, status=status.HTTP_201_CREATED)
 
             except Exception:
-                return server_error('Failed to create auction')
+                return server_error('تعذّر إنشاء المزاد')
 
         return Response({
             'success': False,
-            'message': 'Validation failed',
+            'message': 'بيانات غير صالحة',
             'errors': serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -788,7 +803,7 @@ class ItemViewSet(viewsets.ModelViewSet):
         if item.owner != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the owner can update auctions'
+                'message': 'تعديل المزاد لصاحب المنتج فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         try:
@@ -796,21 +811,21 @@ class ItemViewSet(viewsets.ModelViewSet):
         except AuctionListing.DoesNotExist:
             return Response({
                 'success': False,
-                'message': 'Auction not found for this item'
+                'message': 'لا يوجد مزاد لهذا المنتج'
             }, status=status.HTTP_404_NOT_FOUND)
 
         # Only allow updating upcoming or active auctions
         if auction.status == 'ended':
             return Response({
                 'success': False,
-                'message': 'Cannot update an ended auction'
+                'message': 'لا يمكن تعديل مزاد منتهٍ'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # Prevent updating if bids already exist
         if auction.bids.exists():
             return Response({
                 'success': False,
-                'message': 'Cannot update an auction that already has bids'
+                'message': 'لا يمكن تعديل مزاد عليه مزايدات'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = AuctionListingCreateSerializer(auction, data=request.data, partial=True)
@@ -839,16 +854,16 @@ class ItemViewSet(viewsets.ModelViewSet):
 
                 return Response({
                     'success': True,
-                    'message': 'Auction updated successfully',
+                    'message': 'حُدّث المزاد',
                     'data': AuctionListingSerializer(updated_auction).data
                 }, status=status.HTTP_200_OK)
 
             except Exception:
-                return server_error('Failed to update auction')
+                return server_error('تعذّر تحديث المزاد')
 
         return Response({
             'success': False,
-            'message': 'Validation failed',
+            'message': 'بيانات غير صالحة',
             'errors': serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1333,7 +1348,7 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
         if auction.item.owner == request.user:
             return Response({
                 'success': False,
-                'message': 'You cannot bid on your own item'
+                'message': 'لا يمكنك المزايدة على منتجك'
             }, status=status.HTTP_403_FORBIDDEN)
 
         # Validate bid amount
@@ -1341,7 +1356,7 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1362,7 +1377,7 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                 if not auction.is_active():
                     return Response({
                         'success': False,
-                        'message': 'Auction is not active'
+                        'message': 'المزاد غير نشط'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 # Check minimum bid amount (re-checked against the locked, fresh price)
@@ -1370,7 +1385,7 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                 if bid_amount < minimum_bid:
                     return Response({
                         'success': False,
-                        'message': f'Bid must be at least {minimum_bid}. Current price is {auction.current_price}'
+                        'message': f'أقل مزايدة {minimum_bid} د.ع، والسعر الحالي {auction.current_price} د.ع'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 # Check if user has already placed a higher or equal bid
@@ -1382,7 +1397,7 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                 if existing_bid and existing_bid.amount >= bid_amount:
                     return Response({
                         'success': False,
-                        'message': f'You already have a bid of ${existing_bid.amount}. New bid must be higher than ${existing_bid.amount}.'
+                        'message': f'مزايدتك الحالية {existing_bid.amount} د.ع، زايد بأكثر منها'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 # Check if this bidder already paid the deposit for this auction
@@ -1437,8 +1452,8 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
             send_websocket_notification(
                 user_id=request.user.id,
                 notification_type='bid_confirmed',
-                title='🎉 You\'re Winning!',
-                message=f'Your bid of ${bid_amount} is now the highest bid on {auction.item.title}',
+                title='أنت الأعلى مزايدة',
+                message=f'مزايدتك {bid_amount} د.ع هي الأعلى على {auction.item.title}',
                 data={
                     'auction_id': auction.id,
                     'item_id': auction.item.id,
@@ -1455,8 +1470,8 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
             send_websocket_notification(
                 user_id=auction.item.owner.id,
                 notification_type='new_bid',
-                title='New Bid on Your Auction',
-                message=f'{request.user.username} placed a bid of ${bid_amount} on {auction.item.title}',
+                title='مزايدة جديدة على مزادك',
+                message=f'زايد {request.user.username} بمبلغ {bid_amount} د.ع على {auction.item.title}',
                 data={
                     'auction_id': auction.id,
                     'item_id': auction.item.id,
@@ -1476,8 +1491,8 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                 send_websocket_notification(
                     user_id=previous_winning_bid.bidder.id,
                     notification_type='outbid',
-                    title='❌ You Have Been Outbid!',
-                    message=f'Your bid of ${previous_winning_bid.amount} on {auction.item.title} has been outbid',
+                    title='تجاوزك مزايد آخر',
+                    message=f'تجاوز مزايد آخر مزايدتك {previous_winning_bid.amount} د.ع على {auction.item.title}',
                     data={
                         'auction_id': auction.id,
                         'item_id': auction.item.id,
@@ -1497,8 +1512,8 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                     send_websocket_notification(
                         user_id=bidder_id,
                         notification_type='auction_update',
-                        title='New Bid on Auction You\'re Following',
-                        message=f'New bid of ${bid_amount} placed on {auction.item.title}',
+                        title='مزايدة جديدة على مزاد تتابعه',
+                        message=f'مزايدة جديدة {bid_amount} د.ع على {auction.item.title}',
                         data={
                             'auction_id': auction.id,
                             'item_id': auction.item.id,
@@ -1517,7 +1532,7 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
             bid_serializer = BidSerializer(bid)
             return Response({
                 'success': True,
-                'message': f'🎉 Bid placed successfully! You\'re now the highest bidder at ${bid_amount}',
+                'message': f'قُبلت مزايدتك {bid_amount} د.ع وأنت الأعلى الآن',
                 'data': bid_serializer.data,
                 'auction': {
                     'id': auction.id,
@@ -1531,11 +1546,11 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
         except ValueError as e:
             return Response({
                 'success': False,
-                'message': 'Insufficient balance to place bid (bid deposit required)',
+                'message': 'رصيدك لا يكفي لعربون المزايدة',
                 'errors': str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
         except Exception:
-            return server_error('Failed to place bid')
+            return server_error('تعذّرت المزايدة')
 
 
     def _calculate_time_remaining(self, auction):
@@ -1705,7 +1720,7 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                 'has_bid': False,
                 'is_winning': False,
                 'status': 'no_bid',
-                'message': 'You have not placed any bids on this auction',
+                'message': 'لم تزايد على هذا المزاد بعد',
                 'current_price': str(auction.current_price),
                 'minimum_bid': str(auction.current_price + auction.minimum_increment),
                 'total_bids': auction.bids.count(),
@@ -1739,7 +1754,7 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
 
         if is_winning:
             response_data['status'] = 'winning'
-            response_data['message'] = f'🎉 You\'re winning with a bid of ${user_bid.amount}!'
+            response_data['message'] = f'أنت الأعلى بمزايدة {user_bid.amount} د.ع'
             response_data['lead_amount'] = str(
                 user_bid.amount - auction.current_price) if user_bid.amount > auction.current_price else '0'
         else:
@@ -1751,9 +1766,9 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                 response_data['winning_bidder'] = winning_bid.bidder.username
                 response_data['winning_bid_amount'] = str(winning_bid.amount)
                 response_data[
-                    'message'] = f'❌ You\'re not winning. Current highest bid is ${winning_bid.amount} (you\'re ${amount_behind} behind)'
+                    'message'] = f'لست الأعلى. أعلى مزايدة {winning_bid.amount} د.ع، وينقصك {amount_behind} د.ع'
             else:
-                response_data['message'] = f'❌ You\'re not winning. Current price is ${auction.current_price}'
+                response_data['message'] = f'لست الأعلى. السعر الحالي {auction.current_price} د.ع'
 
         return Response(response_data, status=status.HTTP_200_OK)
 
@@ -1770,21 +1785,21 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
         if auction.item.owner != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the item owner can cancel the auction'
+                'message': 'إلغاء المزاد لصاحب المنتج فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         # Check if auction has bids
         if auction.bids.exists():
             return Response({
                 'success': False,
-                'message': 'Cannot cancel auction with existing bids. Consider ending it early instead.'
+                'message': 'لا يمكن إلغاء مزاد عليه مزايدات — يمكنك إنهاؤه مبكراً'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # Check if auction is already ended or completed
         if auction.status in ['ended', 'completed', 'cancelled']:
             return Response({
                 'success': False,
-                'message': f'Auction is already {auction.status}'
+                'message': 'المزاد منتهٍ أو ملغى مسبقاً'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
@@ -1802,8 +1817,8 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                 send_websocket_notification(
                     user_id=bidder_id,
                     notification_type='auction_cancelled',
-                    title='Auction Cancelled',
-                    message=f'The auction for {auction.item.title} has been cancelled by the seller',
+                    title='أُلغي المزاد',
+                    message=f'ألغى البائع مزاد {auction.item.title}',
                     data={
                         'auction_id': auction.id,
                         'item_title': auction.item.title
@@ -1812,11 +1827,11 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
 
             return Response({
                 'success': True,
-                'message': 'Auction cancelled successfully'
+                'message': 'أُلغي المزاد'
             }, status=status.HTTP_200_OK)
 
         except Exception:
-            return server_error('Failed to cancel auction')
+            return server_error('تعذّر إلغاء المزاد')
 
     @swagger_auto_schema(
         operation_description="End an auction early (owner only)",
@@ -1831,14 +1846,14 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
         if auction.item.owner != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the item owner can end the auction'
+                'message': 'إنهاء المزاد لصاحب المنتج فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         # Check if auction is active
         if auction.status != 'active':
             return Response({
                 'success': False,
-                'message': f'Auction is {auction.status}, cannot end early'
+                'message': 'المزاد غير نشط، لا يمكن إنهاؤه'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
@@ -1852,7 +1867,7 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                 if auction.status != 'active':
                     return Response({
                         'success': False,
-                        'message': f'Auction is {auction.status}, cannot end early'
+                        'message': 'المزاد غير نشط، لا يمكن إنهاؤه'
                     }, status=status.HTTP_400_BAD_REQUEST)
                 auction.status = 'ended'
                 auction.end_time = timezone.now()
@@ -1871,8 +1886,8 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                 send_websocket_notification(
                     user_id=auction.winner.id,
                     notification_type='auction_won',
-                    title='Congratulations! You Won the Auction',
-                    message=f'You won the auction for {auction.item.title} with a bid of ${auction.current_price}',
+                    title='مبروك! فزت بالمزاد',
+                    message=f'فزت بمزاد {auction.item.title} بمبلغ {auction.current_price} د.ع',
                     data={
                         'auction_id': auction.id,
                         'item_id': auction.item.id,
@@ -1896,8 +1911,8 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                 send_websocket_notification(
                     user_id=bidder_id,
                     notification_type='auction_ended',
-                    title='Auction Ended',
-                    message=f'The auction for {auction.item.title} has ended',
+                    title='انتهى المزاد',
+                    message=f'انتهى مزاد {auction.item.title}',
                     data={
                         'auction_id': auction.id,
                         'item_title': auction.item.title,
@@ -1911,13 +1926,13 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
 
             return Response({
                 'success': True,
-                'message': 'Auction ended successfully',
+                'message': 'أُنهي المزاد',
                 'winner': UserSerializer(auction.winner).data if auction.winner else None,
                 'final_price': str(auction.current_price)
             }, status=status.HTTP_200_OK)
 
         except Exception:
-            return server_error('Failed to end auction')
+            return server_error('تعذّر إنهاء المزاد')
 
 
 def _create_quick_live_item(owner, title, description, category_id, condition, quantity, force_live_category=False):
@@ -1994,7 +2009,12 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                             'viewers', 'bans', 'ban_detail', 'join_token',
                             'show_item', 'catalog', 'quick_show', 'quick_auction']:
             return [IsAuthenticated()]
-        return [AllowAny()]
+        if self.action in ('list', 'retrieve', 'metadata'):
+            return [AllowAny()]
+        # Editing, and whatever is added later without a line here: the owner.
+        # This used to fall through to AllowAny, and update() was never named,
+        # so anyone could retitle or end anybody's stream.
+        return [IsStoreOwner()]
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -2015,7 +2035,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2028,7 +2048,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             if existing_live:
                 return Response({
                     'success': False,
-                    'message': 'You already have a live session in progress',
+                    'message': 'لديك بث جارٍ الآن',
                     'data': LiveSessionSerializer(existing_live, context={'request': request}).data
                 }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2048,7 +2068,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
         return Response({
             'success': True,
-            'message': 'Live session created',
+            'message': 'أُنشئ البث',
             'data': LiveSessionSerializer(session, context={'request': request}).data
         }, status=status.HTTP_201_CREATED)
 
@@ -2072,7 +2092,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if session.status != 'scheduled':
             return Response({
                 'success': False,
-                'message': f'Cannot go live. Current status: {session.status}'
+                'message': 'لا يمكن بدء هذا البث'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # Same rule create(start_immediately=True) enforces, and it was
@@ -2085,7 +2105,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 store_id=session.store_id, status='live').exists():
             return Response({
                 'success': False,
-                'message': 'You already have a live session in progress'
+                'message': 'لديك بث جارٍ الآن'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         session.status = 'live'
@@ -2102,7 +2122,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
         return Response({
             'success': True,
-            'message': 'You are now live',
+            'message': 'أنت الآن في بث مباشر',
             'data': LiveSessionSerializer(session, context={'request': request}).data
         }, status=status.HTTP_200_OK)
 
@@ -2114,7 +2134,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if session.status != 'live':
             return Response({
                 'success': False,
-                'message': f'Cannot end. Current status: {session.status}'
+                'message': 'هذا البث ليس جارياً'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         with transaction.atomic():
@@ -2122,7 +2142,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
         return Response({
             'success': True,
-            'message': 'Live session ended',
+            'message': 'انتهى البث',
             'data': LiveSessionSerializer(session, context={'request': request}).data
         }, status=status.HTTP_200_OK)
 
@@ -2134,7 +2154,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if session.status != 'scheduled':
             return Response({
                 'success': False,
-                'message': 'Only a scheduled session can be cancelled'
+                'message': 'يُلغى البث المجدول فقط'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         session.status = 'cancelled'
@@ -2142,7 +2162,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
         return Response({
             'success': True,
-            'message': 'Live session cancelled',
+            'message': 'أُلغي البث',
             'data': LiveSessionSerializer(session, context={'request': request}).data
         }, status=status.HTTP_200_OK)
 
@@ -2187,7 +2207,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             if not store or store.id != session.store_id:
                 return Response({
                     'success': False,
-                    'message': 'Only the store owner can publish to this session'
+                    'message': 'البث لصاحب المتجر فقط'
                 }, status=status.HTTP_403_FORBIDDEN)
 
         try:
@@ -2222,7 +2242,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2230,13 +2250,13 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if item.owner != request.user:
             return Response({
                 'success': False,
-                'message': 'You can only queue items you own'
+                'message': 'أضف منتجاتك فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         if session.items.filter(item=item, status__in=['queued', 'now_showing']).exists():
             return Response({
                 'success': False,
-                'message': 'This item is already in the queue'
+                'message': 'المنتج في القائمة مسبقاً'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         queue_item = LiveSessionItem.objects.create(
@@ -2249,7 +2269,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
         return Response({
             'success': True,
-            'message': 'Item added to queue',
+            'message': 'أُضيف المنتج إلى القائمة',
             'data': LiveSessionItemSerializer(queue_item, context={'request': request}).data
         }, status=status.HTTP_201_CREATED)
 
@@ -2264,17 +2284,17 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         except LiveSessionItem.DoesNotExist:
             return Response({
                 'success': False,
-                'message': 'Queue item not found'
+                'message': 'المنتج غير موجود في القائمة'
             }, status=status.HTTP_404_NOT_FOUND)
 
         if request.method == 'DELETE':
             if queue_item.status != 'queued':
                 return Response({
                     'success': False,
-                    'message': 'Only a still-queued item can be removed'
+                    'message': 'لا يمكن حذف منتج عُرض بالفعل'
                 }, status=status.HTTP_400_BAD_REQUEST)
             queue_item.delete()
-            return Response({'success': True, 'message': 'Removed from queue'}, status=status.HTTP_200_OK)
+            return Response({'success': True, 'message': 'حُذف من القائمة'}, status=status.HTTP_200_OK)
 
         # PATCH — order and/or status in {'queued', 'skipped'} only; the
         # now_showing/sold_out transitions are exclusive to now_showing/reserve.
@@ -2287,7 +2307,14 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
         update_fields = []
         if 'order' in request.data:
-            queue_item.order = request.data['order']
+            try:
+                order = int(request.data['order'])
+            except (TypeError, ValueError):
+                order = -1
+            if not 0 <= order <= 100000:
+                return Response({'success': False, 'message': 'ترتيب غير صالح'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            queue_item.order = order
             update_fields.append('order')
         if new_status is not None:
             queue_item.status = new_status
@@ -2308,7 +2335,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if session.status != 'live':
             return Response({
                 'success': False,
-                'message': 'Session is not live'
+                'message': 'البث غير جارٍ'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         queue_item_id = request.data.get('queue_item_id')
@@ -2317,7 +2344,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         except LiveSessionItem.DoesNotExist:
             return Response({
                 'success': False,
-                'message': 'Queue item not found or not queued'
+                'message': 'المنتج غير موجود في القائمة'
             }, status=status.HTTP_404_NOT_FOUND)
 
         with transaction.atomic():
@@ -2336,7 +2363,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
         return Response({
             'success': True,
-            'message': 'Now showing updated',
+            'message': 'تغيّر المنتج المعروض',
             'data': LiveSessionItemSerializer(queue_item, context={'request': request}).data
         }, status=status.HTTP_200_OK)
 
@@ -2354,7 +2381,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         """
         session = self.get_object()
         if not _can_moderate_live_session(request.user, session):
-            return Response({'success': False, 'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+            return Response({'success': False, 'message': 'غير مسموح لك بهذا'}, status=status.HTTP_403_FORBIDDEN)
 
         items = Item.objects.filter(
             owner=session.store.user_id, status__in=['active', 'reserved'], quantity__gt=0
@@ -2398,25 +2425,25 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         """
         session = self.get_object()
         if not _can_moderate_live_session(request.user, session):
-            return Response({'success': False, 'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+            return Response({'success': False, 'message': 'غير مسموح لك بهذا'}, status=status.HTTP_403_FORBIDDEN)
 
         if session.status != 'live':
             return Response({
                 'success': False,
-                'message': 'Session is not live'
+                'message': 'البث غير جارٍ'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if session.auctions.filter(status='active').exists():
             return Response({
                 'success': False,
-                'message': 'End the current live auction before showing another product'
+                'message': 'أنهِ المزاد الجاري قبل عرض منتج آخر'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = ShowLiveItemSerializer(data=request.data)
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2425,18 +2452,18 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 id=serializer.validated_data['item_id']
             )
         except Item.DoesNotExist:
-            return Response({'success': False, 'message': 'Item not found'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'success': False, 'message': 'المنتج غير موجود'}, status=status.HTTP_404_NOT_FOUND)
 
         if item.owner_id != session.store.user_id:
             return Response({
                 'success': False,
-                'message': 'This item does not belong to this store'
+                'message': 'المنتج ليس لهذا المتجر'
             }, status=status.HTTP_403_FORBIDDEN)
 
         if item.status not in ('active', 'reserved') or item.quantity <= 0:
             return Response({
                 'success': False,
-                'message': 'Item is not available to show'
+                'message': 'المنتج غير متاح للعرض'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         fixed_listing = getattr(item, 'fixed_listing', None)
@@ -2444,14 +2471,36 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         deposit_amount = serializer.validated_data.get('deposit_amount') or (
             fixed_listing.deposit_amount if fixed_listing else None
         )
+        # A moderator shows the store's goods; what they cost is the owner's say.
+        is_owner = session.store.user_id == request.user.id
+        if not is_owner and (fixed_listing is None or price != fixed_listing.price
+                             or deposit_amount != fixed_listing.deposit_amount):
+            return Response({
+                'success': False,
+                'message': 'تغيير السعر في البث لصاحب المتجر وحده'
+            }, status=status.HTTP_403_FORBIDDEN)
+        if price is not None and deposit_amount is not None and deposit_amount > price:
+            return Response({
+                'success': False,
+                'message': 'لا يتجاوز العربون السعر'
+            }, status=status.HTTP_400_BAD_REQUEST)
         if price is None or deposit_amount is None:
             return Response({
                 'success': False,
-                'message': 'This item has no listed price yet — list it for sale first, or provide price and deposit_amount'
+                'message': 'لا سعر لهذا المنتج — اعرضه للبيع أولاً أو اكتب السعر والعربون'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         with transaction.atomic():
-            queue_item = session.items.filter(item=item, status__in=['queued', 'now_showing']).first()
+            queue_item = session.items.select_for_update().filter(
+                item=item, status__in=['queued', 'now_showing']).first()
+            # A viewer taps 'reserve' on an entry at the price on their screen,
+            # and the deposit leaves their wallet at once. A new price is a new
+            # entry: a tap still carrying the old one finds it gone.
+            if queue_item and queue_item.shown_at and (
+                    queue_item.price != price or queue_item.deposit_amount != deposit_amount):
+                queue_item.status = 'skipped'
+                queue_item.save(update_fields=['status'])
+                queue_item = None
             if not queue_item:
                 queue_item = LiveSessionItem(session=session, item=item)
             queue_item.price = price
@@ -2472,7 +2521,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
         return Response({
             'success': True,
-            'message': 'Now showing',
+            'message': 'معروض الآن',
             'data': LiveSessionItemSerializer(queue_item, context={'request': request}).data
         }, status=status.HTTP_200_OK)
 
@@ -2496,25 +2545,25 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         """
         session = self.get_object()
         if not _can_moderate_live_session(request.user, session):
-            return Response({'success': False, 'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+            return Response({'success': False, 'message': 'غير مسموح لك بهذا'}, status=status.HTTP_403_FORBIDDEN)
 
         if session.status != 'live':
             return Response({
                 'success': False,
-                'message': 'Session is not live'
+                'message': 'البث غير جارٍ'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if session.auctions.filter(status='active').exists():
             return Response({
                 'success': False,
-                'message': 'End the current live auction before showing another product'
+                'message': 'أنهِ المزاد الجاري قبل عرض منتج آخر'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = QuickShowItemSerializer(data=request.data)
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2550,7 +2599,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
         return Response({
             'success': True,
-            'message': 'Now showing (new item created)',
+            'message': 'معروض الآن',
             'data': LiveSessionItemSerializer(queue_item, context={'request': request}).data
         }, status=status.HTTP_201_CREATED)
 
@@ -2572,25 +2621,25 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         """
         session = self.get_object()
         if not _can_moderate_live_session(request.user, session):
-            return Response({'success': False, 'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+            return Response({'success': False, 'message': 'غير مسموح لك بهذا'}, status=status.HTTP_403_FORBIDDEN)
 
         if session.status != 'live':
             return Response({
                 'success': False,
-                'message': 'Session is not live'
+                'message': 'البث غير جارٍ'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if session.auctions.filter(status='active').exists():
             return Response({
                 'success': False,
-                'message': 'There is already a live auction running in this session'
+                'message': 'يوجد مزاد جارٍ في هذا البث'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = QuickLiveAuctionSerializer(data=request.data)
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2640,7 +2689,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
         return Response({
             'success': True,
-            'message': 'Live auction started',
+            'message': 'بدأ المزاد',
             'data': LiveAuctionSerializer(auction, context={'request': request}).data
         }, status=status.HTTP_201_CREATED)
 
@@ -2662,20 +2711,20 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if session.status != 'live':
             return Response({
                 'success': False,
-                'message': 'You can only comment while the stream is live'
+                'message': 'التعليق متاح أثناء البث فقط'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if session.bans.filter(user_id=request.user.id).exists():
             return Response({
                 'success': False,
-                'message': 'You have been banned from this live session'
+                'message': 'حُظرت من هذا البث'
             }, status=status.HTTP_403_FORBIDDEN)
 
         serializer = LiveSessionCommentCreateSerializer(data=request.data)
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2697,19 +2746,19 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         try:
             comment = session.comments.get(id=comment_id)
         except LiveSessionComment.DoesNotExist:
-            return Response({'success': False, 'message': 'Comment not found'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'success': False, 'message': 'التعليق غير موجود'}, status=status.HTTP_404_NOT_FOUND)
 
         is_author = comment.user_id == request.user.id
         if not (is_author or _can_moderate_live_session(request.user, session)):
             return Response({
                 'success': False,
-                'message': 'You cannot delete this comment'
+                'message': 'لا يمكنك حذف هذا التعليق'
             }, status=status.HTTP_403_FORBIDDEN)
 
         comment.delete()
         broadcast_live_event(session.id, 'comment_deleted', {'comment_id': int(comment_id)})
 
-        return Response({'success': True, 'message': 'Comment deleted'}, status=status.HTTP_200_OK)
+        return Response({'success': True, 'message': 'حُذف التعليق'}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['get'], url_path='viewers')
     def viewers(self, request, pk=None):
@@ -2718,7 +2767,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         aren't listed here, see LiveSessionViewer's docstring."""
         session = self.get_object()
         if not _can_moderate_live_session(request.user, session):
-            return Response({'success': False, 'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+            return Response({'success': False, 'message': 'غير مسموح لك بهذا'}, status=status.HTTP_403_FORBIDDEN)
 
         queryset = session.viewers.select_related('user').annotate(
             is_moderator=Exists(
@@ -2767,7 +2816,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2775,7 +2824,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if target_user_id == request.user.id:
             return Response({
                 'success': False,
-                'message': 'You already own this session'
+                'message': 'أنت صاحب هذا البث'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         moderator, created = LiveSessionModerator.objects.get_or_create(
@@ -2784,7 +2833,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
         return Response({
             'success': True,
-            'message': 'Moderator added' if created else 'Already a moderator',
+            'message': 'أُضيف المشرف' if created else 'Already a moderator',
             'data': LiveSessionModeratorSerializer(moderator).data
         }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
@@ -2794,9 +2843,9 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         session = self.get_object()
         deleted, _ = session.moderators.filter(user_id=user_id).delete()
         if not deleted:
-            return Response({'success': False, 'message': 'Not a moderator'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'success': False, 'message': 'ليس مشرفاً'}, status=status.HTTP_404_NOT_FOUND)
 
-        return Response({'success': True, 'message': 'Moderator removed'}, status=status.HTTP_200_OK)
+        return Response({'success': True, 'message': 'أُزيل المشرف'}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['get', 'post'], url_path='bans')
     def bans(self, request, pk=None):
@@ -2806,7 +2855,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         it does not affect the store's other broadcasts."""
         session = self.get_object()
         if not _can_moderate_live_session(request.user, session):
-            return Response({'success': False, 'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+            return Response({'success': False, 'message': 'غير مسموح لك بهذا'}, status=status.HTTP_403_FORBIDDEN)
 
         if request.method == 'GET':
             banned = session.bans.select_related('user', 'banned_by').order_by('-created_at')
@@ -2819,7 +2868,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2827,12 +2876,12 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if target_user_id == session.store.user_id:
             return Response({
                 'success': False,
-                'message': 'Cannot ban the store owner'
+                'message': 'لا يمكن حظر صاحب المتجر'
             }, status=status.HTTP_400_BAD_REQUEST)
         if target_user_id == request.user.id:
             return Response({
                 'success': False,
-                'message': 'Cannot ban yourself'
+                'message': 'لا يمكنك حظر نفسك'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         ban, created = LiveSessionBan.objects.get_or_create(
@@ -2845,7 +2894,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
         return Response({
             'success': True,
-            'message': 'User banned' if created else 'User already banned',
+            'message': 'حُظر المستخدم' if created else 'User already banned',
             'data': LiveSessionBanSerializer(ban).data
         }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
@@ -2854,14 +2903,14 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         """Unban a viewer from this session — store owner or a session moderator"""
         session = self.get_object()
         if not _can_moderate_live_session(request.user, session):
-            return Response({'success': False, 'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+            return Response({'success': False, 'message': 'غير مسموح لك بهذا'}, status=status.HTTP_403_FORBIDDEN)
 
         deleted, _ = session.bans.filter(user_id=user_id).delete()
         if not deleted:
-            return Response({'success': False, 'message': 'Not banned'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'success': False, 'message': 'غير محظور'}, status=status.HTTP_404_NOT_FOUND)
 
         broadcast_live_event(session.id, 'viewer_unbanned', {'user_id': int(user_id)})
-        return Response({'success': True, 'message': 'Ban removed'}, status=status.HTTP_200_OK)
+        return Response({'success': True, 'message': 'رُفع الحظر'}, status=status.HTTP_200_OK)
 
     @swagger_auto_schema(
         operation_description="Reserve the item currently 'now showing' in this session — deposit is charged immediately from the buyer's wallet",
@@ -2887,14 +2936,14 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if session.status != 'live':
             return Response({
                 'success': False,
-                'message': 'This stream is not live'
+                'message': 'البث غير جارٍ'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = ReserveLiveItemSerializer(data=request.data, context={'request': request})
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2910,21 +2959,26 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 except LiveSessionItem.DoesNotExist:
                     return Response({
                         'success': False,
-                        'message': 'Item not found in this session'
+                        'message': 'المنتج ليس في هذا البث'
                     }, status=status.HTTP_404_NOT_FOUND)
 
                 if queue_item.status != 'now_showing':
                     return Response({
                         'success': False,
-                        'message': 'This item is not currently showing'
+                        'message': 'تغيّر المنتج المعروض أو سعره — حدّث وحاول مجدداً'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 item = Item.objects.select_for_update().get(id=queue_item.item_id)
                 if item.owner == request.user:
                     return Response({
                         'success': False,
-                        'message': 'Cannot reserve your own item'
+                        'message': 'لا يمكنك حجز منتجك'
                     }, status=status.HTTP_403_FORBIDDEN)
+                if item.status not in ('active', 'reserved'):
+                    return Response({
+                        'success': False,
+                        'message': 'لم يعد المنتج معروضاً للبيع'
+                    }, status=status.HTTP_400_BAD_REQUEST)
 
                 # Live sales go through the item's default variant. The live
                 # queue has no picker for colour/size yet, so a live-listed
@@ -2939,7 +2993,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 if quantity > live_variant.quantity:
                     return Response({
                         'success': False,
-                        'message': f'Only {live_variant.quantity} available'
+                        'message': f'المتوفّر {live_variant.quantity} فقط'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 total_price = queue_item.price * quantity
@@ -2947,14 +3001,15 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
                 delivery_location_id = serializer.validated_data.get('delivery_location_id')
                 if delivery_location_id:
-                    delivery_location = Location.objects.get(id=delivery_location_id, user=request.user)
+                    delivery_location = Location.objects.get(id=delivery_location_id, user=request.user, is_active=True)
                 else:
-                    delivery_location = Location.objects.filter(user=request.user).first()
+                    delivery_location = Location.objects.filter(
+                        user=request.user, is_active=True).order_by('-is_primary', '-created_at').first()
 
                 if not delivery_location:
                     return Response({
                         'success': False,
-                        'message': 'Please add a delivery address before reserving an item'
+                        'message': 'أضف عنوان توصيل قبل الحجز'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 from .services.commission import commission_for
@@ -2994,7 +3049,16 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                     reservation=reservation
                 )
 
+                # A live sale is deposit now and the rest at the door, so the
+                # trip's fee is collected there too. It was never set, and the
+                # courier drove for nothing.
+                from .delivery_utils import compute_delivery_fee
+                reservation.delivery_fee = compute_delivery_fee(reservation)
+                reservation.save(update_fields=['delivery_fee'])
+
                 live_variant.take_stock(quantity)
+                from ledger.services import record_app_sale
+                record_app_sale(reservation)
                 item.refresh_from_db(fields=['quantity', 'status'])
                 item.sold_count += quantity
                 item.save(update_fields=['sold_count'])
@@ -3007,16 +3071,16 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         except ValueError as e:
             return Response({
                 'success': False,
-                'message': 'Insufficient balance to pay the deposit',
+                'message': 'رصيدك لا يكفي للعربون',
                 'errors': str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
         except Location.DoesNotExist:
             return Response({
                 'success': False,
-                'message': 'Delivery location not found or does not belong to you'
+                'message': 'عنوان التوصيل غير موجود'
             }, status=status.HTTP_400_BAD_REQUEST)
         except Exception:
-            return server_error('Failed to reserve item')
+            return server_error('تعذّر الحجز')
 
         try:
             notify_live_item_reserved(reservation)
@@ -3044,7 +3108,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
         return Response({
             'success': True,
-            'message': 'Item reserved successfully',
+            'message': 'تم الحجز',
             'data': ReservationSerializer(reservation, context={'request': request}).data
         }, status=status.HTTP_201_CREATED)
 
@@ -3123,6 +3187,12 @@ class ReelViewSet(SafeRankingCacheMixin,
         # direct retrieve/finalize by the owning store.
         if self.action == 'list':
             queryset = queryset.filter(status='published')
+        elif not getattr(self.request.user, 'is_staff', False):
+            # An unpublished reel is its store's alone, by its link as well.
+            visible = Q(status='published')
+            if self.request.user.is_authenticated:
+                visible |= Q(store__user=self.request.user)
+            queryset = queryset.filter(visible)
         return self.annotate_viewer_flags(queryset)
 
     # ---- ترتيب الخلاصة -------------------------------------------------
@@ -3261,7 +3331,7 @@ class ReelViewSet(SafeRankingCacheMixin,
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors,
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -3313,14 +3383,14 @@ class ReelViewSet(SafeRankingCacheMixin,
         if reel.status != 'pending_upload':
             return Response({
                 'success': False,
-                'message': f'Cannot finalize. Current status: {reel.status}'
+                'message': 'لا يمكن نشر هذا الريل'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         video_head = aws_utils.head_object(reel.video_key)
         if not video_head or not video_head['size']:
             return Response({
                 'success': False,
-                'message': 'Video upload not found — PUT the video to video_upload_url before finalizing'
+                'message': 'لم يكتمل رفع الفيديو'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if reel.thumbnail_key:
@@ -3328,14 +3398,14 @@ class ReelViewSet(SafeRankingCacheMixin,
             if not thumbnail_head or not thumbnail_head['size']:
                 return Response({
                     'success': False,
-                    'message': 'Thumbnail upload not found — PUT the thumbnail to thumbnail_upload_url before finalizing'
+                    'message': 'لم يكتمل رفع الصورة'
                 }, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = FinalizeReelSerializer(data=request.data, context={'request': request})
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -3375,7 +3445,7 @@ class ReelViewSet(SafeRankingCacheMixin,
 
         return Response({
             'success': True,
-            'message': 'Reel published',
+            'message': 'نُشر الريل',
             'data': ReelDetailSerializer(reel, context={'request': request}).data
         }, status=status.HTTP_200_OK)
 
@@ -3548,7 +3618,7 @@ class ReelViewSet(SafeRankingCacheMixin,
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -3595,14 +3665,14 @@ class ReelViewSet(SafeRankingCacheMixin,
         try:
             comment = reel.comments.get(id=comment_id)
         except ReelComment.DoesNotExist:
-            return Response({'success': False, 'message': 'Comment not found'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'success': False, 'message': 'التعليق غير موجود'}, status=status.HTTP_404_NOT_FOUND)
 
         is_author = comment.user_id == request.user.id
         is_store_owner = reel.store.user_id == request.user.id
         if not (is_author or is_store_owner):
             return Response({
                 'success': False,
-                'message': 'You cannot delete this comment'
+                'message': 'لا يمكنك حذف هذا التعليق'
             }, status=status.HTTP_403_FORBIDDEN)
 
         # حذف تعليق رئيسي يحذف ردوده معه (CASCADE)، فالعدّاد ينقص بها كلها.
@@ -3612,7 +3682,7 @@ class ReelViewSet(SafeRankingCacheMixin,
             comments_count=Greatest(F('comments_count') - removed, 0))
 
         return Response({
-            'success': True, 'message': 'Comment deleted', 'removed': removed,
+            'success': True, 'message': 'حُذف التعليق', 'removed': removed,
         }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
@@ -3801,7 +3871,7 @@ def _resolve_variant(item, variant_id):
     return variant, None
 
 
-class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
+class ReservationViewSet(mixins.RetrieveModelMixin,
                           mixins.UpdateModelMixin, mixins.ListModelMixin,
                           viewsets.GenericViewSet):
     """
@@ -3892,7 +3962,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -3913,14 +3983,14 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         except Item.DoesNotExist:
             return Response({
                 'success': False,
-                'message': 'Item not found'
+                'message': 'المنتج غير موجود'
             }, status=status.HTTP_404_NOT_FOUND)
 
         # Check if user is trying to buy their own item
         if item.owner == request.user:
             return Response({
                 'success': False,
-                'message': 'Cannot reserve your own item'
+                'message': 'لا يمكنك حجز منتجك'
             }, status=status.HTTP_403_FORBIDDEN)
 
         try:
@@ -3932,13 +4002,13 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 except FixedPriceListing.DoesNotExist:
                     return Response({
                         'success': False,
-                        'message': 'No fixed price listing exists for this item'
+                        'message': 'المنتج غير معروض بسعر ثابت'
                     }, status=status.HTTP_404_NOT_FOUND)
 
                 if item.status not in ['active', 'reserved']:
                     return Response({
                         'success': False,
-                        'message': f'Item is not available. Current status: {item.status}'
+                        'message': 'المنتج غير متاح'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 # Stock is checked on the combination being bought, not on the
@@ -3953,7 +4023,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 if quantity > variant.quantity:
                     return Response({
                         'success': False,
-                        'message': f'Insufficient quantity. Only {variant.quantity} available'
+                        'message': f'المتوفّر {variant.quantity} فقط'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 # A variant can carry its own price; the buyer pays for the
@@ -4095,7 +4165,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                     try:
                         delivery_location = Location.objects.get(
                             id=delivery_location_id,
-                            user=request.user
+                            user=request.user, is_active=True
                         )
                     except Location.DoesNotExist:
                         pass
@@ -4135,15 +4205,15 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 send_websocket_notification(
                     user_id=seller.id,
                     notification_type='reservation_created',
-                    title='New Reservation',
-                    message=f'{reservation.buyer.username} reserved your item "{reservation.item.title}".',
+                    title='حجز جديد',
+                    message=f'حجز {reservation.buyer.username} منتجك "{reservation.item.title}".',
                     data={'reservation_id': reservation.id, 'item_title': reservation.item.title}
                 )
             except Exception as e:
                 logger.error(f"Failed to send reservation notification: {e}", exc_info=True)
 
             # Build response message
-            message = f'Reservation created successfully for {quantity} item(s)'
+            message = f'تم حجز {quantity} قطعة'
 
             return Response({
                 'success': True,
@@ -4152,7 +4222,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             }, status=status.HTTP_201_CREATED)
 
         except Exception:
-            return server_error('Failed to create reservation')
+            return server_error('تعذّر إنشاء الحجز')
 
     @swagger_auto_schema(
         operation_description="""
@@ -4177,19 +4247,19 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if reservation.buyer != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the buyer can complete this reservation'
+                'message': 'إكمال الحجز للمشتري فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         if reservation.status != 'pending':
             return Response({
                 'success': False,
-                'message': f'Reservation cannot be completed. Current status: {reservation.status}'
+                'message': 'لا يمكن إكمال هذا الحجز'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if timezone.now() > reservation.expires_at:
             return Response({
                 'success': False,
-                'message': 'Reservation has expired'
+                'message': 'انتهت مدة الحجز'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # An open installment request means the admin may be activating the
@@ -4208,16 +4278,16 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             if not delivery_location_id:
                 return Response({
                     'success': False,
-                    'message': 'Please add a delivery address before completing this reservation'
+                    'message': 'أضف عنوان توصيل قبل إكمال الحجز'
                 }, status=status.HTTP_400_BAD_REQUEST)
             try:
                 reservation.delivery_location = Location.objects.get(
-                    id=delivery_location_id, user=request.user
+                    id=delivery_location_id, user=request.user, is_active=True
                 )
             except Location.DoesNotExist:
                 return Response({
                     'success': False,
-                    'message': 'Delivery location not found or does not belong to you'
+                    'message': 'عنوان التوصيل غير موجود'
                 }, status=status.HTTP_400_BAD_REQUEST)
             reservation.save(update_fields=['delivery_location'])
 
@@ -4256,7 +4326,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             except Exception as e:
                 logger.error(f"Failed to send reservation completed notification: {e}", exc_info=True)
 
-            message = 'Reservation completed successfully'
+            message = 'اكتمل الحجز'
 
             return Response({
                 'success': True,
@@ -4284,11 +4354,11 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             return Response({
                 'success': False,
                 'code': 'insufficient_balance',
-                'message': 'Insufficient balance to complete this reservation',
+                'message': 'رصيدك لا يكفي لإكمال الحجز',
                 'errors': str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
         except Exception:
-            return server_error('Failed to complete reservation')
+            return server_error('تعذّر إكمال الحجز')
 
     @swagger_auto_schema(
         operation_description="Buyer changes the delivery address on their own reservation. "
@@ -4303,28 +4373,28 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if reservation.buyer != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the buyer can change the delivery address'
+                'message': 'تغيير العنوان للمشتري فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         if reservation.delivery_orders.filter(direction='outbound').exists():
             return Response({
                 'success': False,
-                'message': 'This reservation was already sent to delivery — the address can no longer be changed'
+                'message': 'أُرسل الطلب للتوصيل، فلا يمكن تغيير العنوان'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         delivery_location_id = request.data.get('delivery_location_id')
         if not delivery_location_id:
             return Response({
                 'success': False,
-                'message': 'delivery_location_id is required'
+                'message': 'اختر عنوان التوصيل'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            location = Location.objects.get(id=delivery_location_id, user=request.user)
+            location = Location.objects.get(id=delivery_location_id, user=request.user, is_active=True)
         except Location.DoesNotExist:
             return Response({
                 'success': False,
-                'message': 'Delivery location not found or does not belong to you'
+                'message': 'عنوان التوصيل غير موجود'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
@@ -4352,7 +4422,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
         return Response({
             'success': True,
-            'message': 'Delivery address updated',
+            'message': 'حُدّث عنوان التوصيل',
             'data': ReservationSerializer(reservation, context={'request': request}).data
         }, status=status.HTTP_200_OK)
 
@@ -4367,19 +4437,19 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if reservation.buyer != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the buyer can approve and release payment'
+                'message': 'تحرير الدفعة للمشتري فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         if reservation.status not in ('completed', 'confirmed'):
             return Response({
                 'success': False,
-                'message': f'Only completed reservations can be approved. Current status: {reservation.status}'
+                'message': 'لا يمكن تحرير دفعة هذا الطلب الآن'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if reservation.payment_released_to_seller:
             return Response({
                 'success': False,
-                'message': 'Payment has already been released'
+                'message': 'حُرّرت الدفعة مسبقاً'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         outbound_order = reservation.delivery_orders.filter(direction='outbound').first()
@@ -4406,7 +4476,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                     delivery_order.save(update_fields=['status', 'confirmed_at'])
 
             # Build success message
-            message = 'Payment released successfully'
+            message = 'حُرّرت الدفعة للبائع'
 
             return Response({
                 'success': True,
@@ -4415,7 +4485,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             }, status=status.HTTP_200_OK)
 
         except Exception:
-            return server_error('Failed to approve reservation')
+            return server_error('تعذّر تحرير الدفعة')
 
     @swagger_auto_schema(
         operation_description="Seller hands a paid reservation off to the delivery company, instead of cancelling it."
@@ -4432,25 +4502,25 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if not is_seller:
             return Response({
                 'success': False,
-                'message': 'Only the seller can send this reservation to delivery'
+                'message': 'الإرسال للتوصيل للبائع فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         if reservation.status != 'completed':
             return Response({
                 'success': False,
-                'message': f'Only paid reservations can be sent to delivery. Current status: {reservation.status}'
+                'message': 'يُرسل الطلب المدفوع فقط'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if not reservation.delivery_location:
             return Response({
                 'success': False,
-                'message': 'This reservation has no delivery address'
+                'message': 'الطلب بلا عنوان توصيل'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if reservation.delivery_orders.filter(direction='outbound').exists():
             return Response({
                 'success': False,
-                'message': 'This reservation was already sent to delivery'
+                'message': 'أُرسل الطلب للتوصيل مسبقاً'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if not get_active_delivery_company():
@@ -4470,7 +4540,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             }, status=status.HTTP_201_CREATED)
 
         except Exception:
-            return server_error('Failed to send reservation to delivery')
+            return server_error('تعذّر الإرسال للتوصيل')
 
     @swagger_auto_schema(
         operation_description="Seller bundles several paid reservations for the same buyer/address into as few delivery trips as fit the size cap — one delivery fee per trip instead of one per reservation."
@@ -4575,7 +4645,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if not is_buyer and not is_seller:
             return Response({
                 'success': False,
-                'message': 'Only the buyer or seller can cancel this reservation'
+                'message': 'الإلغاء للمشتري أو البائع فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         # 'confirmed' is the final settled state (buyer confirmed receipt, or
@@ -4584,7 +4654,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if reservation.status not in ['pending', 'completed']:
             return Response({
                 'success': False,
-                'message': f'Reservation cannot be cancelled. Current status: {reservation.status}'
+                'message': 'لا يمكن إلغاء هذا الطلب الآن'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # Once the money has gone to the seller the sale is settled for both
@@ -4615,7 +4685,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             if not reservation.can_buyer_cancel():
                 return Response({
                     'success': False,
-                    'message': 'Cancellation period expired. Need seller approval.'
+                    'message': 'انتهت مهلة الإلغاء أو خرج الطلب للتوصيل — تلزم موافقة البائع'
                 }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
@@ -4628,7 +4698,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 if reservation.status not in ['pending', 'completed'] or reservation.payment_released_to_seller:
                     return Response({
                         'success': False,
-                        'message': f'Reservation cannot be cancelled. Current status: {reservation.status}'
+                        'message': 'لا يمكن إلغاء هذا الطلب الآن'
                     }, status=status.HTTP_400_BAD_REQUEST)
                 # The courier's leg is settled with the order: taken, it blocks
                 # the cancel; not yet taken, it is called off — an order left
@@ -4674,11 +4744,12 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                     # re-open that entry so viewers can reserve it again.
                     if reservation.live_session_item_id:
                         LiveSessionItem.objects.filter(
-                            id=reservation.live_session_item_id, status='sold_out'
+                            id=reservation.live_session_item_id, status='sold_out',
+                            session__status='live',
                         ).update(status='queued')
                 else:
                     item = reservation.item
-                unlist_auction_item(item, reservation)
+                park_if_unlisted(item)
 
                 reservation.status = 'cancelled'
                 reservation.save(update_fields=['status'])
@@ -4713,9 +4784,9 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                     )
 
             who = 'seller' if (is_seller and not is_buyer) else 'buyer'
-            message = f'Reservation cancelled successfully by {who}'
+            message = 'أُلغي الطلب'
             if stock_was_taken:
-                message += '. Refund has been processed.'
+                message += '، ورُدّ المبلغ المستحق'
 
             # Send cancellation notifications
             try:
@@ -4750,7 +4821,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             }, status=status.HTTP_200_OK)
 
         except Exception:
-            return server_error('Failed to cancel reservation')
+            return server_error('تعذّر الإلغاء')
 
     @action(detail=True, methods=['post'])
     def approve_cancellation(self, request, pk=None):
@@ -4766,7 +4837,7 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if not is_seller:
             return Response({
                 'success': False,
-                'message': 'Only the seller can approve cancellation'
+                'message': 'الموافقة على الإلغاء للبائع فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         try:
@@ -4775,12 +4846,12 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
             return Response({
                 'success': True,
-                'message': 'Cancellation approved. Buyer can now cancel the reservation.',
+                'message': 'وافقت على الإلغاء، ويستطيع المشتري إلغاء الطلب الآن',
                 'data': ReservationSerializer(reservation, context={'request': request}).data
             }, status=status.HTTP_200_OK)
 
         except Exception:
-            return server_error('Failed to approve cancellation')
+            return server_error('تعذّرت الموافقة على الإلغاء')
 
     @action(detail=True, methods=['post'])
     def request_payment_release(self, request, pk=None):
@@ -4796,19 +4867,19 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         if not is_seller:
             return Response({
                 'success': False,
-                'message': 'Only the seller can request payment release'
+                'message': 'طلب الدفعة للبائع فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         if reservation.status != 'completed':
             return Response({
                 'success': False,
-                'message': f'Payment release can only be requested for completed reservations'
+                'message': 'تُطلب دفعة الطلب المدفوع فقط'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if reservation.payment_released_to_seller:
             return Response({
                 'success': False,
-                'message': 'Payment has already been released'
+                'message': 'حُرّرت الدفعة مسبقاً'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         has_outbound_order = reservation.delivery_orders.filter(direction='outbound').exists()
@@ -4828,11 +4899,11 @@ class ReservationViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
             return Response({
                 'success': True,
-                'message': f'Payment release request sent to {reservation.buyer.username}'
+                'message': f'أُرسل طلب الدفعة إلى {reservation.buyer.username}'
             }, status=status.HTTP_200_OK)
 
         except Exception:
-            return server_error('Failed to send payment release request')
+            return server_error('تعذّر إرسال طلب الدفعة')
 
 
 class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
@@ -4845,6 +4916,7 @@ class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = DeliveryOrder.objects.all()
     serializer_class = DeliveryOrderSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = ItemStandardPagination
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['status', 'direction', 'reservation', 'from_governorate']
 
@@ -4869,7 +4941,7 @@ class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
         if not company or delivery_order.company_id != company.id:
             return Response({
                 'success': False,
-                'message': 'Only the assigned delivery company can update this order'
+                'message': 'تحديث الطلب لشركة التوصيل المكلّفة فقط'
             }, status=status.HTTP_403_FORBIDDEN)
         return None
 
@@ -4886,7 +4958,7 @@ class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
         if delivery_order.status != 'assigned':
             return Response({
                 'success': False,
-                'message': f'Cannot pick up. Current status: {delivery_order.status}'
+                'message': 'لا يمكن استلام هذا الطلب الآن'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
@@ -4912,12 +4984,12 @@ class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
 
             return Response({
                 'success': True,
-                'message': 'Pickup confirmed',
+                'message': 'تأكّد الاستلام',
                 'data': DeliveryOrderSerializer(delivery_order).data
             }, status=status.HTTP_200_OK)
 
         except Exception:
-            return server_error('Failed to confirm pickup')
+            return server_error('تعذّر تأكيد الاستلام')
 
     @swagger_auto_schema(operation_description="Delivery company confirms the item physically reached the buyer — prompts the buyer to confirm or refuse receipt.")
     @action(detail=True, methods=['post'], url_path='mark-arrived')
@@ -4929,21 +5001,26 @@ class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
         if denied:
             return denied
 
-        if delivery_order.direction != 'outbound':
-            return Response({
-                'success': False,
-                'message': 'Only outbound deliveries can be marked as arrived'
-            }, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            delivery_order = DeliveryOrder.objects.select_for_update().get(pk=delivery_order.pk)
+            if delivery_order.status != 'picked_up':
+                return Response({
+                    'success': False,
+                    'message': 'لا يمكن تأكيد الوصول الآن'
+                }, status=status.HTTP_400_BAD_REQUEST)
 
-        if delivery_order.status != 'picked_up':
-            return Response({
-                'success': False,
-                'message': f'Cannot mark arrived. Current status: {delivery_order.status}'
-            }, status=status.HTTP_400_BAD_REQUEST)
+            delivery_order.status = 'delivered'
+            delivery_order.delivered_at = timezone.now()
+            delivery_order.save(update_fields=['status', 'delivered_at'])
 
-        delivery_order.status = 'delivered'
-        delivery_order.delivered_at = timezone.now()
-        delivery_order.save(update_fields=['status', 'delivered_at'])
+        if delivery_order.direction == 'return':
+            # Back with the seller. Administrative: the money was settled when
+            # the goods left the buyer (execute_return_refund).
+            return Response({
+                'success': True,
+                'message': 'أُغلق طلب الإرجاع',
+                'data': DeliveryOrderSerializer(delivery_order).data
+            }, status=status.HTTP_200_OK)
 
         try:
             notify_delivery_arrived(delivery_order)
@@ -4952,7 +5029,63 @@ class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response({
             'success': True,
-            'message': 'Buyer notified to confirm or refuse receipt',
+            'message': 'أُبلغ الزبون ليؤكّد الاستلام',
+            'data': DeliveryOrderSerializer(delivery_order).data
+        }, status=status.HTTP_200_OK)
+
+    @swagger_auto_schema(operation_description="Delivery company could not deliver: it holds the goods and an admin decides the money.")
+    @action(detail=True, methods=['post'], url_path='mark-failed')
+    def mark_failed(self, request, pk=None):
+        """The buyer was absent, the address wrong, the phone off. Without this
+        the company could only say 'arrived', which starts the warranty clock
+        and ends in the order counting as received. The goods are with the
+        courier, so the return leg is already collected, and a dispute opens
+        for an admin to settle the money (services.disputes)."""
+        delivery_order = self.get_object()
+        denied = self._company_account_or_403(delivery_order, request)
+        if denied:
+            return denied
+
+        reason = str(request.data.get('reason') or '').strip()[:500]
+        if not reason:
+            return Response({'success': False, 'message': 'اكتب سبب تعذّر التوصيل'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        try:
+            with transaction.atomic():
+                reservation = Reservation.objects.select_for_update().select_related(
+                    'item', 'buyer').get(pk=delivery_order.reservation_id)
+                delivery_order = DeliveryOrder.objects.select_for_update().get(pk=delivery_order.pk)
+                if (delivery_order.direction != 'outbound'
+                        or delivery_order.status not in ('picked_up', 'delivered')
+                        or reservation.status != 'completed'
+                        or reservation.payment_released_to_seller):
+                    return Response({
+                        'success': False,
+                        'message': 'لا يمكن تسجيل تعذّر التوصيل لهذا الطلب الآن'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                delivery_order.status = 'failed'
+                delivery_order.failure_reason = reason
+                delivery_order.save(update_fields=['status', 'failure_reason'])
+                reservation.status = 'disputed'
+                reservation.save(update_fields=['status'])
+                dispute = Dispute.objects.create(
+                    item=reservation.item, reservation=reservation,
+                    complainant=reservation.buyer, defendant=reservation.item.owner,
+                    title='تعذّر التوصيل', description=reason, reason='delivery_failed')
+                return_order = create_return_delivery_order(reservation, dispute=dispute)
+                return_order.status = 'picked_up'
+                return_order.picked_up_at = timezone.now()
+                return_order.save(update_fields=['status', 'picked_up_at'])
+        except Exception:
+            return server_error('تعذّر تسجيل الحالة')
+
+        try:
+            notify_dispute_created(dispute)
+        except Exception as e:
+            logger.error(f"Failed to send delivery-failed notification: {e}", exc_info=True)
+        return Response({
+            'success': True,
+            'message': 'سُجّل تعذّر التوصيل — أعد البضاعة للبائع، وستقرر الإدارة بشأن المبلغ',
             'data': DeliveryOrderSerializer(delivery_order).data
         }, status=status.HTTP_200_OK)
 
@@ -4979,13 +5112,13 @@ class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
         if delivery_order.reservation.buyer != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the buyer can confirm receipt'
+                'message': 'تأكيد الاستلام للمشتري فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         if delivery_order.direction != 'outbound' or delivery_order.status != 'delivered':
             return Response({
                 'success': False,
-                'message': f'Cannot confirm receipt. Current status: {delivery_order.status}'
+                'message': 'لا يمكن تأكيد الاستلام الآن'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         with transaction.atomic():
@@ -4995,7 +5128,7 @@ class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
             if delivery_order.status != 'delivered':
                 return Response({
                     'success': False,
-                    'message': f'Cannot confirm receipt. Current status: {delivery_order.status}'
+                    'message': 'لا يمكن تأكيد الاستلام الآن'
                 }, status=status.HTTP_400_BAD_REQUEST)
             record_receipt(delivery_order)
 
@@ -5032,13 +5165,13 @@ class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
         if reservation.buyer != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the buyer can refuse receipt'
+                'message': 'رفض الاستلام للمشتري فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         if delivery_order.direction != 'outbound' or delivery_order.status != 'delivered':
             return Response({
                 'success': False,
-                'message': f'Cannot refuse receipt. Current status: {delivery_order.status}'
+                'message': 'لا يمكن رفض الاستلام الآن'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         reason = request.data.get('reason', '').strip()
@@ -5102,7 +5235,7 @@ class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
             }, status=status.HTTP_200_OK)
 
         except Exception:
-            return server_error('Failed to refuse receipt')
+            return server_error('تعذّر رفض الاستلام')
 
 
 class DisputeViewSet(viewsets.ModelViewSet):
@@ -5170,7 +5303,7 @@ class DisputeViewSet(viewsets.ModelViewSet):
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -5192,7 +5325,7 @@ class DisputeViewSet(viewsets.ModelViewSet):
                 else:
                     return Response({
                         'success': False,
-                        'message': 'Seller must specify a reservation when filing a dispute'
+                        'message': 'حدّد الطلب لفتح النزاع'
                     }, status=status.HTTP_400_BAD_REQUEST)
             else:
                 # Buyer filing dispute against seller
@@ -5212,7 +5345,7 @@ class DisputeViewSet(viewsets.ModelViewSet):
             if reservation and reservation.status not in ('completed', 'confirmed'):
                 return Response({
                     'success': False,
-                    'message': f'Cannot file a dispute on this reservation. Current status: {reservation.status}'
+                    'message': 'لا يمكن فتح نزاع على هذا الطلب'
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             # A settled sale stays settled: the warranty, plus a few days for
@@ -5245,22 +5378,22 @@ class DisputeViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'success': True,
-                'message': 'Dispute created successfully',
+                'message': 'فُتح النزاع',
                 'data': DisputeSerializer(dispute).data
             }, status=status.HTTP_201_CREATED)
 
         except Item.DoesNotExist:
             return Response({
                 'success': False,
-                'message': 'Item not found'
+                'message': 'المنتج غير موجود'
             }, status=status.HTTP_404_NOT_FOUND)
         except Reservation.DoesNotExist:
             return Response({
                 'success': False,
-                'message': 'Reservation not found'
+                'message': 'الطلب غير موجود'
             }, status=status.HTTP_404_NOT_FOUND)
         except Exception:
-            return server_error('Failed to create dispute')
+            return server_error('تعذّر فتح النزاع')
 
     @swagger_auto_schema(
         operation_description="Resolve a dispute (admin only)",
@@ -5281,7 +5414,7 @@ class DisputeViewSet(viewsets.ModelViewSet):
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -5301,7 +5434,7 @@ class DisputeViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'success': True,
-                'message': f'Dispute resolved: {resolution_action}',
+                'message': 'حُسم النزاع',
                 'data': DisputeSerializer(dispute).data
             }, status=status.HTTP_200_OK)
 
@@ -5317,7 +5450,7 @@ class DisputeViewSet(viewsets.ModelViewSet):
                 'errors': str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
         except Exception:
-            return server_error('Failed to resolve dispute')
+            return server_error('تعذّر حسم النزاع')
 
 
 class ReportViewSet(viewsets.ModelViewSet):
@@ -5369,7 +5502,7 @@ class ReportViewSet(viewsets.ModelViewSet):
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -5425,7 +5558,7 @@ class ReportViewSet(viewsets.ModelViewSet):
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -5570,7 +5703,7 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -5603,17 +5736,17 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'success': True,
-                'message': 'Representative request sent successfully',
+                'message': 'أُرسل طلب المندوبية',
                 'data': RepresentativeSerializer(representative, context={'request': request}).data
             }, status=status.HTTP_201_CREATED)
 
         except Item.DoesNotExist:
             return Response({
                 'success': False,
-                'message': 'Item not found'
+                'message': 'المنتج غير موجود'
             }, status=status.HTTP_404_NOT_FOUND)
         except Exception:
-            return server_error('Failed to create representative request')
+            return server_error('تعذّر إرسال طلب المندوبية')
 
     @swagger_auto_schema(
         operation_description="Accept a representative request (owner only)",
@@ -5633,14 +5766,14 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
         if representative.owner != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the item owner can accept this request'
+                'message': 'القبول لصاحب المنتج فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         # Must be pending
         if representative.status != 'pending':
             return Response({
                 'success': False,
-                'message': f'Cannot accept request with status: {representative.status}'
+                'message': 'لا يمكن قبول هذا الطلب'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
@@ -5655,12 +5788,12 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'success': True,
-                'message': 'Representative request accepted',
+                'message': 'قُبل طلب المندوبية',
                 'data': RepresentativeSerializer(representative, context={'request': request}).data
             }, status=status.HTTP_200_OK)
 
         except Exception:
-            return server_error('Failed to accept request')
+            return server_error('تعذّر قبول الطلب')
 
     @swagger_auto_schema(
         operation_description="Reject a representative request (owner only)",
@@ -5681,21 +5814,21 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
         if representative.owner != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the item owner can reject this request'
+                'message': 'الرفض لصاحب المنتج فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         # Must be pending
         if representative.status != 'pending':
             return Response({
                 'success': False,
-                'message': f'Cannot reject request with status: {representative.status}'
+                'message': 'لا يمكن رفض هذا الطلب'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = RepresentativeRejectSerializer(data=request.data)
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -5714,12 +5847,12 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'success': True,
-                'message': 'Representative request rejected',
+                'message': 'رُفض طلب المندوبية',
                 'data': RepresentativeSerializer(representative, context={'request': request}).data
             }, status=status.HTTP_200_OK)
 
         except Exception:
-            return server_error('Failed to reject request')
+            return server_error('تعذّر رفض الطلب')
 
     @swagger_auto_schema(
         operation_description="Cancel a representative request or assignment",
@@ -5745,7 +5878,7 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
         if not can_cancel:
             return Response({
                 'success': False,
-                'message': 'You do not have permission to cancel this'
+                'message': 'لا يمكنك إلغاء هذا'
             }, status=status.HTTP_403_FORBIDDEN)
 
         try:
@@ -5760,12 +5893,12 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'success': True,
-                'message': 'Representative assignment cancelled',
+                'message': 'أُلغيت المندوبية',
                 'data': RepresentativeSerializer(representative, context={'request': request}).data
             }, status=status.HTTP_200_OK)
 
         except Exception:
-            return server_error('Failed to cancel')
+            return server_error('تعذّر الإلغاء')
 
     @swagger_auto_schema(
         operation_description="Create a reservation through a representative (buyer gets representative's deal)",
@@ -5791,14 +5924,14 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
         if representative_assignment.status not in ['accepted', 'active']:
             return Response({
                 'success': False,
-                'message': f'Representative assignment is not active. Current status: {representative_assignment.status}'
+                'message': 'المندوبية غير نشطة'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # Verify representative can complete sales
         if not representative_assignment.can_complete_sale:
             return Response({
                 'success': False,
-                'message': 'This representative is not authorized to complete sales'
+                'message': 'هذا المندوب غير مخوّل بالبيع'
             }, status=status.HTTP_403_FORBIDDEN)
 
         serializer = CreateReservationSerializer(
@@ -5809,7 +5942,7 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -5820,7 +5953,7 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
         if representative_assignment.item.id != item_id:
             return Response({
                 'success': False,
-                'message': 'Item ID does not match this representative assignment'
+                'message': 'المنتج لا يخص هذه المندوبية'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         item = representative_assignment.item
@@ -5829,20 +5962,20 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
         if item.owner == request.user:
             return Response({
                 'success': False,
-                'message': 'Cannot reserve your own item'
+                'message': 'لا يمكنك حجز منتجك'
             }, status=status.HTTP_403_FORBIDDEN)
 
         # Buyer cannot be the representative
         if representative_assignment.representative == request.user:
             return Response({
                 'success': False,
-                'message': 'Representative cannot buy through their own representative link'
+                'message': 'لا يمكن للمندوب الشراء من رابطه'
             }, status=status.HTTP_403_FORBIDDEN)
 
         if quantity < 1:
             return Response({
                 'success': False,
-                'message': 'Quantity must be at least 1'
+                'message': 'الكمية واحد على الأقل'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
@@ -5855,14 +5988,14 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                 except FixedPriceListing.DoesNotExist:
                     return Response({
                         'success': False,
-                        'message': 'No fixed price listing exists for this item'
+                        'message': 'المنتج غير معروض بسعر ثابت'
                     }, status=status.HTTP_404_NOT_FOUND)
 
                 # Validation checks
                 if item.status not in ['active', 'reserved']:
                     return Response({
                         'success': False,
-                        'message': f'Item is not available for reservation. Current status: {item.status}'
+                        'message': 'المنتج غير متاح للحجز'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 # The combination the buyer picked, as in create_reservation:
@@ -5875,7 +6008,7 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                 if quantity > variant.quantity:
                     return Response({
                         'success': False,
-                        'message': f'Insufficient quantity. Only {variant.quantity} item(s) available, but {quantity} requested'
+                        'message': f'المتوفّر {variant.quantity} فقط'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 # Check for existing active reservation by this user
@@ -5888,7 +6021,7 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                 if existing:
                     return Response({
                         'success': False,
-                        'message': 'You already have an active reservation for this item'
+                        'message': 'لديك حجز قائم على هذا المنتج'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 # Calculate amounts
@@ -5964,7 +6097,7 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'success': True,
-                'message': f'Reservation created successfully through representative {representative_assignment.representative.username}. Commission: ${commission_amount}',
+                'message': f'تم الحجز عبر المندوب {representative_assignment.representative.username}',
                 'data': ReservationSerializer(reservation, context={'request': request}).data,
                 'representative_info': {
                     'username': representative_assignment.representative.username,
@@ -5975,7 +6108,7 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_201_CREATED)
 
         except Exception:
-            return server_error('Failed to create reservation')
+            return server_error('تعذّر إنشاء الحجز')
 
 
     @swagger_auto_schema(
@@ -5997,21 +6130,21 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
         if representative.owner != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the item owner can update permissions'
+                'message': 'تعديل الصلاحيات لصاحب المنتج فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         # Must be active
         if representative.status not in ['accepted', 'active']:
             return Response({
                 'success': False,
-                'message': 'Can only update permissions for active representatives'
+                'message': 'تُعدّل صلاحيات المندوب النشط فقط'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = RepresentativeUpdatePermissionsSerializer(data=request.data)
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -6051,12 +6184,12 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'success': True,
-                'message': 'Permissions updated successfully',
+                'message': 'حُدّثت الصلاحيات',
                 'data': RepresentativeSerializer(representative, context={'request': request}).data
             }, status=status.HTTP_200_OK)
 
         except Exception:
-            return server_error('Failed to update permissions')
+            return server_error('تعذّر تحديث الصلاحيات')
 
     # In RepresentativeViewSet
     @swagger_auto_schema(
@@ -6071,7 +6204,7 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
         if representative_assignment.status not in ['accepted', 'active']:
             return Response({
                 'success': False,
-                'message': 'Representative assignment is not active'
+                'message': 'المندوبية غير نشطة'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # Generate the purchase URL
@@ -6120,7 +6253,7 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
         if representative.representative != request.user and representative.owner != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the representative or the item owner can delete this'
+                'message': 'الحذف للمندوب أو صاحب المنتج فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         return super().destroy(request, *args, **kwargs)
@@ -6234,7 +6367,7 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
 
         return Response({
             'success': True,
-            'message': f'Agreement request sent to {item.owner.username}.',
+            'message': f'أُرسل طلبك إلى {item.owner.username}',
             'data': ItemTransferSerializer(transfer, context={'request': request}).data
         }, status=status.HTTP_201_CREATED)
 
@@ -6261,7 +6394,7 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
         """Owner approves — transfers ownership of the quantity immediately at the item's listed price"""
         transfer = self.get_object()
         if transfer.from_user != request.user:
-            return Response({'success': False, 'message': 'Only the item owner can approve'}, status=status.HTTP_403_FORBIDDEN)
+            return Response({'success': False, 'message': 'الموافقة لصاحب المنتج فقط'}, status=status.HTTP_403_FORBIDDEN)
         try:
             with transaction.atomic():
                 transfer = ItemTransfer.objects.select_for_update().get(pk=transfer.pk)
@@ -6274,7 +6407,7 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
 
         return Response({
             'success': True,
-            'message': 'Agreement activated. The reseller now owns the transferred quantity.',
+            'message': 'فُعّلت الاتفاقية، وانتقلت الكمية إلى المشتري',
             'data': ItemTransferSerializer(transfer, context={'request': request}).data
         })
 
@@ -6283,9 +6416,9 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
         """Owner rejects the agreement request"""
         transfer = self.get_object()
         if transfer.from_user != request.user:
-            return Response({'success': False, 'message': 'Only the item owner can reject'}, status=status.HTTP_403_FORBIDDEN)
+            return Response({'success': False, 'message': 'الرفض لصاحب المنتج فقط'}, status=status.HTTP_403_FORBIDDEN)
         if transfer.status != 'pending':
-            return Response({'success': False, 'message': f'Cannot reject a {transfer.status} agreement'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'success': False, 'message': 'لا يمكن رفض هذه الاتفاقية'}, status=status.HTTP_400_BAD_REQUEST)
         serializer = ResaleRejectSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         with transaction.atomic():
@@ -6297,7 +6430,7 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
         from .tasks import send_resale_agreement_rejected_notification
         send_resale_agreement_rejected_notification.delay(transfer.id)
 
-        return Response({'success': True, 'message': 'Agreement rejected', 'data': ItemTransferSerializer(transfer, context={'request': request}).data})
+        return Response({'success': True, 'message': 'رُفضت الاتفاقية', 'data': ItemTransferSerializer(transfer, context={'request': request}).data})
 
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
@@ -6308,11 +6441,11 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
             (transfer.from_user == request.user and transfer.status == 'active')
         )
         if not can:
-            return Response({'success': False, 'message': 'Cannot cancel this agreement'}, status=status.HTTP_403_FORBIDDEN)
+            return Response({'success': False, 'message': 'لا يمكن إلغاء هذه الاتفاقية'}, status=status.HTTP_403_FORBIDDEN)
         if transfer.status == 'active' and transfer.from_user == request.user and not transfer.term_has_ended():
             return Response({
                 'success': False,
-                'message': f'Cannot end this agreement before its term ends on {transfer.agreement_end_date}',
+                'message': f'لا تنتهي الاتفاقية قبل {transfer.agreement_end_date:%Y-%m-%d}',
             }, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
             transfer.status = 'cancelled'
@@ -6322,7 +6455,7 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
         from .tasks import send_resale_agreement_cancelled_notification
         send_resale_agreement_cancelled_notification.delay(transfer.id, request.user.id)
 
-        return Response({'success': True, 'message': 'Agreement cancelled', 'data': ItemTransferSerializer(transfer, context={'request': request}).data})
+        return Response({'success': True, 'message': 'أُلغيت الاتفاقية', 'data': ItemTransferSerializer(transfer, context={'request': request}).data})
 
     @action(detail=True, methods=['post'])
     def complete(self, request, pk=None):
@@ -6337,13 +6470,13 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
         is_owner = transfer.from_user == request.user
         is_reseller = transfer.to_user == request.user
         if not (is_owner or is_reseller):
-            return Response({'success': False, 'message': 'Not a participant in this agreement'}, status=status.HTTP_403_FORBIDDEN)
+            return Response({'success': False, 'message': 'لست طرفاً في هذه الاتفاقية'}, status=status.HTTP_403_FORBIDDEN)
         if transfer.status != 'active':
-            return Response({'success': False, 'message': f'Cannot complete a {transfer.status} agreement'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'success': False, 'message': 'لا يمكن إغلاق هذه الاتفاقية'}, status=status.HTTP_400_BAD_REQUEST)
         if is_owner and not transfer.term_has_ended():
             return Response({
                 'success': False,
-                'message': f'Cannot end this agreement before its term ends on {transfer.agreement_end_date}',
+                'message': f'لا تنتهي الاتفاقية قبل {transfer.agreement_end_date:%Y-%m-%d}',
             }, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
             transfer.status = 'completed'
@@ -6351,7 +6484,7 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
             transfer.save(update_fields=['status', 'completed_at'])
         return Response({
             'success': True,
-            'message': 'Agreement closed.',
+            'message': 'أُغلقت الاتفاقية',
             'data': ItemTransferSerializer(transfer, context={'request': request}).data
         })
 
@@ -6460,7 +6593,7 @@ class ChatViewSet(viewsets.ModelViewSet):
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -6500,17 +6633,17 @@ class ChatViewSet(viewsets.ModelViewSet):
             status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
             return Response({
                 'success': True,
-                'message': 'Chat created' if created else 'Chat retrieved',
+                'message': 'فُتحت المحادثة',
                 'data': ChatDetailSerializer(chat, context={'request': request}).data
             }, status=status_code)
 
         except Item.DoesNotExist:
             return Response({
                 'success': False,
-                'message': 'Item not found'
+                'message': 'المنتج غير موجود'
             }, status=status.HTTP_404_NOT_FOUND)
         except Exception:
-            return server_error('Failed to create/get chat')
+            return server_error('تعذّر فتح المحادثة')
 
     @swagger_auto_schema(
         operation_description="Create or get a direct chat with a store",
@@ -6530,7 +6663,7 @@ class ChatViewSet(viewsets.ModelViewSet):
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -6568,17 +6701,17 @@ class ChatViewSet(viewsets.ModelViewSet):
             status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
             return Response({
                 'success': True,
-                'message': 'Chat created' if created else 'Chat retrieved',
+                'message': 'فُتحت المحادثة',
                 'data': ChatDetailSerializer(chat, context={'request': request}).data
             }, status=status_code)
 
         except UserStore.DoesNotExist:
             return Response({
                 'success': False,
-                'message': 'Store not found'
+                'message': 'المتجر غير موجود'
             }, status=status.HTTP_404_NOT_FOUND)
         except Exception:
-            return server_error('Failed to create/get store chat')
+            return server_error('تعذّر فتح المحادثة')
 
     @swagger_auto_schema(
         operation_description="Create or get the current user's support chat",
@@ -6596,7 +6729,7 @@ class ChatViewSet(viewsets.ModelViewSet):
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -6607,11 +6740,11 @@ class ChatViewSet(viewsets.ModelViewSet):
             status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
             return Response({
                 'success': True,
-                'message': 'Chat created' if created else 'Chat retrieved',
+                'message': 'فُتحت المحادثة',
                 'data': ChatDetailSerializer(chat, context={'request': request}).data
             }, status=status_code)
         except Exception:
-            return server_error('Failed to create/get support chat')
+            return server_error('تعذّر فتح محادثة الدعم')
 
     @swagger_auto_schema(
         operation_description="Send a message in a chat",
@@ -6631,14 +6764,14 @@ class ChatViewSet(viewsets.ModelViewSet):
         if request.user not in [chat.buyer, chat.seller]:
             return Response({
                 'success': False,
-                'message': 'You are not a participant in this chat'
+                'message': 'لست طرفاً في هذه المحادثة'
             }, status=status.HTTP_403_FORBIDDEN)
 
         serializer = MessageCreateSerializer(data=request.data)
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -6685,12 +6818,12 @@ class ChatViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'success': True,
-                'message': 'Message sent',
+                'message': 'أُرسلت الرسالة',
                 'data': response_data
             }, status=status.HTTP_201_CREATED)
 
         except Exception:
-            return server_error('Failed to send message')
+            return server_error('تعذّر إرسال الرسالة')
 
     @swagger_auto_schema(
         operation_description="Send a price offer",
@@ -6710,7 +6843,7 @@ class ChatViewSet(viewsets.ModelViewSet):
         if request.user != chat.buyer:
             return Response({
                 'success': False,
-                'message': 'Only the buyer can send price offers'
+                'message': 'العرض للمشتري فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         if not chat.item:
@@ -6723,7 +6856,7 @@ class ChatViewSet(viewsets.ModelViewSet):
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -6745,7 +6878,7 @@ class ChatViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            content = f"Price offer: {offer_amount} for {quantity} item(s)"
+            content = f"عرض سعر: {offer_amount} د.ع لعدد {quantity}"
             if chat.item.options:
                 # The seller answers for what they can see.
                 content += ' — ' + ' / '.join(str(x) for x in (variant.attributes or {}).values())
@@ -6791,12 +6924,12 @@ class ChatViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'success': True,
-                'message': 'Offer sent',
+                'message': 'أُرسل العرض',
                 'data': MessageSerializer(message, context={'request': request}).data
             }, status=status.HTTP_201_CREATED)
 
         except Exception:
-            return server_error('Failed to send offer')
+            return server_error('تعذّر إرسال العرض')
 
     @swagger_auto_schema(
         operation_description="Mark all messages as read",
@@ -6849,7 +6982,7 @@ class ChatViewSet(viewsets.ModelViewSet):
             except Message.DoesNotExist:
                 return Response({
                     'success': False,
-                    'message': 'Invalid before id'
+                    'message': 'طلب غير صالح'
                 }, status=status.HTTP_400_BAD_REQUEST)
             qs = qs.filter(created_at__lt=before_message.created_at)
 
@@ -6881,7 +7014,7 @@ class ChatViewSet(viewsets.ModelViewSet):
 
         return Response({
             'success': True,
-            'message': 'Chat archived',
+            'message': 'أُرشفت المحادثة',
             'data': ChatSerializer(chat, context={'request': request}).data
         })
 
@@ -6903,7 +7036,7 @@ class ChatViewSet(viewsets.ModelViewSet):
 
         return Response({
             'success': True,
-            'message': 'Chat unarchived',
+            'message': 'أُعيدت المحادثة',
             'data': ChatSerializer(chat, context={'request': request}).data
         })
 
@@ -6991,14 +7124,14 @@ class MessageViewSet(viewsets.ModelViewSet):
         if message.sender != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the sender can edit this message'
+                'message': 'التعديل لمرسل الرسالة فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         # Can only edit user messages
         if message.message_type != 'user':
             return Response({
                 'success': False,
-                'message': 'Can only edit user messages'
+                'message': 'لا يمكن تعديل هذه الرسالة'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # Can only edit within 15 minutes
@@ -7006,17 +7139,21 @@ class MessageViewSet(viewsets.ModelViewSet):
         if message.created_at < time_limit:
             return Response({
                 'success': False,
-                'message': 'Can only edit messages within 15 minutes'
+                'message': 'تُعدّل الرسالة خلال 15 دقيقة فقط'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if 'content' in request.data:
-            message.content = request.data['content']
+            content = str(request.data['content'] or '').strip()
+            if not content or len(content) > MessageCreateSerializer.MAX_LENGTH:
+                return Response({'success': False, 'message': 'نص الرسالة فارغ أو طويل جداً'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            message.content = content
             message.edited_at = timezone.now()
             message.save(update_fields=['content', 'edited_at'])
 
         return Response({
             'success': True,
-            'message': 'Message updated',
+            'message': 'عُدّلت الرسالة',
             'data': MessageSerializer(message, context={'request': request}).data
         })
 
@@ -7032,7 +7169,7 @@ class MessageViewSet(viewsets.ModelViewSet):
         if message.sender != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the sender can delete this message'
+                'message': 'الحذف لمرسل الرسالة فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         message.is_deleted_by_sender = True
@@ -7040,7 +7177,7 @@ class MessageViewSet(viewsets.ModelViewSet):
 
         return Response({
             'success': True,
-            'message': 'Message deleted'
+            'message': 'حُذفت الرسالة'
         })
 
     @swagger_auto_schema(
@@ -7056,21 +7193,21 @@ class MessageViewSet(viewsets.ModelViewSet):
         if message.chat.seller != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the seller can accept offers'
+                'message': 'قبول العرض للبائع فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         # Must be an offer
         if message.message_type not in ['offer', 'counter_offer']:
             return Response({
                 'success': False,
-                'message': 'This is not an offer message'
+                'message': 'هذه ليست رسالة عرض'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # Must be pending
         if message.offer_status != 'pending':
             return Response({
                 'success': False,
-                'message': f'Offer is already {message.offer_status}'
+                'message': 'حُسم هذا العرض مسبقاً'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
@@ -7083,7 +7220,7 @@ class MessageViewSet(viewsets.ModelViewSet):
                     chat=message.chat,
                     sender=None,
                     message_type='system',
-                    content=f"Offer of {message.offer_amount} was accepted by {request.user.username}"
+                    content=f"قَبِل {request.user.username} العرض {message.offer_amount} د.ع"
                 )
 
             try:
@@ -7128,12 +7265,12 @@ class MessageViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'success': True,
-                'message': 'Offer accepted',
+                'message': 'قُبل العرض',
                 'data': MessageSerializer(message, context={'request': request}).data
             })
 
         except Exception:
-            return server_error('Failed to accept offer')
+            return server_error('تعذّر قبول العرض')
 
     @swagger_auto_schema(
         operation_description="Reject a price offer (seller only)",
@@ -7148,21 +7285,21 @@ class MessageViewSet(viewsets.ModelViewSet):
         if message.chat.seller != request.user:
             return Response({
                 'success': False,
-                'message': 'Only the seller can reject offers'
+                'message': 'رفض العرض للبائع فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         # Must be an offer
         if message.message_type not in ['offer', 'counter_offer']:
             return Response({
                 'success': False,
-                'message': 'This is not an offer message'
+                'message': 'هذه ليست رسالة عرض'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # Must be pending
         if message.offer_status != 'pending':
             return Response({
                 'success': False,
-                'message': f'Offer is already {message.offer_status}'
+                'message': 'حُسم هذا العرض مسبقاً'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
@@ -7204,12 +7341,12 @@ class MessageViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'success': True,
-                'message': 'Offer rejected',
+                'message': 'رُفض العرض',
                 'data': MessageSerializer(message, context={'request': request}).data
             })
 
         except Exception:
-            return server_error('Failed to reject offer')
+            return server_error('تعذّر رفض العرض')
 
 
 class UserStoreViewSet(viewsets.ModelViewSet):
@@ -7295,7 +7432,7 @@ class UserStoreViewSet(viewsets.ModelViewSet):
         if hasattr(request.user, 'store'):
             return Response({
                 'success': False,
-                'message': 'You already have a store',
+                'message': 'لديك متجر مسبقاً',
                 'data': UserStoreSerializer(request.user.store).data
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -7304,7 +7441,7 @@ class UserStoreViewSet(viewsets.ModelViewSet):
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -7318,12 +7455,12 @@ class UserStoreViewSet(viewsets.ModelViewSet):
                     try:
                         default_location = Location.objects.get(
                             id=location_id,
-                            user=request.user
+                            user=request.user, is_active=True
                         )
                     except Location.DoesNotExist:
                         return Response({
                             'success': False,
-                            'message': 'Location not found or does not belong to you'
+                            'message': 'العنوان غير موجود'
                         }, status=status.HTTP_400_BAD_REQUEST)
 
                 # Create store
@@ -7341,12 +7478,12 @@ class UserStoreViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'success': True,
-                'message': 'Store created successfully! You can now start listing items.',
+                'message': 'أُنشئ متجرك، وتستطيع عرض منتجاتك الآن',
                 'data': UserStoreSerializer(store).data
             }, status=status.HTTP_201_CREATED)
 
         except Exception:
-            return server_error('Failed to create store')
+            return server_error('تعذّر إنشاء المتجر')
 
     @swagger_auto_schema(
         operation_description="Update your store details",
@@ -7366,7 +7503,7 @@ class UserStoreViewSet(viewsets.ModelViewSet):
         if store.user != request.user:
             return Response({
                 'success': False,
-                'message': 'You can only update your own store'
+                'message': 'تعدّل متجرك فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         serializer = self.get_serializer(store, data=request.data, partial=True)
@@ -7374,7 +7511,7 @@ class UserStoreViewSet(viewsets.ModelViewSet):
         if not serializer.is_valid():
             return Response({
                 'success': False,
-                'message': 'Validation failed',
+                'message': 'بيانات غير صالحة',
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -7384,12 +7521,12 @@ class UserStoreViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'success': True,
-                'message': 'Store updated successfully',
+                'message': 'حُدّث المتجر',
                 'data': UserStoreSerializer(updated_store).data
             }, status=status.HTTP_200_OK)
 
         except Exception:
-            return server_error('Failed to update store')
+            return server_error('تعذّر تحديث المتجر')
 
     @swagger_auto_schema(
         operation_description="Get your own store details",
@@ -7411,7 +7548,7 @@ class UserStoreViewSet(viewsets.ModelViewSet):
         except UserStore.DoesNotExist:
             return Response({
                 'success': False,
-                'message': 'You do not have a store yet. Create one to start selling!',
+                'message': 'ليس لديك متجر بعد — أنشئ واحداً لتبدأ البيع',
                 'need_to_create': True
             }, status=status.HTTP_404_NOT_FOUND)
 
@@ -7449,13 +7586,13 @@ class UserStoreViewSet(viewsets.ModelViewSet):
         except User.DoesNotExist:
             return Response({
                 'success': False,
-                'message': f'User "{username}" not found'
+                'message': 'المستخدم غير موجود'
             }, status=status.HTTP_404_NOT_FOUND)
 
         except UserStore.DoesNotExist:
             return Response({
                 'success': False,
-                'message': f'Store for user "{username}" not found or is inactive'
+                'message': 'المتجر غير موجود أو غير مفعّل'
             }, status=status.HTTP_404_NOT_FOUND)
 
     @swagger_auto_schema(
@@ -7542,13 +7679,13 @@ class UserStoreViewSet(viewsets.ModelViewSet):
         except User.DoesNotExist:
             return Response({
                 'success': False,
-                'message': f'User "{username}" not found'
+                'message': 'المستخدم غير موجود'
             }, status=status.HTTP_404_NOT_FOUND)
 
         except UserStore.DoesNotExist:
             return Response({
                 'success': False,
-                'message': f'Store for user "{username}" not found or is inactive'
+                'message': 'المتجر غير موجود أو غير مفعّل'
             }, status=status.HTTP_404_NOT_FOUND)
 
     # ─────────────────────────────────────────────────────────────
@@ -7826,7 +7963,7 @@ class UserStoreViewSet(viewsets.ModelViewSet):
         if store.user != request.user:
             return Response({
                 'success': False,
-                'message': 'You can only modify your own store'
+                'message': 'تعدّل متجرك فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         is_active = request.data.get('is_active')
@@ -7850,7 +7987,7 @@ class UserStoreViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_200_OK)
 
         except Exception:
-            return server_error('Failed to update store status')
+            return server_error('تعذّر تحديث حالة المتجر')
 
     @swagger_auto_schema(
         operation_description="Update store logo - Use multipart/form-data to upload image file",
@@ -7881,7 +8018,7 @@ class UserStoreViewSet(viewsets.ModelViewSet):
         if store.user != request.user:
             return Response({
                 'success': False,
-                'message': 'You can only modify your own store'
+                'message': 'تعدّل متجرك فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         logo = request.FILES.get('logo')
@@ -7889,7 +8026,7 @@ class UserStoreViewSet(viewsets.ModelViewSet):
         if not logo:
             return Response({
                 'success': False,
-                'message': 'No logo file provided'
+                'message': 'لم تُرفق صورة'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
@@ -7902,12 +8039,12 @@ class UserStoreViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'success': True,
-                'message': 'Store logo updated successfully',
+                'message': 'حُدّث شعار المتجر',
                 'data': UserStoreSerializer(store).data
             }, status=status.HTTP_200_OK)
 
         except Exception:
-            return server_error('Failed to update logo')
+            return server_error('تعذّر تحديث الشعار')
 
     @swagger_auto_schema(
         operation_description="Set default location for store",
@@ -7935,7 +8072,7 @@ class UserStoreViewSet(viewsets.ModelViewSet):
         if store.user != request.user:
             return Response({
                 'success': False,
-                'message': 'You can only modify your own store'
+                'message': 'تعدّل متجرك فقط'
             }, status=status.HTTP_403_FORBIDDEN)
 
         location_id = request.data.get('location_id')
@@ -7943,28 +8080,28 @@ class UserStoreViewSet(viewsets.ModelViewSet):
         if not location_id:
             return Response({
                 'success': False,
-                'message': 'location_id is required'
+                'message': 'اختر العنوان'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            location = Location.objects.get(id=location_id, user=request.user)
+            location = Location.objects.get(id=location_id, user=request.user, is_active=True)
 
             store.default_location = location
             store.save(update_fields=['default_location'])
 
             return Response({
                 'success': True,
-                'message': f'Default location set to "{location.name}"',
+                'message': f'العنوان الرئيسي: {location.name}',
                 'data': UserStoreSerializer(store).data
             }, status=status.HTTP_200_OK)
 
         except Location.DoesNotExist:
             return Response({
                 'success': False,
-                'message': 'Location not found or does not belong to you'
+                'message': 'العنوان غير موجود'
             }, status=status.HTTP_404_NOT_FOUND)
         except Exception:
-            return server_error('Failed to set default location')
+            return server_error('تعذّر حفظ العنوان')
 
     @swagger_auto_schema(
         operation_description="Get store statistics",
@@ -8051,7 +8188,7 @@ class UserStoreViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_200_OK)
 
         except Exception:
-            return server_error('Failed to retrieve statistics')
+            return server_error('تعذّر جلب الإحصائيات')
 
     @swagger_auto_schema(
         operation_description="Browse all active stores",
@@ -8597,7 +8734,7 @@ class WalletViewSet(viewsets.ViewSet):
                 if wallet.available_balance < amount:
                     return Response({
                         'success': False,
-                        'message': f'Insufficient balance. Available: {wallet.available_balance}'
+                        'message': f'رصيدك لا يكفي. المتاح {wallet.available_balance} د.ع'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 wallet.hold(amount)  # lock the funds
@@ -8612,11 +8749,11 @@ class WalletViewSet(viewsets.ViewSet):
 
             return Response({
                 'success': True,
-                'message': 'Withdrawal requested. Awaiting admin approval.',
+                'message': 'أُرسل طلب السحب وهو قيد المراجعة',
                 'data': WithdrawalRequestSerializer(wd).data
             }, status=status.HTTP_201_CREATED)
         except Exception:
-            return server_error('Withdrawal failed')
+            return server_error('تعذّر إرسال طلب السحب')
 
     @action(detail=False, methods=['get'])
     def my_deposits(self, request):
@@ -8643,12 +8780,12 @@ class AdminWithdrawalViewSet(viewsets.ReadOnlyModelViewSet):
         wd = self.get_object()
         try:
             approve_withdrawal(wd, reviewed_by=request.user, admin_notes=request.data.get('admin_notes', ''))
-            return Response({'success': True, 'message': 'Withdrawal approved and paid',
+            return Response({'success': True, 'message': 'اعتُمد السحب',
                              'data': WithdrawalRequestSerializer(wd).data})
         except WithdrawalReviewError as e:
             return Response({'success': False, 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception:
-            return server_error('Approval failed')
+            return server_error('تعذّر الاعتماد')
 
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
@@ -8656,12 +8793,12 @@ class AdminWithdrawalViewSet(viewsets.ReadOnlyModelViewSet):
         wd = self.get_object()
         try:
             reject_withdrawal(wd, reviewed_by=request.user, admin_notes=request.data.get('admin_notes', ''))
-            return Response({'success': True, 'message': 'Withdrawal rejected, funds returned',
+            return Response({'success': True, 'message': 'رُفض السحب وأُعيد المبلغ',
                              'data': WithdrawalRequestSerializer(wd).data})
         except WithdrawalReviewError as e:
             return Response({'success': False, 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception:
-            return server_error('Rejection failed')
+            return server_error('تعذّر الرفض')
 
 
 class NotificationViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet):

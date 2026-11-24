@@ -252,7 +252,7 @@ def test_stock_is_checked_on_the_chosen_variant_not_the_item_total(client):
     client.force_authenticate(user=buyer)
     response = reserve(client, item, variant_id=red.id, quantity=2)
     assert response.status_code == 400
-    assert 'Only 1 available' in response.data['message']
+    assert 'المتوفّر 1 فقط' in response.data['message']
 
 
 def test_variant_from_another_item_is_refused(client):

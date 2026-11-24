@@ -84,7 +84,7 @@ class UserSerializer(serializers.ModelSerializer):
                   'store_name']
         read_only_fields = ['trust_score', 'total_sales', 'total_purchases',
                             'email_verified', 'phone_verified', 'identity_verified',
-                            'store_badges']
+                            'store_badges', 'date_joined']
 
     def validate_username(self, value):
         # Someone already holding the name may still save the rest of a form.
@@ -660,10 +660,10 @@ class ItemCreateSerializer(serializers.ModelSerializer):
         if value:
             request = self.context.get('request')
             try:
-                Location.objects.get(id=value, user=request.user)
+                Location.objects.get(id=value, user=request.user, is_active=True)
                 return value
             except Location.DoesNotExist:
-                raise serializers.ValidationError("Location not found or doesn't belong to you")
+                raise serializers.ValidationError('العنوان غير موجود')
         return value
 
     def create(self, validated_data):
@@ -695,13 +695,13 @@ class ItemUpdateLocationSerializer(serializers.Serializer):
     def validate_current_location_id(self, value):
         request = self.context.get('request')
         try:
-            Location.objects.get(id=value, user=request.user)
+            Location.objects.get(id=value, user=request.user, is_active=True)
             item = self.context.get('item')
             if item and request.user not in [item.owner, item.current_holder]:
-                raise serializers.ValidationError("You don't have permission to move this item")
+                raise serializers.ValidationError('لا يمكنك نقل هذا المنتج')
             return value
         except Location.DoesNotExist:
-            raise serializers.ValidationError("Location not found")
+            raise serializers.ValidationError('العنوان غير موجود')
 
 
 class FixedPriceListingCardSerializer(serializers.ModelSerializer):
@@ -802,13 +802,13 @@ class FixedPriceListingSerializer(serializers.ModelSerializer):
     def validate_price(self, value):
         """Ensure price is positive"""
         if value <= 0:
-            raise serializers.ValidationError("Price must be greater than 0")
+            raise serializers.ValidationError('السعر أكبر من صفر')
         return value
 
     def validate_original_price(self, value):
         """Ensure the reference price (if set) is positive"""
         if value is not None and value <= 0:
-            raise serializers.ValidationError("Original price must be greater than 0")
+            raise serializers.ValidationError('السعر الأصلي أكبر من صفر')
         return value
 
     def validate(self, attrs):
@@ -834,19 +834,19 @@ class FixedPriceListingCreateSerializer(serializers.ModelSerializer):
     def validate_deposit_percentage(self, value):
         """Ensure deposit percentage is between 0 and 100"""
         if value < 0 or value > 100:
-            raise serializers.ValidationError("Deposit percentage must be between 0 and 100")
+            raise serializers.ValidationError('نسبة العربون بين 0 و 100')
         return value
 
     def validate_price(self, value):
         """Ensure price is positive"""
         if value <= 0:
-            raise serializers.ValidationError("Price must be greater than 0")
+            raise serializers.ValidationError('السعر أكبر من صفر')
         return value
 
     def validate_original_price(self, value):
         """Ensure the reference price (if set) is positive"""
         if value is not None and value <= 0:
-            raise serializers.ValidationError("Original price must be greater than 0")
+            raise serializers.ValidationError('السعر الأصلي أكبر من صفر')
         return value
 
     def validate(self, attrs):
@@ -878,7 +878,7 @@ class BidSerializer(serializers.ModelSerializer):
 
         if value < auction.current_price + auction.minimum_increment:
             raise serializers.ValidationError(
-                f"Bid must be at least ${auction.current_price + auction.minimum_increment}"
+                f"أقل مزايدة {auction.current_price + auction.minimum_increment} د.ع"
             )
 
         return value
@@ -890,7 +890,7 @@ class CreateBidSerializer(serializers.Serializer):
 
     def validate_amount(self, value):
         if value <= 0:
-            raise serializers.ValidationError("Bid amount must be positive")
+            raise serializers.ValidationError('المزايدة أكبر من صفر')
         return value
 
 
@@ -944,17 +944,17 @@ class AuctionListingCreateSerializer(serializers.ModelSerializer):
 
     def validate_starting_price(self, value):
         if value <= Decimal('0'):
-            raise serializers.ValidationError("Starting price must be greater than 0.")
+            raise serializers.ValidationError('السعر الافتتاحي أكبر من صفر')
         return value
 
     def validate_minimum_increment(self, value):
         if value <= Decimal('0'):
-            raise serializers.ValidationError("Minimum increment must be greater than 0.")
+            raise serializers.ValidationError('الحد الأدنى للزيادة أكبر من صفر')
         return value
 
     def validate_bid_deposit(self, value):
         if value < Decimal('0'):
-            raise serializers.ValidationError("Bid deposit cannot be negative.")
+            raise serializers.ValidationError('العربون لا يكون سالباً')
         return value
 
     def validate(self, attrs):
@@ -988,7 +988,7 @@ class AuctionListingCreateSerializer(serializers.ModelSerializer):
         elif start_time <= now < end_time:
             status = 'active'
         else:
-            raise serializers.ValidationError("Auction end time has already passed.")
+            raise serializers.ValidationError('انتهى وقت المزاد')
 
         validated_data['status'] = status
         validated_data['current_price'] = validated_data['starting_price']
@@ -1090,8 +1090,13 @@ class ReservationSerializer(serializers.ModelSerializer):
 
     def get_seller_net(self, obj):
         """What the seller will receive: price minus the platform's cut and
-        the representative's commission. The buyer's payload carries it too;
-        it is not a secret, the seller sees it as a line in their ledger."""
+        the representative's commission. The seller's own figure (and staff's),
+        so the buyer's payload carries no number here."""
+        user = viewer_of(self.context)
+        if user is not None and not (
+                getattr(user, 'is_staff', False)
+                or user.id in (obj.item.owner_id, obj.item.current_holder_id)):
+            return None
         net = obj.total_price - obj.platform_commission_amount
         if obj.representative_id and obj.commission_amount:
             net -= obj.commission_amount
@@ -1256,36 +1261,36 @@ class ReservationSerializer(serializers.ModelSerializer):
             return {
                 'status': 'released',
                 'released_at': obj.payment_released_at,
-                'message': 'Payment has been released to seller'
+                'message': 'حُرّرت الدفعة للبائع'
             }
         elif obj.buyer_approved:
             return {
                 'status': 'approved_pending_release',
                 'approved_at': obj.buyer_approved_at,
-                'message': 'Payment approved, pending release'
+                'message': 'وافق المشتري، والدفعة قيد التحرير'
             }
         elif obj.status == 'completed' and obj.received_at:
             days_remaining = obj.warranty_days - (timezone.now() - obj.received_at).days
             return {
                 'status': 'held',
                 'days_remaining': max(0, days_remaining),
-                'message': f'Payment held. Auto-release in {max(0, days_remaining)} days or approve to release immediately'
+                'message': f'الدفعة محجوزة، وتُحرَّر تلقائياً بعد {max(0, days_remaining)} يوماً أو بموافقتك الآن'
             }
         elif obj.status == 'completed' and obj.completed_at:
             return {
                 'status': 'held',
                 'days_remaining': None,
-                'message': 'Payment held. Auto-release countdown starts once the item is delivered, or approve to release immediately'
+                'message': 'الدفعة محجوزة، وتبدأ مدة تحريرها عند وصول المنتج أو بموافقتك'
             }
         elif obj.status == 'refunded':
             return {
                 'status': 'refunded',
-                'message': 'Payment has been refunded to buyer'
+                'message': 'رُدّت الدفعة للمشتري'
             }
         else:
             return {
                 'status': 'pending',
-                'message': 'Payment not yet processed'
+                'message': 'لم تُدفع بعد'
             }
 
 
@@ -1306,24 +1311,24 @@ class CreateReservationSerializer(serializers.Serializer):
         try:
             item = Item.objects.get(id=value)
             if item.status not in ['active', 'reserved']:
-                raise serializers.ValidationError("Item is not available for reservation")
+                raise serializers.ValidationError('المنتج غير متاح للحجز')
             return value
         except Item.DoesNotExist:
-            raise serializers.ValidationError("Item not found")
+            raise serializers.ValidationError('المنتج غير موجود')
 
     def validate_quantity(self, value):
         if value < 1:
-            raise serializers.ValidationError("Quantity must be at least 1")
+            raise serializers.ValidationError('الكمية واحد على الأقل')
         return value
 
     def validate_delivery_location_id(self, value):
         if value:
             request = self.context.get('request')
             try:
-                Location.objects.get(id=value, user=request.user)
+                Location.objects.get(id=value, user=request.user, is_active=True)
                 return value
             except Location.DoesNotExist:
-                raise serializers.ValidationError("Delivery location not found or doesn't belong to you")
+                raise serializers.ValidationError('عنوان التوصيل غير موجود')
         return value
 
 
@@ -1430,7 +1435,7 @@ class CreateDisputeSerializer(serializers.Serializer):
             Item.objects.get(id=value)
             return value
         except Item.DoesNotExist:
-            raise serializers.ValidationError("Item not found")
+            raise serializers.ValidationError('المنتج غير موجود')
 
     def validate_reservation_id(self, value):
         if value is not None:
@@ -1438,7 +1443,7 @@ class CreateDisputeSerializer(serializers.Serializer):
                 Reservation.objects.get(id=value)
                 return value
             except Reservation.DoesNotExist:
-                raise serializers.ValidationError("Reservation not found")
+                raise serializers.ValidationError('الطلب غير موجود')
         return value
 
     def validate(self, data):
@@ -1450,10 +1455,10 @@ class CreateDisputeSerializer(serializers.Serializer):
                 reservation = Reservation.objects.get(id=reservation_id)
                 if reservation.item.id != item_id:
                     raise serializers.ValidationError(
-                        "Reservation does not belong to the specified item"
+                        'الطلب لا يخص هذا المنتج'
                     )
             except Reservation.DoesNotExist:
-                raise serializers.ValidationError("Reservation not found")
+                raise serializers.ValidationError('الطلب غير موجود')
 
         return data
 
@@ -1485,7 +1490,7 @@ class ResolveDisputeSerializer(serializers.Serializer):
                 )
             if data['partial_refund_amount'] <= 0:
                 raise serializers.ValidationError(
-                    "partial_refund_amount must be greater than 0"
+                    'مبلغ الاسترداد أكبر من صفر'
                 )
         return data
 
@@ -1599,10 +1604,10 @@ class RepresentativeCreateSerializer(serializers.Serializer):
         try:
             item = Item.objects.get(id=value)
             if item.status not in ['active', 'reserved']:
-                raise serializers.ValidationError("Item is not available for representation")
+                raise serializers.ValidationError('المنتج غير متاح للمندوبية')
             return value
         except Item.DoesNotExist:
-            raise serializers.ValidationError("Item not found")
+            raise serializers.ValidationError('المنتج غير موجود')
 
     def validate(self, data):
         item_id = data.get('item_id')
@@ -1615,7 +1620,7 @@ class RepresentativeCreateSerializer(serializers.Serializer):
             item = Item.objects.get(id=item_id)
 
             if item.owner == request.user:
-                raise serializers.ValidationError("You cannot represent your own item")
+                raise serializers.ValidationError('لا يمكنك أن تكون مندوباً لمنتجك')
 
             existing = Representative.objects.filter(
                 item=item,
@@ -1625,7 +1630,7 @@ class RepresentativeCreateSerializer(serializers.Serializer):
 
             if existing:
                 raise serializers.ValidationError(
-                    "You already have a pending request for this item"
+                    'لديك طلب قيد الانتظار لهذا المنتج'
                 )
 
             active = Representative.objects.filter(
@@ -1636,11 +1641,11 @@ class RepresentativeCreateSerializer(serializers.Serializer):
 
             if active:
                 raise serializers.ValidationError(
-                    "You are already representing this item"
+                    'أنت مندوب لهذا المنتج مسبقاً'
                 )
 
         except Item.DoesNotExist:
-            raise serializers.ValidationError("Item not found")
+            raise serializers.ValidationError('المنتج غير موجود')
 
         return data
 
@@ -1774,28 +1779,28 @@ class ResaleAgreementCreateSerializer(serializers.Serializer):
         try:
             item = Item.objects.get(id=value)
             if item.status not in ['active', 'reserved']:
-                raise serializers.ValidationError("Item is not available")
+                raise serializers.ValidationError('المنتج غير متاح')
             fixed_listing = getattr(item, 'fixed_listing', None)
             if not fixed_listing or not fixed_listing.price or fixed_listing.price <= 0:
-                raise serializers.ValidationError("Item has no fixed price listing")
+                raise serializers.ValidationError('المنتج غير معروض بسعر ثابت')
             return value
         except Item.DoesNotExist:
-            raise serializers.ValidationError("Item not found")
+            raise serializers.ValidationError('المنتج غير موجود')
 
     def validate(self, data):
         request = self.context.get('request')
         item = Item.objects.get(id=data['item_id'])
         if item.owner == request.user:
-            raise serializers.ValidationError("You cannot request your own item")
+            raise serializers.ValidationError('لا يمكنك طلب منتجك')
         if data['quantity'] > item.quantity:
-            raise serializers.ValidationError("Requested quantity exceeds available stock")
+            raise serializers.ValidationError('الكمية المطلوبة أكبر من المتوفّر')
         already_active = ItemTransfer.objects.filter(
             item=item, to_user=request.user, status__in=['pending', 'active']
         ).exists()
         if already_active:
-            raise serializers.ValidationError("You already have an active agreement for this item")
+            raise serializers.ValidationError('لديك اتفاقية قائمة على هذا المنتج')
         if data['storage_fee_type'] != 'none' and not data.get('storage_fee_amount'):
-            raise serializers.ValidationError("storage_fee_amount is required when storage_fee_type is set")
+            raise serializers.ValidationError('اكتب قيمة رسوم التخزين')
         return data
 
 
@@ -1869,7 +1874,9 @@ class MessageSerializer(serializers.ModelSerializer):
 
 class MessageCreateSerializer(serializers.Serializer):
     """Serializer for creating messages"""
-    content = serializers.CharField(required=False, allow_blank=True, default='')
+    MAX_LENGTH = 4000
+    content = serializers.CharField(required=False, allow_blank=True, default='',
+                                    max_length=MAX_LENGTH)
     # ImageField, not FileField: Pillow has to open the bytes as a picture.
     # The old check read `content_type`, which is whatever the sender typed,
     # so an HTML page sent as "image/png" was stored as chat_attachments/x.html
@@ -1885,17 +1892,17 @@ class MessageCreateSerializer(serializers.Serializer):
         if not value:
             return value
         if value.size > 5 * 1024 * 1024:
-            raise serializers.ValidationError("Image must be 5MB or smaller.")
+            raise serializers.ValidationError('الصورة 5 ميغابايت كحد أقصى')
         image_format = getattr(getattr(value, 'image', None), 'format', None)
         extension = self.ATTACHMENT_EXTENSIONS.get(image_format)
         if extension is None:
-            raise serializers.ValidationError("Attachment must be a JPEG, PNG, WebP or GIF image.")
+            raise serializers.ValidationError('المرفق صورة JPEG أو PNG أو WebP أو GIF')
         value.name = '%s.%s' % (uuid.uuid4().hex, extension)
         return value
 
     def validate(self, data):
         if not data.get('content', '').strip() and not data.get('attachment'):
-            raise serializers.ValidationError("Message must have content or an attachment.")
+            raise serializers.ValidationError('اكتب رسالة أو أرفق صورة')
         return data
 
 
@@ -1905,7 +1912,7 @@ class MessageOfferSerializer(serializers.Serializer):
     # Required when the item has options — see views._resolve_variant.
     variant_id = serializers.IntegerField(required=False, allow_null=True)
     quantity = serializers.IntegerField(default=1, min_value=1)
-    message = serializers.CharField(required=False, allow_blank=True)
+    message = serializers.CharField(required=False, allow_blank=True, max_length=1000)
 
 
 class ChatSerializer(serializers.ModelSerializer):
@@ -2118,7 +2125,7 @@ class ChatCreateSerializer(serializers.Serializer):
             Item.objects.get(id=value)
             return value
         except Item.DoesNotExist:
-            raise serializers.ValidationError("Item not found")
+            raise serializers.ValidationError('المنتج غير موجود')
 
     def validate(self, data):
         request = self.context.get('request')
@@ -2128,10 +2135,10 @@ class ChatCreateSerializer(serializers.Serializer):
             item = Item.objects.get(id=item_id)
 
             if item.owner == request.user:
-                raise serializers.ValidationError("You cannot chat about your own item")
+                raise serializers.ValidationError('لا يمكنك مراسلة نفسك')
 
         except Item.DoesNotExist:
-            raise serializers.ValidationError("Item not found")
+            raise serializers.ValidationError('المنتج غير موجود')
 
         return data
 
@@ -2176,7 +2183,7 @@ class RatingCreateSerializer(serializers.ModelSerializer):
 
     def validate_score(self, value):
         if value < 1 or value > 5:
-            raise serializers.ValidationError("Score must be between 1 and 5")
+            raise serializers.ValidationError('التقييم بين 1 و 5')
         return value
 
     def validate(self, data):
@@ -2185,7 +2192,7 @@ class RatingCreateSerializer(serializers.ModelSerializer):
 
             request = self.context.get('request')
             if rated_user == request.user:
-                raise serializers.ValidationError("You cannot rate yourself")
+                raise serializers.ValidationError('لا يمكنك تقييم نفسك')
             # A rating is about a deal: one of the two sold to the other.
             if not (has_bought(request.user, owner=rated_user)
                     or has_bought(rated_user, owner=request.user)):
@@ -2193,7 +2200,7 @@ class RatingCreateSerializer(serializers.ModelSerializer):
 
             return data
         except User.DoesNotExist:
-            raise serializers.ValidationError("User not found")
+            raise serializers.ValidationError('المستخدم غير موجود')
 
     def create(self, validated_data):
         rated_user_id = validated_data.pop('rated_user_id')
@@ -2265,7 +2272,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         if data['password'] != data['password2']:
-            raise serializers.ValidationError("Passwords don't match")
+            raise serializers.ValidationError('كلمتا المرور غير متطابقتين')
 
         # AUTH_PASSWORD_VALIDATORS كانت مُعلَنة ولا تُنفَّذ: min_length=8
         # على الحقل كان كل ما يُفرض، فـ`12345678` و`password` مقبولتان.
@@ -2331,7 +2338,7 @@ class ChangePasswordSerializer(serializers.Serializer):
 
     def validate(self, data):
         if data['new_password'] != data['new_password2']:
-            raise serializers.ValidationError("New passwords don't match")
+            raise serializers.ValidationError('كلمتا المرور غير متطابقتين')
         return data
 
 
@@ -2344,7 +2351,7 @@ class ResetPasswordSerializer(serializers.Serializer):
 
     def validate(self, data):
         if data['new_password'] != data['new_password2']:
-            raise serializers.ValidationError("Passwords don't match")
+            raise serializers.ValidationError('كلمتا المرور غير متطابقتين')
         return data
 
 
@@ -2390,7 +2397,7 @@ class UserStoreCreateSerializer(serializers.Serializer):
     def validate_name(self, value):
         """Ensure store name is not empty"""
         if not value.strip():
-            raise serializers.ValidationError("Store name cannot be empty")
+            raise serializers.ValidationError('اسم المتجر مطلوب')
         return value.strip()
 
 
@@ -2422,7 +2429,7 @@ class UserStoreUpdateSerializer(serializers.ModelSerializer):
     def validate_name(self, value):
         """Ensure store name is not empty"""
         if value and not value.strip():
-            raise serializers.ValidationError("Store name cannot be empty")
+            raise serializers.ValidationError('اسم المتجر مطلوب')
         return value.strip() if value else value
 
     def validate_default_location_id(self, value):
@@ -2430,11 +2437,11 @@ class UserStoreUpdateSerializer(serializers.ModelSerializer):
         if value:
             request = self.context.get('request')
             try:
-                Location.objects.get(id=value, user=request.user)
+                Location.objects.get(id=value, user=request.user, is_active=True)
                 return value
             except Location.DoesNotExist:
                 raise serializers.ValidationError(
-                    "Location not found or doesn't belong to you"
+                    'العنوان غير موجود'
                 )
         return value
 
@@ -2800,9 +2807,9 @@ class ReelDetailSerializer(ReelCardSerializer):
         try:
             item = Item.objects.get(id=value)
         except Item.DoesNotExist:
-            raise serializers.ValidationError('Item not found')
+            raise serializers.ValidationError('المنتج غير موجود')
         if not request or item.owner_id != request.user.id:
-            raise serializers.ValidationError('You can only tag your own items')
+            raise serializers.ValidationError('اربط منتجاتك فقط')
         return value
 
 
@@ -2834,9 +2841,9 @@ class FinalizeReelSerializer(serializers.Serializer):
         try:
             item = Item.objects.get(id=value)
         except Item.DoesNotExist:
-            raise serializers.ValidationError('Item not found')
+            raise serializers.ValidationError('المنتج غير موجود')
         if not request or item.owner_id != request.user.id:
-            raise serializers.ValidationError('You can only tag your own items')
+            raise serializers.ValidationError('اربط منتجاتك فقط')
         return value
 
 
@@ -2891,7 +2898,7 @@ class ReelCommentCreateSerializer(serializers.Serializer):
 
     def validate_content(self, value):
         if not value.strip():
-            raise serializers.ValidationError("Comment cannot be empty")
+            raise serializers.ValidationError('اكتب تعليقاً')
         return value.strip()
 
 
@@ -2916,12 +2923,12 @@ class LiveSessionItemCreateSerializer(serializers.Serializer):
         try:
             Item.objects.get(id=value)
         except Item.DoesNotExist:
-            raise serializers.ValidationError("Item not found")
+            raise serializers.ValidationError('المنتج غير موجود')
         return value
 
     def validate(self, data):
         if data['deposit_amount'] > data['price']:
-            raise serializers.ValidationError("Deposit amount cannot exceed the price")
+            raise serializers.ValidationError('لا يتجاوز العربون السعر')
         return data
 
 
@@ -2937,6 +2944,11 @@ class LiveSessionCardSerializer(serializers.ModelSerializer):
             'id', 'store', 'title', 'thumbnail', 'status',
             'current_viewer_count', 'peak_viewer_count', 'total_views', 'likes_count',
             'is_liked_by_me', 'scheduled_at', 'started_at', 'created_at',
+        ]
+        # A stream starts and ends by its own actions; its numbers are counted.
+        read_only_fields = [
+            'status', 'current_viewer_count', 'peak_viewer_count', 'total_views',
+            'likes_count', 'started_at', 'ended_at', 'created_at',
         ]
 
     def get_thumbnail(self, obj):
@@ -3004,10 +3016,10 @@ class ReserveLiveItemSerializer(serializers.Serializer):
         if value:
             request = self.context.get('request')
             try:
-                Location.objects.get(id=value, user=request.user)
+                Location.objects.get(id=value, user=request.user, is_active=True)
                 return value
             except Location.DoesNotExist:
-                raise serializers.ValidationError("Delivery location not found or doesn't belong to you")
+                raise serializers.ValidationError('عنوان التوصيل غير موجود')
         return value
 
 
@@ -3028,7 +3040,7 @@ class LiveSessionCommentCreateSerializer(serializers.Serializer):
 
     def validate_content(self, value):
         if not value.strip():
-            raise serializers.ValidationError("Comment cannot be empty")
+            raise serializers.ValidationError('اكتب تعليقاً')
         return value.strip()
 
 
@@ -3064,7 +3076,7 @@ class AddLiveSessionModeratorSerializer(serializers.Serializer):
 
     def validate_user_id(self, value):
         if not User.objects.filter(id=value).exists():
-            raise serializers.ValidationError("User not found")
+            raise serializers.ValidationError('المستخدم غير موجود')
         return value
 
 
@@ -3084,7 +3096,7 @@ class BanLiveSessionViewerSerializer(serializers.Serializer):
 
     def validate_user_id(self, value):
         if not User.objects.filter(id=value).exists():
-            raise serializers.ValidationError("User not found")
+            raise serializers.ValidationError('المستخدم غير موجود')
         return value
 
 
@@ -3122,12 +3134,12 @@ class QuickShowItemSerializer(serializers.Serializer):
             try:
                 Category.objects.get(id=value)
             except Category.DoesNotExist:
-                raise serializers.ValidationError("Category not found")
+                raise serializers.ValidationError('التصنيف غير موجود')
         return value
 
     def validate(self, data):
         if data['deposit_amount'] > data['price']:
-            raise serializers.ValidationError("Deposit amount cannot exceed the price")
+            raise serializers.ValidationError('لا يتجاوز العربون السعر')
         return data
 
 
@@ -3153,7 +3165,7 @@ class QuickLiveAuctionSerializer(serializers.Serializer):
             try:
                 Category.objects.get(id=value)
             except Category.DoesNotExist:
-                raise serializers.ValidationError("Category not found")
+                raise serializers.ValidationError('التصنيف غير موجود')
         return value
 
 
@@ -3199,13 +3211,13 @@ class StoreChatCreateSerializer(serializers.Serializer):
             UserStore.objects.get(id=value)
             return value
         except UserStore.DoesNotExist:
-            raise serializers.ValidationError("Store not found")
+            raise serializers.ValidationError('المتجر غير موجود')
 
     def validate(self, data):
         request = self.context.get('request')
         store = UserStore.objects.get(id=data['store_id'])
         if store.user == request.user:
-            raise serializers.ValidationError("You cannot chat with your own store")
+            raise serializers.ValidationError('لا يمكنك مراسلة متجرك')
         return data
 
 

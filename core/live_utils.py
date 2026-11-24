@@ -17,4 +17,11 @@ def end_live_session(session, reason='manual'):
 
     session.items.filter(status__in=['queued', 'now_showing']).update(status='skipped')
 
+    # Products first shown on air have nothing selling them from here on.
+    from .models import Item
+    from .wallet_utils import park_if_unlisted
+    for item in Item.objects.filter(live_session_entries__session=session,
+                                    status='active').distinct():
+        park_if_unlisted(item)
+
     broadcast_live_event(session.id, 'stream_ended', {'reason': reason})

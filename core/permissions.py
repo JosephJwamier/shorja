@@ -35,7 +35,7 @@ class IsStoreOwner(permissions.BasePermission):
     Only authenticated users with an active store may act; object-level
     checks that the target's store belongs to the requesting user.
     """
-    message = 'You must own an active store to perform this action.'
+    message = 'يلزمك متجر مفعّل'
 
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
