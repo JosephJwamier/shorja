@@ -5,6 +5,7 @@ money must read theirs fresh.
 """
 from django.db.models import Count, Exists, F, OuterRef, Subquery, Value
 from django.db.models.functions import Coalesce
+from rest_framework.filters import OrderingFilter
 
 
 def user_related(queryset, *paths):
@@ -64,3 +65,15 @@ def with_store_numbers(queryset, viewer=None):
         queryset = queryset.annotate(n_following=Exists(
             StoreFollow.objects.filter(store=OuterRef('pk'), follower=viewer)))
     return queryset.prefetch_related('badges', 'user__store__badges')
+
+
+class StableOrderingFilter(OrderingFilter):
+    """Ends every order in the id. Rows equal in what is sorted by (the same
+    price, the same rating) come back in any order the database likes, and a
+    page cut through them shows one twice and another never."""
+
+    def get_ordering(self, request, queryset, view):
+        ordering = super().get_ordering(request, queryset, view)
+        if ordering and not {'id', '-id', 'pk', '-pk'} & set(ordering):
+            ordering = [*ordering, '-id']
+        return ordering

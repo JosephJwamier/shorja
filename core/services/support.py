@@ -11,7 +11,7 @@ member, while Chat.seller stays this one fixed identity.
 from django.core.exceptions import ImproperlyConfigured
 
 from ..firestore import sync_chat_to_firestore, sync_message_to_firestore
-from ..models import Chat, Message, User
+from ..models import Message, User, chat_between
 
 SUPPORT_USERNAME = 'الدعم_الفني'
 
@@ -30,7 +30,7 @@ def start_support_chat(user, *, initial_message=''):
     """Get the user's existing support chat, or create it. Returns
     (chat, created)."""
     support_account = get_support_account()
-    chat, created = Chat.objects.get_or_create(
+    chat, created = chat_between(
         item=None, store=None, buyer=user, seller=support_account,
     )
 

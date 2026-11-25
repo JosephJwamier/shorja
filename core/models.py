@@ -4,7 +4,7 @@ P2P Marketplace with Auctions, Deposits, Representative System, and Advanced Ite
 """
 import uuid
 from datetime import timedelta
-from django.db import models
+from django.db import models, transaction
 from django.contrib.auth.models import AbstractUser
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
@@ -2016,6 +2016,19 @@ class UserBlock(models.Model):
         ordering = ['-created_at']
         verbose_name = 'حظر بين مستخدمين'
         verbose_name_plural = 'الحظر بين المستخدمين'
+
+
+def chat_between(**who):
+    """(chat, created) for exactly these `item`, `store`, `buyer`, `seller`.
+
+    Not get_or_create: the unique rule covers `item`, which is NULL in a store's
+    or support's chat, and NULLs are never equal, so nothing stopped a second
+    one; and once there were two, get_or_create could only fail."""
+    with transaction.atomic():
+        # Whoever opens it waits for their own other tap.
+        User.objects.select_for_update().get(pk=who['buyer'].pk)
+        found = Chat.objects.filter(**who).order_by('id').first()
+        return (found, False) if found else (Chat.objects.create(**who), True)
 
 
 class Chat(models.Model):

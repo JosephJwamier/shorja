@@ -36,6 +36,8 @@ from .services.blocking import CANNOT_MESSAGE, blocked_between
 from .services.support import SUPPORT_USERNAME, start_support_chat
 from .services.moderation import archive_item, resolve_report, ReportResolutionError
 from .api_errors import server_error
+from .querysets import StableOrderingFilter
+from .one_at_a_time import one_at_a_time
 
 logger = logging.getLogger(__name__)
 from .models import get_or_create_wallet
@@ -63,7 +65,7 @@ class ItemStandardPagination(PageNumberPagination):
     page_size_query_param = 'page_size'
     max_page_size = 100
 from .models import (ItemImage, ItemVariant, Location,
-    Item, FixedPriceListing, AuctionListing, Bid, UserBlock,
+    Item, FixedPriceListing, AuctionListing, Bid, UserBlock, chat_between,
     Reservation, Representative, ItemTransfer, Category,
     UserStore, Rating, Transaction, Chat, Message, Dispute, Report, Notification,
     ProductReview, StoreReview, StoreFollow, StoreCoupon, CouponCollection,
@@ -406,6 +408,7 @@ class ItemViewSet(viewsets.ModelViewSet):
         .all()
         .select_related('owner', 'current_holder', 'category')
         .prefetch_related('images', 'location_history')
+        .order_by('-created_at', '-id')
     )
     serializer_class = ItemSerializer
     permission_classes = [IsAuthenticated]
@@ -414,7 +417,7 @@ class ItemViewSet(viewsets.ModelViewSet):
     # callers send `options`/`variants` as JSON-encoded strings — the
     # serializer decodes those.
     parser_classes = [MultiPartParser, FormParser, JSONParser]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, StableOrderingFilter]
     filterset_class = ItemFilter
     search_fields = ['title', 'name_ar', 'description']
     ordering_fields = ['created_at', 'updated_at', 'sold_count', 'rating']
@@ -1086,10 +1089,11 @@ class FixedPriceListingViewSet(SafeRankingCacheMixin, viewsets.ReadOnlyModelView
         .filter(open_seller_q('item__owner'), is_active=True, item__status__in=['active', 'reserved'])
         .select_related('item', 'item__category', 'item__owner', 'item__current_holder')
         .prefetch_related('item__images', 'item__location_history')
+        .order_by('-created_at', '-id')
     )
     serializer_class = FixedPriceListingSerializer
     permission_classes = [AllowAny]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, StableOrderingFilter]
     filterset_class = FixedPriceListingFilter
     search_fields = ['item__title', 'item__name_ar', 'item__description']
     ordering_fields = ['price', 'created_at', 'item__sold_count', 'item__rating']
@@ -1363,7 +1367,7 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
     )
     serializer_class = AuctionListingSerializer
     permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, StableOrderingFilter]
     filterset_class = AuctionListingFilter
     search_fields = ['item__title', 'item__name_ar', 'item__description']
     ordering_fields = ['created_at', 'end_time', 'current_price', 'item__sold_count']
@@ -2095,7 +2099,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
     # No DestroyModelMixin — a session is ended/cancelled, never deleted
     # (same as AuctionListing). DELETE is still used, but only on
     # sub-resources (queue_item_detail, comment_detail below).
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, StableOrderingFilter]
     filterset_class = LiveSessionFilter
     ordering_fields = ['current_viewer_count', 'likes_count', 'total_views', 'started_at', 'created_at']
     ordering = ['-created_at']
@@ -5436,7 +5440,7 @@ class DisputeViewSet(viewsets.ModelViewSet):
         if getattr(self, 'swagger_fake_view', False):
             return Dispute.objects.none()
 
-        disputes = Dispute.objects.all()
+        disputes = Dispute.objects.order_by('-created_at', '-id')
         if self.action == 'list':
             disputes = user_related(reservation_related(item_related(disputes, 'item'), 'reservation'),
                                     'complainant', 'defendant')
@@ -5667,7 +5671,7 @@ class ReportViewSet(viewsets.ModelViewSet):
     queryset = Report.objects.all()
     serializer_class = ReportSerializer
     permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, StableOrderingFilter]
     filterset_class = ReportFilter
     ordering_fields = ['created_at']
 
@@ -5704,6 +5708,7 @@ class ReportViewSet(viewsets.ModelViewSet):
         }
     )
     @action(detail=False, methods=['post'])
+    @one_at_a_time('report')
     def create_report(self, request):
         """File a new report"""
         serializer = CreateReportSerializer(data=request.data, context={'request': request})
@@ -5799,7 +5804,7 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
     queryset = Representative.objects.all()
     serializer_class = RepresentativeSerializer
     permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, StableOrderingFilter]
     filterset_fields = ['status', 'item__id', 'owner__id', 'representative__id']
     search_fields = [
         'representative__username',
@@ -5905,6 +5910,7 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
         }
     )
     @action(detail=False, methods=['post'])
+    @one_at_a_time('representative')
     def create_request(self, request):
         """User requests to become a representative for an item"""
         serializer = RepresentativeCreateSerializer(
@@ -6496,7 +6502,7 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
     queryset = ItemTransfer.objects.all()
     serializer_class = ItemTransferSerializer
     permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, StableOrderingFilter]
     filterset_class = ItemTransferFilter
     search_fields = ['item__title', 'from_user__username', 'to_user__username']
     ordering_fields = ['initiated_at', 'agreement_end_date', 'duration_days']
@@ -6556,6 +6562,7 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
     # ==================== WHOLESALE TRANSFER ENDPOINTS ====================
 
     @action(detail=False, methods=['post'])
+    @one_at_a_time('agreement')
     def create_agreement(self, request):
         """Reseller requests a quantity of the owner's item for wholesale ownership transfer"""
         serializer = ResaleAgreementCreateSerializer(data=request.data, context={'request': request})
@@ -6829,7 +6836,7 @@ class ChatViewSet(viewsets.ModelViewSet):
     queryset = Chat.objects.all()
     serializer_class = ChatSerializer
     permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, StableOrderingFilter]
     filterset_fields = ['item__id', 'is_active']
     search_fields = ['item__title', 'buyer__username', 'seller__username']
     ordering_fields = ['created_at', 'updated_at']
@@ -6916,7 +6923,7 @@ class ChatViewSet(viewsets.ModelViewSet):
             item = Item.objects.get(id=item_id)
 
             # Get or create chat
-            chat, created = Chat.objects.get_or_create(
+            chat, created = chat_between(
                 item=item,
                 buyer=request.user,
                 seller=item.owner
@@ -6984,7 +6991,7 @@ class ChatViewSet(viewsets.ModelViewSet):
 
         try:
             store = UserStore.objects.get(id=store_id)
-            chat, created = Chat.objects.get_or_create(
+            chat, created = chat_between(
                 store=store,
                 item=None,
                 buyer=request.user,
@@ -7437,7 +7444,7 @@ class MessageViewSet(viewsets.ModelViewSet):
     queryset = Message.objects.all()
     serializer_class = MessageSerializer
     permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, StableOrderingFilter]
     filterset_fields = ['chat', 'is_read', 'message_type']
     ordering_fields = ['created_at']
     # 'post' has to stay allowed so the accept_offer/reject_offer actions
@@ -8638,7 +8645,7 @@ class LocationViewSet(viewsets.ModelViewSet):
 
     """إدارة مواقع المستخدم - User location management"""
     permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, StableOrderingFilter]
     filterset_class = LocationFilter
     search_fields = ['name', 'city', 'country', 'address_line1']
     ordering_fields = ['created_at', 'is_primary']
@@ -8868,7 +8875,7 @@ class ProductReviewViewSet(viewsets.ModelViewSet):
     """تقييمات المنتجات - نجوم وتعليق وصورة اختيارية"""
     queryset = ProductReview.objects.select_related('reviewer', 'item').all()
     permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, StableOrderingFilter]
     filterset_class = ProductReviewFilter
     ordering_fields = ['created_at', 'score']
     ordering = ['-created_at']
@@ -8915,7 +8922,7 @@ class StoreReviewViewSet(viewsets.ModelViewSet):
     """تقييمات المتاجر - نجوم وتعليق"""
     queryset = StoreReview.objects.select_related('reviewer', 'store').all()
     permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, StableOrderingFilter]
     filterset_class = StoreReviewFilter
     ordering_fields = ['created_at', 'score']
     ordering = ['-created_at']
@@ -8961,7 +8968,7 @@ class TransactionViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Transaction.objects.all()
     serializer_class = TransactionSerializer
     permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, StableOrderingFilter]
     filterset_class = TransactionFilter
     ordering_fields = ['created_at', 'amount']
 
