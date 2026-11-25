@@ -5,6 +5,7 @@ The platform's wallet account is looked up by its username
 commission. The rest would let a person pass for the platform in a chat.
 """
 import re
+import secrets
 import unicodedata
 
 from django.conf import settings
@@ -49,6 +50,14 @@ def poses_as_platform(name):
     squeezed = folded.replace(' ', '')
     return squeezed in {w.replace(' ', '') for w in _WHOLE} or any(
         phrase.replace(' ', '') in squeezed for phrase in _ANYWHERE)
+
+
+def random_username(taken):
+    """'user_k3v9x2mq': says nothing about whose it is."""
+    while True:
+        name = 'user_' + ''.join(secrets.choice('abcdefghjkmnpqrstuvwxyz23456789') for _ in range(8))
+        if not taken(name):
+            return name
 
 
 def looks_like_contact(username):

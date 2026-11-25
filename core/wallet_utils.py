@@ -208,6 +208,16 @@ def forfeit_deposit(reservation, deposit):
                     item=reservation.item, reservation=reservation)
 
 
+def undo_sold_count(reservation):
+    """A sale that came back is not a sale: counting it let a seller climb the
+    'best selling' order with free orders that were cancelled."""
+    from django.db.models import F, Value
+    from django.db.models.functions import Greatest
+    from .models import Item
+    Item.objects.filter(pk=reservation.item_id).update(
+        sold_count=Greatest(F('sold_count') - reservation.quantity, Value(0)))
+
+
 def park_if_unlisted(item):
     """An 'active' item nothing sells — no price, no running auction, not in a
     running live stream — cannot be bought and, not being a draft, could not be

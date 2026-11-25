@@ -21,7 +21,7 @@ from core.legal_views import legal_document_page
 from core import campaign_views, share_views
 from core.admin_site import enrol_on_server
 from core.auth_tokens import PolicyTokenObtainPairSerializer
-from core.throttling import LoginUsernameThrottle
+from core.throttling import LoginUsernameAddressThrottle, LoginUsernameThrottle
 from rest_framework.throttling import ScopedRateThrottle
 
 
@@ -31,7 +31,7 @@ class ThrottledTokenObtainPairView(TokenObtainPairView):
     has: the same per-IP + per-username budget, and the same refusal of a
     password the policy no longer accepts."""
     serializer_class = PolicyTokenObtainPairSerializer
-    throttle_classes = [ScopedRateThrottle, LoginUsernameThrottle]
+    throttle_classes = [ScopedRateThrottle, LoginUsernameAddressThrottle, LoginUsernameThrottle]
     throttle_scope = 'auth_login'
 
 schema_view = get_schema_view(

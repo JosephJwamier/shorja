@@ -17,12 +17,13 @@ from django.db.models import Q, Sum
 from django.utils import timezone
 
 from ..models import (
-    Reservation, Transaction, Wallet, WithdrawalRequest, get_or_create_wallet,
+    Reservation, Transaction, User, Wallet, WithdrawalRequest, get_or_create_wallet,
 )
 
 
 # A number swapped in by whoever took the account cannot empty it at once.
 PHONE_CHANGE_WAIT = timedelta(hours=48)
+WHOLESALE_WAIT = timedelta(days=7)
 
 
 def earnings_still_disputable(user):
@@ -44,9 +45,58 @@ def earnings_still_disputable(user):
     ).aggregate(t=Sum('amount'))['t'] or Decimal('0.00')
 
 
+def wholesale_still_settling(user):
+    """Held wholesale money released in the last days. Released on a word from
+    the other side, so without a wait two friends turn any balance into cash."""
+    return Transaction.objects.filter(
+        user=user, transaction_type='payout', status='completed', transfer__escrow=True,
+        created_at__gte=timezone.now() - WHOLESALE_WAIT,
+    ).aggregate(t=Sum('amount'))['t'] or Decimal('0.00')
+
+
+def unspent_topups(user):
+    """Card money that came in and was not spent. The wallet is for buying;
+    paying a card's money out to another account is how stolen cards are
+    emptied. Spending uses it first, and what is refunded becomes it again."""
+    if user.topups_withdrawable:
+        return Decimal('0.00')
+    pot = spent = Decimal('0.00')
+    for t in (Transaction.objects.filter(user=user, status='completed').order_by('created_at', 'id')
+              .select_related('reservation', 'transfer')):
+        kind = t.transaction_type
+        if kind in ('payment', 'installment') or (kind == 'deposit' and not t.auction_id):
+            pot += t.amount
+        elif kind in ('purchase', 'deposit', 'penalty') or (
+                kind == 'storage_fee' and t.transfer_id and t.transfer.to_user_id == user.id) or (
+                kind == 'delivery_fee' and t.reservation_id and t.reservation.buyer_id == user.id):
+            # A penalty records money that already left as a purchase.
+            used = min(pot, t.amount) if kind != 'penalty' else Decimal('0.00')
+            pot -= used
+            spent += used
+        elif kind == 'refund' and (
+                t.reservation.buyer_id == user.id if t.reservation_id
+                else t.transfer.to_user_id == user.id if t.transfer_id else bool(t.auction_id)):
+            back = min(spent, t.amount)
+            pot += back
+            spent -= back
+    return pot
+
+
+def not_withdrawable(user):
+    """(amount, why) of what is in the wallet but may not leave it yet."""
+    parts = [
+        (earnings_still_disputable(user), 'أرباح لم تنتهِ مهلة النزاع عليها'),
+        (wholesale_still_settling(user), 'ثمن جملة حُرِّر خلال آخر %d أيام' % WHOLESALE_WAIT.days),
+        (unspent_topups(user), 'رصيد مشحون بالبطاقة للشراء لا للسحب'),
+    ]
+    parts = [(a, why) for a, why in parts if a > 0]
+    return sum((a for a, _ in parts), Decimal('0.00')), '، و'.join(
+        '%s (%s د.ع)' % (why, '{:,.0f}'.format(a)) for a, why in parts)
+
+
 def withdrawable_balance(user):
     available = get_or_create_wallet(user).available_balance
-    return max(available - earnings_still_disputable(user), Decimal('0.00'))
+    return max(available - not_withdrawable(user)[0], Decimal('0.00'))
 
 
 def withdrawal_refusal(user):
@@ -76,6 +126,8 @@ def approve_withdrawal(withdrawal, *, reviewed_by, admin_notes=''):
     and record the payout. Raises WithdrawalReviewError if not pending."""
     with transaction.atomic():
         _lock_pending(withdrawal)
+        if not User.objects.filter(pk=withdrawal.user_id, is_active=True).exists():
+            raise WithdrawalReviewError('حساب صاحب الطلب موقوف — ارفض الطلب أو أعد تفعيل الحساب أولاً')
         wallet = Wallet.objects.select_for_update().get(user=withdrawal.user)
         wallet.settle_hold(withdrawal.amount)
 

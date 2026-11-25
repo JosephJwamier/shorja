@@ -68,7 +68,8 @@ def resolve_pickup(item):
         .order_by('-approved_at')
         .first()
     )
-    if transfer is not None and not transfer.term_has_ended():
+    # Held money means the goods were not handed over, term or no term.
+    if transfer is not None and (transfer.held_quantity or not transfer.term_has_ended()):
         custodian = transfer.from_user
         location = _party_location(custodian)
         if location is not None:
@@ -486,7 +487,9 @@ def execute_return_refund(delivery_order):
         reservation.payment_released_at = timezone.now()
         reservation.save(update_fields=['payment_released_to_seller', 'payment_released_at'])
 
-    if amount_charged > 0:
+    # Goods left when the order was completed, whatever was paid for them: on a
+    # zero-deposit order nothing was, and its pieces never came back.
+    if reservation.completed_at:
         from .models import ItemVariant
         stock_variant = reservation.stock_variant
         if stock_variant is not None:
@@ -494,6 +497,8 @@ def execute_return_refund(delivery_order):
             stock_variant.return_stock(reservation.quantity)
         from ledger.services import void_app_sale
         void_app_sale(reservation, 'أُعيد الطلب')
+        from .wallet_utils import undo_sold_count
+        undo_sold_count(reservation)
         item = Item.objects.select_for_update().get(id=reservation.item_id)
         # An auction's listing already ended when it was won — release the
         # item back to draft rather than 'active' (there's no live listing

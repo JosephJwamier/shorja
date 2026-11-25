@@ -36,8 +36,9 @@ class _RequestFieldThrottle(SimpleRateThrottle):
 
 
 class LoginUsernameThrottle(_RequestFieldThrottle):
-    """Failed-or-not login attempts against one username."""
-    scope = 'auth_login_account'
+    """Login attempts against one account, from anywhere. Loose: as tight as
+    the one below, anyone who knew a number could keep its owner out."""
+    scope = 'auth_login_account_total'
     field = 'username'
 
     def get_cache_key(self, request, view):
@@ -51,6 +52,15 @@ class LoginUsernameThrottle(_RequestFieldThrottle):
         if account is None:
             return key
         return self.cache_format % {'scope': self.scope, 'ident': 'account-%s' % account.pk}
+
+
+class LoginUsernameAddressThrottle(LoginUsernameThrottle):
+    """Login attempts against one account from one address."""
+    scope = 'auth_login_account'
+
+    def get_cache_key(self, request, view):
+        key = super().get_cache_key(request, view)
+        return key and '%s-%s' % (key, self.get_ident(request))
 
 
 class PasswordResetEmailThrottle(_RequestFieldThrottle):

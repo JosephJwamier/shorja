@@ -44,6 +44,9 @@ class User(AbstractUser):
     phone_verified = models.BooleanField(default=False)
     # A number just swapped in cannot withdraw for a while (services.withdrawals).
     phone_changed_at = models.DateTimeField(null=True, blank=True)
+    # Support decided this person may take card money back out.
+    topups_withdrawable = models.BooleanField(
+        default=False, help_text='السماح بسحب الرصيد المشحون بالبطاقة')
     # When they were told, once, that wholesale money is held.
     wholesale_notice_at = models.DateTimeField(null=True, blank=True)
     email_verified = models.BooleanField(default=False)
@@ -1159,6 +1162,7 @@ class Reservation(models.Model):
     )
     buyer = models.ForeignKey(User, on_delete=models.CASCADE, related_name='reservations')
 
+    item_snapshot = models.JSONField(default=dict, blank=True, editable=False)
     quantity = models.PositiveIntegerField(default=1)
     deposit_amount = models.DecimalField(max_digits=14, decimal_places=2)
     total_price = models.DecimalField(max_digits=14, decimal_places=2)
@@ -1397,6 +1401,19 @@ class Reservation(models.Model):
         return max((o.delivered_at for o in self.delivery_orders.all()
                     if o.direction == 'outbound' and o.delivered_at
                     and o.status in ('delivered', 'confirmed')), default=None)
+
+    def save(self, *args, **kwargs):
+        # What was being sold, as it read when it was ordered: the seller may
+        # edit the product afterwards, and a dispute is about this.
+        if self._state.adding and not self.item_snapshot:
+            item = self.item
+            self.item_snapshot = {
+                **{f: getattr(item, f) for f in self.SNAPSHOT_FIELDS},
+                'images': [i.image.name for i in item.images.all()[:5]],
+            }
+        super().save(*args, **kwargs)
+
+    SNAPSHOT_FIELDS = ('title', 'name_ar', 'description', 'condition')
 
     @property
     def dispute_deadline(self):

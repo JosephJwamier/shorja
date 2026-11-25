@@ -2,11 +2,12 @@
 ReSell Trust - Django REST Framework ViewSets (Fixed)
 
 """
+import hashlib
 import logging
 import uuid
 from django.conf import settings
 from .wallet_utils import (
-    MAX_AMOUNT,
+    MAX_AMOUNT, undo_sold_count,
     credit_earnings,
     debit_balance,
     refund_to_buyer,
@@ -27,7 +28,7 @@ from .services.wholesale import (
     refund_rest, request_refund,
 )
 from .services.withdrawals import (
-    WithdrawalReviewError, approve_withdrawal, earnings_still_disputable, reject_withdrawal,
+    WithdrawalReviewError, approve_withdrawal, not_withdrawable, reject_withdrawal,
     withdrawal_refusal,
 )
 from .services.support import start_support_chat
@@ -138,6 +139,14 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     dlat, dlon = lat2 - lat1, lon2 - lon1
     a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
     return R * 2 * math.asin(math.sqrt(a))
+
+
+def announce_live(session):
+    """Tells the store's followers, at most once in a while: a stream stopped
+    and restarted (a dropped connection, or a seller after attention) is one."""
+    from .tasks import notify_store_followers_live
+    if cache.add(f'live-announced:{session.store_id}', 1, 2 * 3600):
+        notify_store_followers_live.delay(session.id)
 
 
 # A map shows its closest pins; an unbounded radius asked for every row.
@@ -1361,6 +1370,12 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
         if self.action in ('list', 'retrieve'):
             queryset = user_related(item_related(queryset, 'item'), 'winner').prefetch_related(
                 'bids__bidder__store__badges')
+            user = self.request.user
+            if not user.is_staff:
+                # A suspended seller's: still opened by those who bid on it.
+                mine = Q(item__owner=user) | Q(Exists(Bid.objects.filter(
+                    auction=OuterRef('pk'), bidder=user))) if user.is_authenticated else Q(pk__in=[])
+                queryset = queryset.filter(Q(item__owner__is_active=True) | mine)
         if self.request.query_params.get('active_only') == 'true':
             now = timezone.now()
             queryset = queryset.filter(
@@ -2135,8 +2150,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         )
 
         if start_immediately:
-            from .tasks import notify_store_followers_live
-            notify_store_followers_live.delay(session.id)
+            announce_live(session)
 
         return Response({
             'success': True,
@@ -2189,8 +2203,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             'title': session.title,
         })
 
-        from .tasks import notify_store_followers_live
-        notify_store_followers_live.delay(session.id)
+        announce_live(session)
 
         return Response({
             'success': True,
@@ -3266,6 +3279,8 @@ class ReelViewSet(SafeRankingCacheMixin,
         # Discovery (list) only ever shows published reels — pending/failed/
         # archived rows are only reachable through my_reels (owner) or a
         # direct retrieve/finalize by the owning store.
+        if not getattr(self.request.user, 'is_staff', False):
+            queryset = queryset.filter(store__user__is_active=True)
         if self.action == 'list':
             queryset = queryset.filter(status='published')
         elif not getattr(self.request.user, 'is_staff', False):
@@ -3281,6 +3296,14 @@ class ReelViewSet(SafeRankingCacheMixin,
     # سقف ما يُرتَّب في المرّة الواحدة. الترتيب يجري في بايثون على هذا
     # العدد، فهو ما يحدّ كلفته — ومئتان تكفي لعشر صفحات، وهي أكثر ممّا
     # يسحبه أحد في جلسة.
+    @staticmethod
+    def _viewer_key(request):
+        if request.user.is_authenticated:
+            return f'u{request.user.pk}'
+        from rest_framework.throttling import BaseThrottle
+        return hashlib.sha256((BaseThrottle().get_ident(request) + '|' + request.META.get(
+            'HTTP_USER_AGENT', '')[:200]).encode()).hexdigest()[:24]
+
     FEED_POOL_SIZE = 200
     # ثلاث دقائق: الريلز تُنشر على مدار اليوم، وقائمةٌ محفوظة ساعةً تُخفي
     # ما نُشر للتوّ عن متابعي المتجر.
@@ -3303,7 +3326,7 @@ class ReelViewSet(SafeRankingCacheMixin,
             return cached
 
         pool = list(
-            Reel.objects.filter(status='published')
+            Reel.objects.filter(status='published', store__user__is_active=True)
             .values_list('id', 'store_id', 'item__category_id', 'likes_count')
             [:self.FEED_POOL_SIZE]
         )
@@ -3357,7 +3380,7 @@ class ReelViewSet(SafeRankingCacheMixin,
         by_id = {
             reel.id: reel
             for reel in self.annotate_viewer_flags(
-                Reel.objects.filter(id__in=page_ids, status='published')
+                Reel.objects.filter(id__in=page_ids, status='published', store__user__is_active=True)
                 .select_related('store', 'store__user', 'item'))
         }
         ordered_page = [by_id[i] for i in page_ids if i in by_id]
@@ -3671,7 +3694,7 @@ class ReelViewSet(SafeRankingCacheMixin,
             # so the viewer-flag annotations have to be applied by hand —
             # without them this page pays the per-row like/save lookups.
             for reel in self.annotate_viewer_flags(
-                Reel.objects.filter(id__in=page_ids, status='published')
+                Reel.objects.filter(id__in=page_ids, status='published', store__user__is_active=True)
                 .select_related('store', 'store__user', 'item')
             )
         }
@@ -3803,8 +3826,10 @@ class ReelViewSet(SafeRankingCacheMixin,
                 'counted': False,
             }, status=status.HTTP_200_OK)
 
-        Reel.objects.filter(pk=reel.pk).update(view_count=F('view_count') + 1)
-        reel.refresh_from_db(fields=['view_count'])
+        # Once per person (or device) in a while: a loop of taps is one viewer.
+        if cache.add(f'reel-view:{reel.pk}:{self._viewer_key(request)}', 1, 6 * 3600):
+            Reel.objects.filter(pk=reel.pk).update(view_count=F('view_count') + 1)
+            reel.refresh_from_db(fields=['view_count'])
 
         # بلغ المشاهد نهاية الريل. أقوى إشارة اهتمام وأرخصها: الإعجاب
         # والتعليق يفعلهما قلّة، وإكمال المشاهدة يفعله كل من أعجبه فعلاً
@@ -4560,6 +4585,13 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
             }, status=status.HTTP_400_BAD_REQUEST)
 
         outbound_order = reservation.delivery_orders.filter(direction='outbound').first()
+        # Nothing paid and nothing shipped is nothing to settle: two friends made
+        # confirmed sales of it, with their reviews, and no commission.
+        if outbound_order is None and reservation.amount_charged <= 0:
+            return Response({
+                'success': False,
+                'message': 'لم يُدفع شيء من هذا الطلب ولم يُشحن — يُؤكَّد بعد توصيله'
+            }, status=status.HTTP_400_BAD_REQUEST)
         if outbound_order and outbound_order.status != 'confirmed':
             return Response({
                 'success': False,
@@ -4868,6 +4900,7 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
                     if old_status == 'completed':
                         from ledger.services import void_app_sale
                         void_app_sale(reservation, 'أُلغي الحجز')
+                        undo_sold_count(reservation)
                     item = Item.objects.select_for_update().get(id=reservation.item_id)
 
                     # This reservation may have been the one that sold out its
@@ -6574,7 +6607,8 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
             with transaction.atomic():
                 transfer = ItemTransfer.objects.select_for_update().get(pk=transfer.pk)
                 transfer.activate()
-                mark_notice_seen(request.user)
+                if transfer.escrow:
+                    mark_notice_seen(request.user)
         except ValueError as e:
             return Response({'success': False, 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -7628,7 +7662,8 @@ class UserStoreViewSet(viewsets.ModelViewSet):
 
         # Public views - only show active stores
         if self.action in ['list', 'retrieve', 'public_store']:
-            stores = UserStore.objects.filter(is_active=True).select_related('user', 'default_location')
+            stores = UserStore.objects.filter(
+                is_active=True, user__is_active=True).select_related('user', 'default_location')
             if self.action == 'list':
                 stores = with_store_numbers(
                     stores.select_related('default_location__user__store'), self.request.user)
@@ -7828,7 +7863,7 @@ class UserStoreViewSet(viewsets.ModelViewSet):
         """
         try:
             user = User.objects.get(username=username)
-            store = UserStore.objects.get(user=user, is_active=True)
+            store = UserStore.objects.get(user=user, is_active=True, user__is_active=True)
 
             return Response({
                 'success': True,
@@ -7885,7 +7920,7 @@ class UserStoreViewSet(viewsets.ModelViewSet):
         """
         try:
             user = User.objects.get(username=username)
-            store = UserStore.objects.get(user=user, is_active=True)
+            store = UserStore.objects.get(user=user, is_active=True, user__is_active=True)
 
             include_transferred = request.query_params.get('include_transferred', 'true').lower() == 'true'
 
@@ -9001,13 +9036,12 @@ class WalletViewSet(viewsets.ViewSet):
                         'message': f'رصيدك لا يكفي. المتاح {wallet.available_balance} د.ع'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
-                waiting = earnings_still_disputable(request.user)
+                waiting, why = not_withdrawable(request.user)
                 if wallet.available_balance - waiting < amount:
                     free = max(wallet.available_balance - waiting, Decimal('0'))
                     return Response({
                         'success': False,
-                        'message': f'أرباح بقيمة {waiting:,.0f} د.ع لم تنتهِ مهلة النزاع عليها بعد. '
-                                   f'المتاح للسحب الآن {free:,.0f} د.ع'
+                        'message': f'المتاح للسحب الآن {free:,.0f} د.ع. لا يُسحب بعد: {why}'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 wallet.hold(amount)  # lock the funds

@@ -487,9 +487,13 @@ REST_FRAMEWORK = {
     # throttled (core/throttling.py, core/auth_views.py) — per IP *and* per
     # target account, since the second is what actually stops credential
     # stuffing and reset-code guessing when the first must stay generous.
+    # Caddy is the one proxy: the last X-Forwarded-For entry is the caller, and
+    # whatever a client writes before it does not buy a fresh bucket.
+    'NUM_PROXIES': 1,
     'DEFAULT_THROTTLE_RATES': {
         'auth_login': '60/min',           # per IP: login/, token/, social-login/
-        'auth_login_account': '5/min',    # per submitted username
+        'auth_login_account': '5/min',    # per account and address
+        'auth_login_account_total': '20/min',  # per account, all addresses
         'auth_register': '30/hour',       # per IP
         'auth_reset': '30/hour',          # per IP: reset-password[-confirm]/
         'auth_reset_email': '5/hour',

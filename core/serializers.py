@@ -1174,6 +1174,14 @@ class ReservationSerializer(serializers.ModelSerializer):
             'platform_commission_percent', 'platform_commission_amount', 'seller_net',
         ]
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # The product as it was ordered, not as its seller rewrote it since.
+        if data.get('item') and instance.item_snapshot:
+            data['item'].update({f: instance.item_snapshot[f] for f in instance.SNAPSHOT_FIELDS
+                                 if f in instance.item_snapshot and f in data['item']})
+        return data
+
     def get_installment(self, obj):
         return _reservation_installment(obj)
 
@@ -2434,26 +2442,19 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         validated_data.pop('password2')
         if not validated_data.get('username'):
-            # مشتقّ من الرقم: فريد بحكم أن الرقم فريد، ومستقرّ (لا يتغيّر
-            # بتغيّر الاسم)، وقابل للقراءة في لوحة الإدارة — أفضل من
-            # UUID لمن يبحث عن حساب وهو يمسك شكوى فيها رقم هاتف.
-            validated_data['username'] = username_from_phone(validated_data['phone'])
+            validated_data['username'] = new_username()
         user = User.objects.create_user(**validated_data)
         return user
 
 
-def username_from_phone(phone):
-    """'u9647701234567'، مع لاحقة رقمية عند التصادم.
+def new_username():
+    """اسم عشوائي لا يدلّ على صاحبه.
 
-    البادئة تمنع تصادم معرّف كلّه أرقام مع أي منطق يعامل المعرّفات كأرقام،
-    وتُبقيه صالحاً كـ username في جانغو.
+    كان يُصنع من الرقم، واسم المستخدم ظاهر لكل زائر: كل من سجّل برقمه كان رقمه
+    معلناً وإن أخفاه الحقل phone.
     """
-    base = 'u' + re.sub(r'\D', '', phone or '')
-    username, suffix = base, 1
-    while User.objects.filter(username=username).exists():
-        suffix += 1
-        username = f'{base}_{suffix}'
-    return username
+    from .reserved_names import random_username
+    return random_username(lambda name: User.objects.filter(username=name).exists())
 
 
 class UserLoginSerializer(serializers.Serializer):

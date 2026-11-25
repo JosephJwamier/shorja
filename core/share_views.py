@@ -107,7 +107,8 @@ def product(request, listing_id):
         FixedPriceListing.objects
         .select_related('item', 'item__owner')
         .prefetch_related('item__images')
-        .filter(pk=listing_id, is_active=True)
+        .filter(pk=listing_id, is_active=True, item__owner__is_active=True)
+        .exclude(item__status__in=['draft', 'archived'])
         .first()
     )
     if listing is None:
@@ -127,7 +128,8 @@ def product(request, listing_id):
 @_locked_down
 @cache_control(max_age=300)
 def store(request, store_id):
-    shop = UserStore.objects.filter(pk=store_id, is_active=True).first()
+    shop = UserStore.objects.filter(
+        pk=store_id, is_active=True, user__is_active=True).first()
     if shop is None:
         raise Http404
 
@@ -150,7 +152,8 @@ def auction(request, auction_id):
         AuctionListing.objects
         .select_related('item')
         .prefetch_related('item__images')
-        .filter(pk=auction_id)
+        .filter(pk=auction_id, item__owner__is_active=True)
+        .exclude(item__status='archived')
         .first()
     )
     if listing is None:
@@ -171,7 +174,8 @@ def auction(request, auction_id):
 @cache_control(max_age=60)
 def live(request, session_id):
     session = (
-        LiveSession.objects.select_related('store').filter(pk=session_id).first()
+        LiveSession.objects.select_related('store')
+        .filter(pk=session_id, store__user__is_active=True).first()
     )
     if session is None:
         raise Http404

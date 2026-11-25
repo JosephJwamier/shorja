@@ -34,9 +34,9 @@ class TestLoginPerAccount:
 
     def test_rotating_ips_does_not_reset_the_account_bucket(self):
         # The per-username throttle is what defeats an attacker who rotates
-        # addresses — five tries from five IPs still exhausts the budget.
+        # addresses — twenty tries from twenty IPs exhaust the (looser) total.
         client = APIClient()
-        for i in range(5):
+        for i in range(20):
             login(client, 'victim', ip=f'10.0.0.{i + 1}')
         assert login(client, 'victim', ip='10.0.0.99').status_code == 429
 

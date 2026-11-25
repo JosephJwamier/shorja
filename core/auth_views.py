@@ -9,7 +9,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from rest_framework.throttling import ScopedRateThrottle
-from .throttling import LoginUsernameThrottle, PasswordResetEmailThrottle
+from .throttling import LoginUsernameAddressThrottle, LoginUsernameThrottle, PasswordResetEmailThrottle
 from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model
 from django.core.cache import cache
@@ -34,7 +34,7 @@ from .password_rules import (
 from .login_identifier import account_for
 from .identity_proof import ProofRequired, check_own_password, take_attempt
 from .phone_utils import to_e164
-from .reserved_names import poses_as_platform
+from .reserved_names import poses_as_platform, random_username
 from .models import Location  # NEW: Import Location
 
 User = get_user_model()
@@ -107,7 +107,7 @@ class LoginView(generics.GenericAPIView):
     permission_classes = [AllowAny]
     serializer_class = UserLoginSerializer
     # Per-IP (scope) AND per-username: see core/throttling.py for why both.
-    throttle_classes = [ScopedRateThrottle, LoginUsernameThrottle]
+    throttle_classes = [ScopedRateThrottle, LoginUsernameAddressThrottle, LoginUsernameThrottle]
     throttle_scope = 'auth_login'
 
     def post(self, request):
@@ -530,8 +530,8 @@ def unique_username(email, name):
     base = re.sub(r'[^a-zA-Z0-9_]', '', base).lower() or 'user'
     base = base[:25]
     if base.isdigit():
-        # All digits reads as a phone, with any suffix: the loop would not end.
-        base = 'user' + base
+        # All digits: most likely their phone number, and usernames are public.
+        return random_username(lambda n: User.objects.filter(username=n).exists())
 
     username = base
     suffix = 1

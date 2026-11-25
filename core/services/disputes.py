@@ -16,7 +16,7 @@ from ..delivery_utils import (
 from ..models import Dispute, Reservation
 from ..wallet_utils import (
     cancel_pending_commission, claw_back_release, delivery_fee_in_pot,
-    refund_to_buyer, release_reservation_payment,
+    refund_to_buyer, release_reservation_payment, undo_sold_count,
 )
 
 
@@ -130,8 +130,9 @@ def resolve_dispute(dispute, *, resolution_action, resolution='', admin_notes=''
                         reason='استرداد بعد نزاع #%d' % dispute.pk,
                     )
 
-                    # Stock was taken when the reservation was
-                    # confirmed/completed — restore it now.
+                # Stock was taken when the order was completed, even if
+                # nothing was paid for it — restore it now.
+                if reservation.completed_at:
                     from ..models import ItemVariant
                     stock_variant = reservation.stock_variant
                     if stock_variant is not None:
@@ -141,6 +142,7 @@ def resolve_dispute(dispute, *, resolution_action, resolution='', admin_notes=''
                         stock_variant.return_stock(reservation.quantity)
                     from ledger.services import void_app_sale
                     void_app_sale(reservation, 'استرداد بعد نزاع')
+                    undo_sold_count(reservation)
                 cancel_pending_commission(reservation)
 
                 reservation.status = 'refunded'

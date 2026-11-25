@@ -195,6 +195,8 @@ def settle_claimed_handovers(now=None):
     done = 0
     for transfer in ItemTransfer.objects.filter(
             status='active', escrow=True, refund_requested_at__isnull=True,
+            # A suspended reseller cannot object: an admin decides.
+            to_user__is_active=True,
             handover_claimed_at__lte=now - timedelta(days=HANDOVER_DAYS)):
         with transaction.atomic():
             locked = lock(transfer)

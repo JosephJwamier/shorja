@@ -33,10 +33,10 @@ def test_signup_succeeds_with_no_username_field(client):
     assert r.status_code == 201, r.data
 
 
-def test_a_username_is_generated_from_the_phone(client):
+def test_the_generated_username_does_not_show_the_phone(client):
     client.post(reverse('register'), payload(), format='json')
     user = User.objects.get(phone='+9647701234567')
-    assert user.username == 'u9647701234567'
+    assert user.username.startswith('user_') and '770' not in user.username
 
 
 def test_two_spellings_of_one_phone_cannot_both_register(client):
@@ -55,7 +55,7 @@ def test_the_generated_username_does_not_collide(client):
     User.objects.create_user(username='u9647701234567', password='x')
     r = client.post(reverse('register'), payload(), format='json')
     assert r.status_code == 201, r.data
-    assert User.objects.get(phone='+9647701234567').username == 'u9647701234567_2'
+    assert User.objects.get(phone='+9647701234567').username != 'u9647701234567'
 
 
 def test_login_by_phone_works_for_an_account_that_never_chose_a_username(client):

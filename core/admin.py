@@ -122,7 +122,7 @@ class UserAdmin(DjangoUserAdmin, ExportActionMixin, ModelAdmin):
     """
     fieldsets = DjangoUserAdmin.fieldsets + (
         ('الثقة والتحقق', {'fields': (
-            'phone', 'phone_verified', 'email_verified', 'identity_verified',
+            'phone', 'phone_verified', 'email_verified', 'identity_verified', 'topups_withdrawable',
             'trust_score', 'total_sales', 'total_purchases', 'admin_notes',
         )}),
     )
