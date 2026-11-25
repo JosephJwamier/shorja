@@ -12,12 +12,14 @@ instantly), so there's no second implementation for it to drift from.
 from datetime import timedelta
 from decimal import Decimal
 
+from django.conf import settings
 from django.db import transaction
-from django.db.models import Q, Sum
+from django.db.models import OuterRef, Q, Subquery, Sum
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from ..models import (
-    Reservation, Transaction, User, Wallet, WithdrawalRequest, get_or_create_wallet,
+    DeliveryOrder, Reservation, Transaction, User, Wallet, WithdrawalRequest, get_or_create_wallet,
 )
 
 
@@ -30,17 +32,24 @@ def earnings_still_disputable(user):
     """What `user` earned from sales the buyer may still dispute. It can be
     spent, not withdrawn: a refund has to find the money somewhere."""
     now = timezone.now()
-    # `or` chain of create_dispute's clock; nothing is open longer than the
-    # longest warranty, so a year back is the whole story.
-    open_sales = [
-        r.pk for r in Reservation.objects.filter(
-            status__in=('confirmed', 'disputed'), payment_released_to_seller=True,
-            payment_released_at__gte=now - timedelta(days=365),
-        ).filter(Q(item__owner=user) | Q(representative=user)).prefetch_related('delivery_orders')
-        if r.status == 'disputed' or now <= r.dispute_deadline
-    ]
+    # Reservation.dispute_deadline in SQL: a busy shop has thousands of sales,
+    # and this runs whenever its wallet is opened. The warranty takes a handful
+    # of values, so the deadline is one comparison for each.
+    sales = Reservation.objects.filter(
+        status__in=('confirmed', 'disputed'), payment_released_to_seller=True,
+        payment_released_at__gte=now - timedelta(days=365 + settings.DISPUTE_GRACE_DAYS),
+    ).filter(Q(item__owner=user) | Q(representative=user)).annotate(since=Coalesce(
+        Subquery(DeliveryOrder.objects.filter(
+            reservation=OuterRef('pk'), direction='outbound', delivered_at__isnull=False,
+            status__in=('delivered', 'confirmed'),
+        ).order_by('-delivered_at').values('delivered_at')[:1]),
+        'buyer_approved_at', 'payment_released_at', 'completed_at'))
+    still_open = Q(status='disputed')
+    for days in set(sales.order_by().values_list('warranty_days', flat=True).distinct()):
+        still_open |= Q(warranty_days=days, since__gte=now - timedelta(
+            days=days + settings.DISPUTE_GRACE_DAYS))
     return Transaction.objects.filter(
-        user=user, reservation_id__in=open_sales, status='completed',
+        user=user, reservation__in=sales.filter(still_open).values('pk'), status='completed',
         transaction_type__in=('payout', 'commission'),
     ).aggregate(t=Sum('amount'))['t'] or Decimal('0.00')
 
@@ -61,8 +70,17 @@ def unspent_topups(user):
     if user.topups_withdrawable:
         return Decimal('0.00')
     pot = spent = Decimal('0.00')
-    for t in (Transaction.objects.filter(user=user, status='completed').order_by('created_at', 'id')
-              .select_related('reservation', 'transfer')):
+    mine = Transaction.objects.filter(user=user, status='completed')
+    # Nothing before the first one can matter, and most sellers have none.
+    first = mine.filter(
+        Q(transaction_type__in=('payment', 'installment'))
+        | Q(transaction_type='deposit', auction__isnull=True),
+    ).order_by('created_at').values_list('created_at', flat=True).first()
+    if first is None:
+        return pot
+    for t in (mine.filter(created_at__gte=first).exclude(transaction_type__in=('payout', 'commission'))
+              .order_by('created_at', 'id').select_related('reservation', 'transfer')
+              .only('transaction_type', 'amount', 'auction_id', 'reservation__buyer_id', 'transfer__to_user_id')):
         kind = t.transaction_type
         if kind in ('payment', 'installment') or (kind == 'deposit' and not t.auction_id):
             pot += t.amount

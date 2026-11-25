@@ -37,6 +37,7 @@ from .services.support import SUPPORT_USERNAME, start_support_chat
 from .services.moderation import archive_item, resolve_report, ReportResolutionError
 from .api_errors import server_error
 from .querysets import StableOrderingFilter
+from .delivery_utils import resolve_pickup
 from .one_at_a_time import one_at_a_time
 
 logger = logging.getLogger(__name__)
@@ -151,6 +152,29 @@ def announce_live(session):
     from .tasks import notify_store_followers_live
     if cache.add(f'live-announced:{session.store_id}', 1, 2 * 3600):
         notify_store_followers_live.delay(session.id)
+
+
+def _no_pickup_address():
+    """A driver was sent to nowhere: the order went out with a blank address."""
+    return Response({
+        'success': False,
+        'code': 'no_pickup_address',
+        'message': 'أضف عنوانك أولاً من «عناويني» ليعرف السائق من أين يستلم'
+    }, status=status.HTTP_400_BAD_REQUEST)
+
+
+def _page_of(request, queryset, size, most):
+    """(rows, the next page's number or None) for a list that answers
+    {'data': [...]} rather than DRF's page."""
+    def number(name, default, top):
+        try:
+            return max(1, min(int(request.query_params.get(name, default)), top))
+        except (TypeError, ValueError):
+            return default
+    size, page = number('page_size', size, most), number('page', 1, 10_000)
+    start = (page - 1) * size
+    rows = list(queryset[start:start + size + 1])
+    return rows[:size], page + 1 if len(rows) > size else None
 
 
 def _limit(request, default=50, most=200):
@@ -4695,6 +4719,8 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
                 'success': False,
                 'message': 'لا توجد شركة توصيل مُفعَّلة حالياً — أضِفها من لوحة الإدارة أولاً'
             }, status=status.HTTP_400_BAD_REQUEST)
+        if resolve_pickup(reservation.item)[0] is None:
+            return _no_pickup_address()
 
         try:
             with transaction.atomic():
@@ -4757,6 +4783,8 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
                     'success': False,
                     'message': 'يمكن للبائع فقط دمج حجوزاته'
                 }, status=status.HTTP_403_FORBIDDEN)
+            if resolve_pickup(r.item)[0] is None:
+                return _no_pickup_address()
             if r.status != 'completed':
                 return Response({
                     'success': False,
@@ -5122,7 +5150,12 @@ class DeliveryOrderViewSet(viewsets.ReadOnlyModelViewSet):
 
         company = getattr(user, 'delivery_company', None)
         if company:
-            return DeliveryOrder.objects.filter(company=company)
+            orders = DeliveryOrder.objects.filter(company=company)
+            # The portal's finished tab: lately, not since the beginning.
+            days = self.request.query_params.get('days', '')
+            if days.isdigit() and 0 < int(days) <= 3650:
+                orders = orders.filter(assigned_at__gte=timezone.now() - timedelta(days=int(days)))
+            return orders
 
         return DeliveryOrder.objects.filter(
             Q(reservation__buyer=user) | Q(reservation__item__owner=user)
@@ -8013,20 +8046,23 @@ class UserStoreViewSet(viewsets.ModelViewSet):
                 status__in=['active', 'reserved']
             ).filter(visibility_filter).filter(
                 Q(fixed_listing__isnull=False) | Q(auction_listing__isnull=False)
-            ).select_related('owner', 'current_holder', 'category', 'current_location').prefetch_related('images')
+            ).order_by('-id')
+            total = items.count()
+            items, next_page = _page_of(request, item_related(items), 100, 100)
 
             representative_by_item_id = {
                 rep.item_id: rep for rep in Representative.objects.filter(
                     representative=user,
                     status__in=['accepted', 'active'],
                     can_list=True,
-                    item__in=items,
-                ).select_related('representative')
+                    item__in=[i.pk for i in items],
+                ).select_related('representative').prefetch_related('representative__store__badges')
             }
 
             return Response({
                 'success': True,
-                'count': items.count(),
+                'count': total,
+                'next_page': next_page,
                 'store': {
                     'name': store.name,
                     'description': store.description,
@@ -8100,16 +8136,14 @@ class UserStoreViewSet(viewsets.ModelViewSet):
             follower=request.user
         ).values_list('store__user_id', flat=True))
 
-        items = list(Item.objects.filter(
+        items = list(item_related(Item.objects.filter(open_seller_q('owner'))).filter(
             status__in=['active', 'reserved']
         ).filter(
             Q(owner_id__in=followed_user_ids) |
             Q(current_holder_id__in=followed_user_ids)
         ).filter(
             Q(fixed_listing__isnull=False) | Q(auction_listing__isnull=False)
-        ).select_related(
-            'owner', 'current_holder', 'category', 'current_location'
-        ).prefetch_related('images').order_by('-id')[:50])
+        ).order_by('-id')[:50])
 
         return Response({
             'success': True,
@@ -8123,20 +8157,18 @@ class UserStoreViewSet(viewsets.ModelViewSet):
         """Stores the current user follows, each with a preview of its items (view-all screen)"""
         follows = StoreFollow.objects.filter(
             follower=request.user, store__is_active=True
-        ).select_related('store', 'store__user').order_by('-created_at')
+        ).select_related('store', 'store__user').order_by('-created_at')[:30]
 
         result = []
         for follow in follows:
             store = follow.store
-            items = Item.objects.filter(
+            items = item_related(Item.objects.filter(open_seller_q('owner'))).filter(
                 status__in=['active', 'reserved']
             ).filter(
                 Q(owner=store.user) | Q(current_holder=store.user)
             ).filter(
                 Q(fixed_listing__isnull=False) | Q(auction_listing__isnull=False)
-            ).select_related(
-                'owner', 'current_holder', 'category', 'current_location'
-            ).prefetch_related('images').order_by('-id')[:12]
+            ).order_by('-id')[:12]
 
             result.append({
                 'store': UserStoreSerializer(store, context={'request': request}).data,
@@ -8592,12 +8624,14 @@ class UserStoreViewSet(viewsets.ModelViewSet):
         if governorate:
             queryset = queryset.filter(default_location__state__iexact=governorate)
 
-        serializer = self.get_serializer(queryset, many=True)
+        total = queryset.order_by().count()
+        stores, next_page = _page_of(request, queryset.order_by('-rating', '-id'), 50, 100)
 
         return Response({
             'success': True,
-            'count': queryset.count(),
-            'data': serializer.data
+            'count': total,
+            'next_page': next_page,
+            'data': self.get_serializer(stores, many=True).data
         }, status=status.HTTP_200_OK)
 
     @swagger_auto_schema(
