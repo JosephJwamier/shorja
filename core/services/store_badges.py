@@ -24,6 +24,7 @@ from ..models import Reservation, StoreBadge, StoreFollow, UserStore
 
 # Display order: earned status first, then the performance level.
 DISPLAY_ORDER = [
+    StoreBadge.KIND_WHOLESALE,
     StoreBadge.KIND_FOUNDER, StoreBadge.KIND_PIONEER, StoreBadge.KIND_CERTIFIED,
     StoreBadge.KIND_VERIFIED,
 ]

@@ -125,6 +125,17 @@ def _transaction_entry(txn, user):
                       title="رسم تقسيط", from_label=WALLET,
                       to_label=_res_label(res) if res else FINANCIER, **base)
 
+    if txn.transfer_id and kind in ("purchase", "payout", "commission", "refund", "storage_fee"):
+        seller = txn.transfer.from_user_id == user.id
+        what = "جملة — %s" % (txn.item.title if txn.item_id else "منتج")
+        base.update(ref_type="transfer", ref_id=txn.transfer_id)
+        out = kind == "purchase" or (kind == "storage_fee" and not seller)
+        titles = {"purchase": "شراء بالجملة", "payout": "أرباح بيع بالجملة", "commission": "عمولة بيع بالجملة",
+                  "refund": "استرداد شراء بالجملة", "storage_fee": "رسوم تخزين"}
+        return _entry(kind="wholesale", direction="out" if out else "in", amount=txn.amount,
+                      title=titles[kind], from_label=WALLET if out else what,
+                      to_label=what if out else WALLET, **base)
+
     if kind == "payout":
         if res:
             return _entry(kind="sale", direction="in", amount=txn.amount,
@@ -234,6 +245,11 @@ def escrow_summary(user):
     for r in Reservation.objects.filter(open_q, representative=user):
         commissions_waiting += r.commission_amount or 0
 
+    from .wholesale import held_totals
+    owed, paid = held_totals(user)
+    earnings_waiting += owed
+    paid_waiting += paid
+
     return {
         "paid_waiting": _money(paid_waiting),
         "earnings_waiting": _money(earnings_waiting),
@@ -245,7 +261,7 @@ def build_activity(user, limit=200):
     wallet = get_or_create_wallet(user)
     entries = []
     txns = (Transaction.objects.filter(user=user)
-            .select_related("reservation", "reservation__item")
+            .select_related("reservation", "reservation__item", "item", "transfer")
             .order_by("-created_at")[:limit])
     for txn in txns:
         e = _transaction_entry(txn, user)

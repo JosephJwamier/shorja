@@ -4,6 +4,17 @@ from decimal import Decimal
 from .models import Reservation, Transaction, get_or_create_wallet
 
 
+# What a money column holds (max_digits=14, decimal_places=2).
+MAX_AMOUNT = Decimal('999999999999.99')
+
+
+def check_amount(amount):
+    """A price times a quantity can outgrow the column and fail as a 500."""
+    if amount > MAX_AMOUNT:
+        raise ValueError('المبلغ أكبر من المسموح — قلّل الكمية')
+    return amount
+
+
 def _lock_reservation(reservation):
     """Re-reads the row under a lock so the state check that follows is the
     one that counts. Every money move on a reservation goes through here:
@@ -311,7 +322,8 @@ def complete_reservation(reservation, payment_type):
     # what was left and charge the second one for nothing.
     # Represented sales are the exception: theirs was taken at creation.
     from .models import ItemVariant
-    if Item.objects.filter(pk=reservation.item_id, status='archived').exists():
+    if (Item.objects.filter(pk=reservation.item_id, status='archived').exists()
+            or not reservation.item.owner.is_active):
         raise ItemWithdrawnError('لم يعد المنتج معروضاً للبيع')
     variant = reservation.stock_variant
     if variant is not None and not reservation.representative_id:
@@ -590,3 +602,7 @@ def release_reservation_payment(reservation, amount=None):
         )
 
     reservation.save(update_fields=update_fields)
+
+    # Bought wholesale: whoever stored these pieces has now delivered them.
+    from .services.wholesale import goods_left
+    goods_left(reservation.item, reservation.quantity)

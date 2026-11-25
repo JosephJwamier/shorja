@@ -48,19 +48,22 @@ def get_s3_client():
     return _s3_client
 
 
-def build_presigned_put_url(key, content_type):
+def build_presigned_put_url(key, content_type, content_length=None):
     """Presigned **PUT** (not presigned POST — this is an app upload, not a
     browser form submission). The client MUST PUT with the exact same
     Content-Type this was signed with, or S3 rejects the request with a
-    signature mismatch."""
+    signature mismatch. The same goes for `content_length`: signed, the link
+    uploads exactly that many bytes and not a disk full."""
     client = get_s3_client()
     ttl = getattr(settings, 'REEL_PRESIGNED_URL_TTL_SECONDS', 900)
+    size = {'ContentLength': content_length} if content_length else {}
     return client.generate_presigned_url(
         'put_object',
         Params={
             'Bucket': settings.AWS_STORAGE_BUCKET_NAME,
             'Key': key,
             'ContentType': content_type,
+            **size,
         },
         ExpiresIn=ttl,
     )

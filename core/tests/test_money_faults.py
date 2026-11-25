@@ -74,7 +74,7 @@ def test_wholesale_price_raised_after_request(w):
                              format='json').status_code == 201
     t = ItemTransfer.objects.get()
     w.lst.price = D(1000000); w.lst.save()
-    api(w.seller).post(f'/api/transfers/{t.id}/approve/')
+    api(w.seller).post(f'/api/transfers/{t.id}/approve/', {'escrow_ack': True}, format='json')
     assert bal(w.buyer) == D(4800000)
 
 

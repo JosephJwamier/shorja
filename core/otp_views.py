@@ -61,7 +61,7 @@ def _daily_key():
     return f'otp-sent:{timezone.localdate().isoformat()}'
 
 
-def _take_daily_slot():
+def _take_daily_slot(member=True):
     """يحجز رسالة من سقف اليوم ويعيد مفتاح عدّاده، أو `None` إن امتلأ.
 
     الحجز قبل الإرسال لا بعده: طلبان متزامنان عند آخر مكان كانا سيمرّان
@@ -71,11 +71,15 @@ def _take_daily_slot():
     cache.add(key, 0, timeout=2 * 24 * 3600)
     sent = cache.incr(key)
     cap = settings.OTP_DAILY_SEND_CAP
-    if sent == max(1, cap * 8 // 10):
+    if sent >= max(1, cap * 7 // 10) and cache.add(key + ':alerted', 1, 2 * 24 * 3600):
         logger.error('OTP sends reached %d of today\'s cap of %d', sent, cap)
     if sent > cap:
         if sent == cap + 1:
             logger.error('OTP daily cap of %d reached; refusing sends until midnight', cap)
+        return None
+    if not member and sent > cap - int(cap * settings.OTP_MEMBERS_SHARE):
+        _give_back_daily_slot(key)
+        logger.warning('OTP sends to numbers without an account refused: %d of %d used', sent, cap)
         return None
     return key
 
@@ -100,6 +104,11 @@ class SendPhoneCodeView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'otp_send'
 
+    def _stranger_allowed(self, request):
+        ident = ScopedRateThrottle().get_ident(request)
+        return take_attempt(f'otp-ip:{ident}:{timezone.localdate().isoformat()}',
+                            settings.OTP_STRANGERS_PER_IP_PER_DAY, 2 * 24 * 3600)
+
     def post(self, request):
         canonical = to_e164(request.data.get('phone'))
         if not canonical:
@@ -123,7 +132,11 @@ class SendPhoneCodeView(APIView):
 
         # يبدو للمستخدم كتعطّل عابر لا كسقف: لا شيء يخبر المهاجم أنه وصل
         # إلى الحدّ فيعرف متى يعود.
-        slot = _take_daily_slot()
+        from django.contrib.auth import get_user_model
+        member = get_user_model().objects.filter(phone=canonical, is_active=True).exists()
+        slot = None
+        if member or self._stranger_allowed(request):
+            slot = _take_daily_slot(member)
         if slot is None:
             return _service_unavailable()
 

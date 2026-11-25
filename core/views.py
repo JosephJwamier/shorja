@@ -4,7 +4,9 @@ ReSell Trust - Django REST Framework ViewSets (Fixed)
 """
 import logging
 import uuid
+from django.conf import settings
 from .wallet_utils import (
+    MAX_AMOUNT,
     credit_earnings,
     debit_balance,
     refund_to_buyer,
@@ -19,7 +21,15 @@ from .wallet_utils import (
     park_if_unlisted,
 )
 from .services.disputes import resolve_dispute, DisputeResolutionError
-from .services.withdrawals import approve_withdrawal, reject_withdrawal, WithdrawalReviewError
+from .services.refusals import FULL_PAYMENT_ONLY, deposit_refused_to
+from .services.wholesale import (
+    NOTICE, WholesaleError, claim_handover, confirm_received, mark_notice_seen, needs_notice,
+    refund_rest, request_refund,
+)
+from .services.withdrawals import (
+    WithdrawalReviewError, approve_withdrawal, earnings_still_disputable, reject_withdrawal,
+    withdrawal_refusal,
+)
 from .services.support import start_support_chat
 from .services.moderation import archive_item, resolve_report, ReportResolutionError
 from .api_errors import server_error
@@ -130,6 +140,11 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     return R * 2 * math.asin(math.sqrt(a))
 
 
+# A map shows its closest pins; an unbounded radius asked for every row.
+MAX_NEARBY = 100
+MAX_NEARBY_SCANNED = 2000
+
+
 def filter_by_proximity(queryset, lat, lng, radius_km, location_attr):
     """Filter a queryset by proximity using a bounding box (DB) then Haversine (Python)."""
     lat, lng, radius_km = float(lat), float(lng), float(radius_km)
@@ -148,7 +163,7 @@ def filter_by_proximity(queryset, lat, lng, radius_km, location_attr):
 
     result = []
     attrs = location_attr.split('__')
-    for obj in queryset:
+    for obj in queryset[:MAX_NEARBY_SCANNED]:
         loc = obj
         for attr in attrs:
             loc = getattr(loc, attr, None)
@@ -160,7 +175,7 @@ def filter_by_proximity(queryset, lat, lng, radius_km, location_attr):
                 obj.distance_km = round(dist, 2)
                 result.append(obj)
 
-    return sorted(result, key=lambda x: x.distance_km)
+    return sorted(result, key=lambda x: x.distance_km)[:MAX_NEARBY]
 
 class IsSuperAdmin(permissions.BasePermission):
     """
@@ -332,6 +347,13 @@ class UserViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        from .services.wholesale import holds_others_goods
+        if holds_others_goods(user):
+            return Response(
+                {'success': False, 'message': 'لديك اتفاقية جملة لم تُسوَّ: بضاعة أو ثمن بينك وبين طرف آخر — أنهِها أولًا قبل حذف الحساب.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         # Last, so a refusal above does not use up a WhatsApp code.
         from .identity_proof import require_proof
         require_proof(request)
@@ -352,6 +374,8 @@ class UserViewSet(viewsets.ModelViewSet):
             user.firebase_uid = None
             user.set_unusable_password()
             user.save()
+            Item.objects.filter(owner=user).exclude(status='sold').update(status='archived')
+            UserStore.objects.filter(user=user).update(is_active=False)
 
         return Response({'success': True, 'message': 'تم حذف الحساب بنجاح.'})
 
@@ -387,7 +411,7 @@ class ItemViewSet(viewsets.ModelViewSet):
             return queryset
         # Not published, or taken down: its owner's, and whoever has an order
         # on it (their order page still opens it). Nobody else's.
-        visible = ~Q(status__in=['draft', 'archived'])
+        visible = ~Q(status__in=['draft', 'archived']) & Q(owner__is_active=True)
         if user.is_authenticated:
             visible |= Q(owner=user) | Q(current_holder=user) | Q(
                 Exists(Reservation.objects.filter(item=OuterRef('pk'), buyer=user)))
@@ -912,7 +936,7 @@ class ItemViewSet(viewsets.ModelViewSet):
             return Response({'success': False, 'message': 'lat و lng مطلوبان'}, status=status.HTTP_400_BAD_REQUEST)
         try:
             queryset = Item.objects.filter(
-                status='active', current_location__isnull=False
+                status='active', current_location__isnull=False, owner__is_active=True
             ).select_related('current_location', 'owner', 'category').prefetch_related('images')
             results = filter_by_proximity(queryset, lat, lng, radius, 'current_location')
             data = ItemSerializer(results, many=True, context={'request': request}).data
@@ -1038,7 +1062,7 @@ class FixedPriceListingViewSet(SafeRankingCacheMixin, viewsets.ReadOnlyModelView
     """View fixed price listings — supports category browsing"""
     queryset = (
         FixedPriceListing.objects
-        .filter(is_active=True, item__status__in=['active', 'reserved'])
+        .filter(is_active=True, item__status__in=['active', 'reserved'], item__owner__is_active=True)
         .select_related('item', 'item__category', 'item__owner', 'item__current_holder')
         .prefetch_related('item__images', 'item__location_history')
     )
@@ -1412,7 +1436,7 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                 ).get(pk=auction.pk)
 
                 # Check if auction is active (re-checked against the locked row)
-                if not auction.is_active():
+                if not auction.is_active() or not auction.item.owner.is_active:
                     return Response({
                         'success': False,
                         'message': 'المزاد غير نشط'
@@ -1424,6 +1448,16 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                     return Response({
                         'success': False,
                         'message': f'أقل مزايدة {minimum_bid} د.ع، والسعر الحالي {auction.current_price} د.ع'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                # A slip of the thumb, or a bid nobody means to pay, ends the
+                # auction for everyone else.
+                ceiling = max(auction.current_price * 5,
+                              auction.current_price + Decimal('1000000'), minimum_bid)
+                if bid_amount > ceiling:
+                    return Response({
+                        'success': False,
+                        'message': f'المزايدة كبيرة جداً — أعلى ما يمكن الآن {ceiling:,.0f} د.ع'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 # Check if user has already placed a higher or equal bid
@@ -3015,7 +3049,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                         'success': False,
                         'message': 'لا يمكنك حجز منتجك'
                     }, status=status.HTTP_403_FORBIDDEN)
-                if item.status not in ('active', 'reserved'):
+                if item.status not in ('active', 'reserved') or not item.owner.is_active:
                     return Response({
                         'success': False,
                         'message': 'لم يعد المنتج معروضاً للبيع'
@@ -3038,6 +3072,12 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 total_price = queue_item.price * quantity
+                if total_price > MAX_AMOUNT:
+                    return Response({'success': False, 'message': 'المبلغ أكبر من المسموح — قلّل الكمية'},
+                                    status=status.HTTP_400_BAD_REQUEST)
+                if deposit_refused_to(request.user):
+                    return Response({'success': False, 'code': 'full_payment_only', 'message': FULL_PAYMENT_ONLY},
+                                    status=status.HTTP_400_BAD_REQUEST)
                 deposit_amount = queue_item.deposit_amount * quantity
 
                 delivery_location_id = serializer.validated_data.get('delivery_location_id')
@@ -3377,6 +3417,12 @@ class ReelViewSet(SafeRankingCacheMixin,
             }, status=status.HTTP_400_BAD_REQUEST)
 
         store = request.user.store
+        if Reel.objects.filter(store=store, created_at__gte=timezone.now() - timedelta(days=1)
+                               ).count() >= settings.REEL_MAX_UPLOADS_PER_DAY:
+            return Response({
+                'success': False,
+                'message': 'بلغت الحد اليومي لرفع الريلز — حاول غداً'
+            }, status=status.HTTP_400_BAD_REQUEST)
         content_type = serializer.validated_data['content_type']
         has_thumbnail = serializer.validated_data['has_thumbnail']
 
@@ -3392,9 +3438,12 @@ class ReelViewSet(SafeRankingCacheMixin,
             duration_seconds=0,
         )
 
-        video_upload_url = aws_utils.build_presigned_put_url(video_key, content_type)
+        video_upload_url = aws_utils.build_presigned_put_url(
+            video_key, content_type, serializer.validated_data.get('content_length'))
         thumbnail_upload_url = (
-            aws_utils.build_presigned_put_url(thumbnail_key, 'image/jpeg') if has_thumbnail else None
+            aws_utils.build_presigned_put_url(
+                thumbnail_key, 'image/jpeg', serializer.validated_data.get('thumbnail_length'))
+            if has_thumbnail else None
         )
 
         return Response({
@@ -3432,6 +3481,12 @@ class ReelViewSet(SafeRankingCacheMixin,
             return Response({
                 'success': False,
                 'message': 'لم يكتمل رفع الفيديو'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        if video_head['size'] > settings.REEL_MAX_VIDEO_BYTES:
+            aws_utils.delete_object(reel.video_key)
+            return Response({
+                'success': False,
+                'message': f'الفيديو {settings.REEL_MAX_VIDEO_BYTES // (1024 * 1024)} ميغابايت كحد أقصى'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if reel.thumbnail_key:
@@ -4168,12 +4223,14 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
                             'message': f'هذا العرض مقدَّم لكمية {offer_message.offer_quantity} فقط'
                         }, status=status.HTTP_400_BAD_REQUEST)
 
-                from django.conf import settings
                 expiry_time = timezone.now() + timedelta(
                     hours=getattr(settings, 'RESERVATION_EXPIRY_HOURS', 24)
                 )
 
                 total_price = unit_price * quantity
+                if total_price > MAX_AMOUNT:
+                    return Response({'success': False, 'message': 'المبلغ أكبر من المسموح — قلّل الكمية'},
+                                    status=status.HTTP_400_BAD_REQUEST)
                 # The listing's stored deposit is per unit *at the listing
                 # price*; a variant with its own price needs the percentage
                 # applied to that price, or a 150-IQD variant would carry a
@@ -4339,6 +4396,13 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
             return Response({
                 'success': False,
                 'message': 'payment_type must be "full" or "deposit"'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if payment_type == 'deposit' and not reservation.auction_id and deposit_refused_to(request.user):
+            return Response({
+                'success': False,
+                'code': 'full_payment_only',
+                'message': FULL_PAYMENT_ONLY
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # A 0% deposit is a deliberate seller choice — "don't take any
@@ -5387,6 +5451,11 @@ class DisputeViewSet(viewsets.ModelViewSet):
 
         try:
             item = Item.objects.get(id=item_id)
+            if not reservation_id:
+                return Response({
+                    'success': False,
+                    'message': 'افتح النزاع من صفحة الطلب نفسه'
+                }, status=status.HTTP_400_BAD_REQUEST)
 
             # Determine defendant based on whether user is buyer or seller
             if item.owner == request.user:
@@ -5423,11 +5492,8 @@ class DisputeViewSet(viewsets.ModelViewSet):
             # A settled sale stays settled: the warranty, plus a few days for
             # a complaint about its last day.
             if reservation and reservation.status == 'confirmed':
-                from django.conf import settings
-                since = (reservation.received_at or reservation.buyer_approved_at
-                         or reservation.payment_released_at or reservation.completed_at)
-                window = timedelta(days=reservation.warranty_days + settings.DISPUTE_GRACE_DAYS)
-                if since and timezone.now() > since + window:
+                deadline = reservation.dispute_deadline
+                if deadline and timezone.now() > deadline:
                     return Response({
                         'success': False,
                         'message': 'انتهت مدة الضمان، ولا يمكن فتح نزاع على هذا الطلب'
@@ -5440,6 +5506,14 @@ class DisputeViewSet(viewsets.ModelViewSet):
                         return Response({
                             'success': False,
                             'message': 'يوجد نزاع على هذا الطلب مسبقاً'
+                        }, status=status.HTTP_400_BAD_REQUEST)
+                    # A decided complaint re-filed for ever keeps the seller's
+                    # money and the admins' queue hostage.
+                    if Dispute.objects.filter(reservation=reservation,
+                                              complainant=request.user).count() >= 2:
+                        return Response({
+                            'success': False,
+                            'message': 'حُسم أكثر من نزاع على هذا الطلب — تواصل مع الدعم'
                         }, status=status.HTTP_400_BAD_REQUEST)
                 dispute = Dispute.objects.create(
                     item=item,
@@ -6059,6 +6133,13 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                 'message': 'الكمية واحد على الأقل'
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        # These pieces leave the shelf before a dinar is paid.
+        if quantity > settings.REP_HOLD_MAX_QUANTITY:
+            return Response({
+                'success': False,
+                'message': f'الكمية عبر المندوب {settings.REP_HOLD_MAX_QUANTITY} كحد أقصى في الطلب الواحد'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         try:
             with transaction.atomic():
                 # Lock the item
@@ -6113,13 +6194,14 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                     total_price = fixed_listing.price * quantity
                     deposit_amount = fixed_listing.deposit_amount * quantity
 
+                if total_price > MAX_AMOUNT:
+                    return Response({'success': False, 'message': 'المبلغ أكبر من المسموح — قلّل الكمية'},
+                                    status=status.HTTP_400_BAD_REQUEST)
+
                 # Commission is calculated on total sale price, not on deposit
                 commission_amount = (total_price * representative_assignment.commission_percentage) / 100
 
-                from django.conf import settings
-                expiry_time = timezone.now() + timedelta(
-                    hours=getattr(settings, 'RESERVATION_EXPIRY_HOURS', 24)
-                )
+                expiry_time = timezone.now() + timedelta(minutes=settings.REP_HOLD_MINUTES)
 
                 # Create reservation WITH representative info
                 from .services.commission import commission_for
@@ -6480,10 +6562,19 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
         transfer = self.get_object()
         if transfer.from_user != request.user:
             return Response({'success': False, 'message': 'الموافقة لصاحب المنتج فقط'}, status=status.HTTP_403_FORBIDDEN)
+        # Told before they agree, whatever build they are on: the app shows the
+        # notice and sends the flag; an older one shows this message, and its
+        # next tap goes through.
+        if (transfer.status == 'pending' and needs_notice(request.user)
+                and str(request.data.get('escrow_ack', '')).lower() not in ('true', '1')):
+            mark_notice_seen(request.user)
+            return Response({'success': False, 'code': 'escrow_notice', 'message': NOTICE},
+                            status=status.HTTP_400_BAD_REQUEST)
         try:
             with transaction.atomic():
                 transfer = ItemTransfer.objects.select_for_update().get(pk=transfer.pk)
                 transfer.activate()
+                mark_notice_seen(request.user)
         except ValueError as e:
             return Response({'success': False, 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -6530,6 +6621,8 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
         )
         if not can:
             return Response({'success': False, 'message': 'لا يمكن إلغاء هذه الاتفاقية'}, status=status.HTTP_403_FORBIDDEN)
+        if transfer.status == 'active' and transfer.held_quantity:
+            return self._money_held()
         if transfer.status == 'active' and transfer.from_user == request.user and not transfer.term_has_ended():
             return Response({
                 'success': False,
@@ -6567,6 +6660,8 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
             return Response({'success': False, 'message': 'لست طرفاً في هذه الاتفاقية'}, status=status.HTTP_403_FORBIDDEN)
         if transfer.status != 'active':
             return Response({'success': False, 'message': 'لا يمكن إغلاق هذه الاتفاقية'}, status=status.HTTP_400_BAD_REQUEST)
+        if transfer.held_quantity:
+            return self._money_held()
         if is_owner and not transfer.term_has_ended():
             return Response({
                 'success': False,
@@ -6584,6 +6679,60 @@ class ItemTransferViewSet(viewsets.ModelViewSet):
             'message': 'أُغلقت الاتفاقية',
             'data': ItemTransferSerializer(transfer, context={'request': request}).data
         })
+
+    # ==================== HELD MONEY (services/wholesale.py) ====================
+
+    @staticmethod
+    def _money_held():
+        return Response({
+            'success': False,
+            'message': 'ثمن بضاعة لم تُسلَّم ما زال محجوزاً — يؤكّد المشتري الاستلام أو يطلب الاسترداد أولاً',
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    def _held_action(self, request, side, act, message):
+        transfer = self.get_object()
+        if getattr(transfer, side) != request.user.id:
+            return Response({'success': False, 'message': 'هذا الإجراء للطرف الآخر في الاتفاقية'},
+                            status=status.HTTP_403_FORBIDDEN)
+        try:
+            transfer = act(transfer)
+        except WholesaleError as exc:
+            return Response({'success': False, 'message': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'success': True, 'message': message,
+                         'data': ItemTransferSerializer(transfer, context={'request': request}).data})
+
+    @action(detail=True, methods=['post'])
+    def confirm_received(self, request, pk=None):
+        """Reseller took goods out of the warehouse: the seller is paid for them."""
+        units = request.data.get('quantity')
+        try:
+            units = None if units in (None, '') else int(units)
+        except (TypeError, ValueError):
+            return Response({'success': False, 'message': 'الكمية غير صالحة'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        return self._held_action(request, 'to_user_id', lambda t: confirm_received(t, units),
+                                 'أُكّد الاستلام وحُرِّر الثمن للبائع')
+
+    @action(detail=True, methods=['post'])
+    def request_refund(self, request, pk=None):
+        """Reseller wants back the price of what they never received."""
+        return self._held_action(request, 'to_user_id', request_refund,
+                                 'أُرسل طلب الاسترداد إلى البائع')
+
+    @action(detail=True, methods=['post'])
+    def accept_refund(self, request, pk=None):
+        """Seller agrees: unsold pieces come back to stock, their price goes back."""
+        def act(transfer):
+            if transfer.refund_requested_at is None:
+                raise WholesaleError('لا طلب استرداد على هذه الاتفاقية')
+            return refund_rest(transfer)
+        return self._held_action(request, 'from_user_id', act, 'رُدّ الثمن وعادت القطع إلى مخزونك')
+
+    @action(detail=True, methods=['post'])
+    def claim_handover(self, request, pk=None):
+        """Seller says they handed the rest over; paid in a week unless disputed."""
+        return self._held_action(request, 'from_user_id', claim_handover,
+                                 'أُبلغ المشتري — يُحرَّر الثمن إن لم يعترض خلال 7 أيام')
 
     # ==================== OWNER-SIDE GETS ====================
 
@@ -8364,7 +8513,7 @@ class UserStoreViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_400_BAD_REQUEST)
         try:
             queryset = UserStore.objects.filter(
-                is_active=True, default_location__isnull=False
+                is_active=True, default_location__isnull=False, user__is_active=True
             ).select_related('default_location', 'user')
             results = filter_by_proximity(queryset, lat, lng, radius, 'default_location')
             data = UserStoreSerializer(results, many=True, context={'request': request}).data
@@ -8526,7 +8675,7 @@ class LocationViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_400_BAD_REQUEST)
         try:
             queryset = Item.objects.filter(
-                status='active', current_location__isnull=False
+                status='active', current_location__isnull=False, owner__is_active=True
             ).select_related('current_location', 'owner', 'category').prefetch_related('images')
             results = filter_by_proximity(queryset, lat, lng, radius, 'current_location')
             data = ItemSerializer(results, many=True, context={'request': request}).data
@@ -8565,7 +8714,7 @@ class LocationViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_400_BAD_REQUEST)
         try:
             queryset = UserStore.objects.filter(
-                is_active=True, default_location__isnull=False
+                is_active=True, default_location__isnull=False, user__is_active=True
             ).select_related('default_location', 'user')
             results = filter_by_proximity(queryset, lat, lng, radius, 'default_location')
             data = UserStoreSerializer(results, many=True, context={'request': request}).data
@@ -8834,6 +8983,10 @@ class WalletViewSet(viewsets.ViewSet):
             return Response({'success': False, 'errors': serializer.errors},
                             status=status.HTTP_400_BAD_REQUEST)
 
+        refusal = withdrawal_refusal(request.user)
+        if refusal:
+            return Response({'success': False, 'message': refusal}, status=status.HTTP_400_BAD_REQUEST)
+
         amount = serializer.validated_data['amount']
         account_number = serializer.validated_data['account_number']
 
@@ -8846,6 +8999,15 @@ class WalletViewSet(viewsets.ViewSet):
                     return Response({
                         'success': False,
                         'message': f'رصيدك لا يكفي. المتاح {wallet.available_balance} د.ع'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                waiting = earnings_still_disputable(request.user)
+                if wallet.available_balance - waiting < amount:
+                    free = max(wallet.available_balance - waiting, Decimal('0'))
+                    return Response({
+                        'success': False,
+                        'message': f'أرباح بقيمة {waiting:,.0f} د.ع لم تنتهِ مهلة النزاع عليها بعد. '
+                                   f'المتاح للسحب الآن {free:,.0f} د.ع'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 wallet.hold(amount)  # lock the funds

@@ -42,6 +42,10 @@ class User(AbstractUser):
     # AbstractUser declares it blank and non-unique; both are overridden.
     email = models.EmailField('email address', blank=True, null=True, unique=True)
     phone_verified = models.BooleanField(default=False)
+    # A number just swapped in cannot withdraw for a while (services.withdrawals).
+    phone_changed_at = models.DateTimeField(null=True, blank=True)
+    # When they were told, once, that wholesale money is held.
+    wholesale_notice_at = models.DateTimeField(null=True, blank=True)
     email_verified = models.BooleanField(default=False)
     identity_verified = models.BooleanField(default=False)
     avatar = models.ImageField(upload_to='avatars/', validators=[validate_image], null=True, blank=True)
@@ -291,11 +295,15 @@ class StoreBadge(models.Model):
     still a row so support can see when and revoke it. Revoking never
     deletes: the row keeps `revoked_at` so a re-grant is visibly a re-grant."""
     KIND_FOUNDER, KIND_PIONEER, KIND_CERTIFIED, KIND_VERIFIED = 'founder', 'pioneer', 'certified', 'verified'
+    # متجر جملة: متجر تثق به المنصة وتتحمّل مسؤوليته، فيصله ثمن البيع
+    # بالجملة عند الموافقة بدل أن يُحجز (انظر services/wholesale.py).
+    KIND_WHOLESALE = 'wholesale'
     KIND_CHOICES = [
         (KIND_FOUNDER, 'مؤسِّس'), (KIND_PIONEER, 'رائد'),
         (KIND_CERTIFIED, 'بائع معتمد'), (KIND_VERIFIED, 'موثَّق'),
+        (KIND_WHOLESALE, 'متجر جملة'),
     ]
-    ADMIN_ONLY = (KIND_FOUNDER, KIND_PIONEER, KIND_CERTIFIED)
+    ADMIN_ONLY = (KIND_FOUNDER, KIND_PIONEER, KIND_CERTIFIED, KIND_WHOLESALE)
     # Founders are the first 50 stores, pioneers the next 200: caps, not
     # first-come — the admin chooses who, the cap just cannot be exceeded.
     CAPS = {KIND_FOUNDER: 50, KIND_PIONEER: 200}
@@ -882,6 +890,14 @@ class ItemTransfer(models.Model):
         max_digits=5, decimal_places=2, default=Decimal('0.00'))
     platform_commission_amount = models.DecimalField(
         max_digits=14, decimal_places=2, default=Decimal('0.00'))
+    # --- المال المحجوز (services/wholesale.py). escrow تُجمَّد عند الموافقة:
+    # سحب شارة «متجر جملة» أو منحها لاحقاً لا يمسّ بيعة تمّت.
+    escrow = models.BooleanField(default=False)
+    released_quantity = models.PositiveIntegerField(default=0)
+    refunded_quantity = models.PositiveIntegerField(default=0)
+    refund_requested_at = models.DateTimeField(null=True, blank=True)
+    handover_claimed_at = models.DateTimeField(null=True, blank=True)
+
     resulting_item = models.ForeignKey(
         Item, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='acquired_via_transfer',
@@ -938,19 +954,35 @@ class ItemTransfer(models.Model):
             return None
         return self.quantity * self.wholesale_price_per_unit
 
+    @property
+    def held_quantity(self):
+        """Pieces paid for whose money has not reached the seller."""
+        if not self.escrow:
+            return 0
+        return max(self.quantity - self.released_quantity - self.refunded_quantity, 0)
+
+    @property
+    def held_amount(self):
+        return self.held_quantity * (self.wholesale_price_per_unit or Decimal('0'))
+
     def activate(self):
         """
         Owner approves → deducts the requested quantity from their item's stock,
-        charges the reseller's wallet at the per-unit price they asked at, pays
-        the owner that price less the platform commission, and creates a new,
-        fully independent Item owned by the reseller.
+        charges the reseller's wallet at the per-unit price they asked at, and
+        creates a new, fully independent Item owned by the reseller.
+
+        A wholesale store is paid that price less the platform commission now.
+        Any other seller is paid as the goods leave (services/wholesale.py).
         """
-        from .wallet_utils import debit_balance, credit_earnings
+        from .services.wholesale import is_wholesale_store
+        from .wallet_utils import check_amount, debit_balance, credit_earnings
 
         if self.status != 'pending':
             raise ValueError("Only pending agreements can be activated")
 
         item = self.item
+        if item.status == 'archived' or not self.to_user.is_active:
+            raise ValueError('لم تعد هذه الاتفاقية متاحة')
         fixed_listing = getattr(item, 'fixed_listing', None)
         if not fixed_listing or not fixed_listing.price or fixed_listing.price <= 0:
             raise ValueError("Item has no fixed price listing")
@@ -971,7 +1003,7 @@ class ItemTransfer(models.Model):
         wholesale_price_per_unit = variant.price if variant.price is not None else fixed_listing.price
         if self.wholesale_price_per_unit is not None:
             wholesale_price_per_unit = min(self.wholesale_price_per_unit, wholesale_price_per_unit)
-        total_price = wholesale_price_per_unit * self.quantity
+        total_price = check_amount(wholesale_price_per_unit * self.quantity)
 
         variant.take_stock(self.quantity)
 
@@ -980,9 +1012,10 @@ class ItemTransfer(models.Model):
         commission = min(commission, total_price)
 
         debit_balance(self.to_user, total_price, 'purchase', item=item, transfer=self)
-        credit_earnings(self.from_user, total_price - commission, 'payout',
-                        item=item, transfer=self)
-        if commission > 0:
+        escrow = not is_wholesale_store(self.from_user)
+        if not escrow:
+            credit_earnings(self.from_user, total_price - commission, 'payout',
+                            item=item, transfer=self)
             credit_earnings(platform_account(), commission, 'commission',
                             item=item, transfer=self)
 
@@ -1014,6 +1047,7 @@ class ItemTransfer(models.Model):
         self.wholesale_price_per_unit = wholesale_price_per_unit
         self.platform_commission_percent = commission_percent
         self.platform_commission_amount = commission
+        self.escrow = escrow
         self.resulting_item = new_item
         self.status = 'active'
         self.approved_at = now
@@ -1024,7 +1058,7 @@ class ItemTransfer(models.Model):
             self.next_storage_fee_due = now + timedelta(days=self.storage_fee_period_days)
         self.save(update_fields=[
             'wholesale_price_per_unit', 'platform_commission_percent',
-            'platform_commission_amount', 'resulting_item', 'status', 'approved_at',
+            'platform_commission_amount', 'escrow', 'resulting_item', 'status', 'approved_at',
             'agreement_start_date', 'agreement_end_date', 'next_storage_fee_due',
         ])
 
@@ -1363,6 +1397,13 @@ class Reservation(models.Model):
         return max((o.delivered_at for o in self.delivery_orders.all()
                     if o.direction == 'outbound' and o.delivered_at
                     and o.status in ('delivered', 'confirmed')), default=None)
+
+    @property
+    def dispute_deadline(self):
+        """The warranty, plus a few days for a complaint about its last day."""
+        since = (self.received_at or self.buyer_approved_at
+                 or self.payment_released_at or self.completed_at)
+        return since and since + timedelta(days=self.warranty_days + settings.DISPUTE_GRACE_DAYS)
 
     def can_release_payment(self):
         """Check if payment can be released to seller"""

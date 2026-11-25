@@ -22,7 +22,12 @@ api.shorjeh.com {
 	}
 
 	# كل ما تبقّى إلى daphne — بما فيه WebSocket (يرقّيه Caddy تلقائياً).
+	#
+	# سقف الطلب: أكبر رفع صحيح هو صور منتج مضغوطة، وجسمٌ بلا سقف يملأ القرص.
 	handle {
+		request_body {
+			max_size 40MB
+		}
 		reverse_proxy web:8000
 	}
 

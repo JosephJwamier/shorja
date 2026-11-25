@@ -15,6 +15,12 @@ logger = logging.getLogger(__name__)
 
 
 @shared_task
+def settle_wholesale_handovers():
+    from .services.wholesale import settle_claimed_handovers
+    return settle_claimed_handovers()
+
+
+@shared_task
 def process_expired_reservations():
     """
     Mark reservations that were never completed (deposit/full paid) as

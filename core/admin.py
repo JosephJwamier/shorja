@@ -254,8 +254,8 @@ class UserStoreAdmin(ModelAdmin):
     inlines = [StoreBadgeInline]
     actions = [
         'deactivate_stores_action', 'activate_stores_action',
-        'grant_founder', 'grant_pioneer', 'grant_certified',
-        'revoke_founder', 'revoke_pioneer', 'revoke_certified',
+        'grant_wholesale', 'grant_founder', 'grant_pioneer', 'grant_certified',
+        'revoke_wholesale', 'revoke_founder', 'revoke_pioneer', 'revoke_certified',
         'recompute_levels_now', 'grant_reward_coupon',
     ]
 
@@ -294,6 +294,14 @@ class UserStoreAdmin(ModelAdmin):
         from .services.store_badges import revoke_badge
         count = sum(1 for st in queryset if revoke_badge(st, kind, by=request.user, note='سُحبت من لوحة الإدارة'))
         self.message_user(request, 'سُحبت الشارة من %d متجر.' % count, level=messages.SUCCESS)
+
+    @admin.action(description='تحويل إلى «متجر جملة» (يصله ثمن الجملة فوراً)', permissions=['change'])
+    def grant_wholesale(self, request, queryset):
+        self._grant(request, queryset, StoreBadge.KIND_WHOLESALE)
+
+    @admin.action(description='إلغاء «متجر جملة»', permissions=['change'])
+    def revoke_wholesale(self, request, queryset):
+        self._revoke(request, queryset, StoreBadge.KIND_WHOLESALE)
 
     @admin.action(description='منح شارة «مؤسِّس» (الخمسون الأوائل)', permissions=['change'])
     def grant_founder(self, request, queryset):
@@ -545,11 +553,39 @@ class AuctionListingAdmin(ModelAdmin):
 
 @admin.register(ItemTransfer)
 class ItemTransferAdmin(ModelAdmin):
-    list_display = ('item', 'from_user', 'to_user', 'status', 'quantity', 'wholesale_price_per_unit', 'storage_fee_type', 'initiated_at')
-    list_filter = ('status', 'storage_fee_type')
+    list_display = ('item', 'from_user', 'to_user', 'status', 'quantity', 'wholesale_price_per_unit',
+                    'held_display', 'refund_requested_at', 'handover_claimed_at', 'initiated_at')
+    list_filter = ('status', 'escrow', ('refund_requested_at', admin.EmptyFieldListFilter),
+                   'storage_fee_type')
     search_fields = ('item__title', 'from_user__username', 'to_user__username')
     raw_id_fields = ('item', 'from_user', 'to_user', 'resulting_item')
     list_select_related = ('item', 'item__owner', 'from_user', 'to_user')
+    # What was paid and what was not: moved by services/wholesale.py only.
+    readonly_fields = ('escrow', 'released_quantity', 'refunded_quantity')
+    actions = ['pay_the_seller', 'refund_the_reseller']
+
+    @admin.display(description='المحجوز')
+    def held_display(self, obj):
+        return '%s (%d)' % ('{:,}'.format(int(obj.held_amount)), obj.held_quantity) if obj.held_quantity else '—'
+
+    def _decide(self, request, queryset, decide, done):
+        from .services.wholesale import WholesaleError
+        for transfer in queryset:
+            try:
+                decide(transfer)
+                self.message_user(request, '%s — %s' % (done, transfer), level=messages.SUCCESS)
+            except WholesaleError as exc:
+                self.message_user(request, '%s: %s' % (transfer, exc), level=messages.ERROR)
+
+    @admin.action(description='تحرير المحجوز للبائع (سلّم البضاعة)', permissions=['change'])
+    def pay_the_seller(self, request, queryset):
+        from .services.wholesale import confirm_received
+        self._decide(request, queryset, confirm_received, 'حُرِّر المحجوز للبائع')
+
+    @admin.action(description='ردّ المحجوز للمشتري (لم تُسلَّم البضاعة)', permissions=['change'])
+    def refund_the_reseller(self, request, queryset):
+        from .services.wholesale import refund_rest
+        self._decide(request, queryset, refund_rest, 'رُدّ المحجوز للمشتري')
 
 
 @admin.register(StorageFeePayment)

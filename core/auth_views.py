@@ -34,6 +34,7 @@ from .password_rules import (
 from .login_identifier import account_for
 from .identity_proof import ProofRequired, check_own_password, take_attempt
 from .phone_utils import to_e164
+from .reserved_names import poses_as_platform
 from .models import Location  # NEW: Import Location
 
 User = get_user_model()
@@ -686,7 +687,7 @@ class SocialAttachPhoneView(APIView):
                     # they own (and email is unique, so the second would 500).
                     email=email if (_email_is_proven(social)
                                     and not User.objects.filter(email=email).exists()) else None,
-                    first_name=name,
+                    first_name='' if poses_as_platform(name) else name,
                     email_verified=bool(social.get('email_verified')),
                     firebase_uid=uid,
                     phone=canonical,
@@ -697,11 +698,13 @@ class SocialAttachPhoneView(APIView):
                 user.set_unusable_password()
                 user.save()
             else:
+                if user.phone and user.phone != canonical:
+                    user.phone_changed_at = timezone.now()
                 user.phone = canonical
                 user.phone_verified = True
                 if not user.firebase_uid:
                     user.firebase_uid = uid
-                user.save(update_fields=['phone', 'phone_verified', 'firebase_uid'])
+                user.save(update_fields=['phone', 'phone_verified', 'phone_changed_at', 'firebase_uid'])
 
         logger.info(f"Phone attached to social account {user.id} (new={is_new_user})")
         return issue_session(user, is_new_user=is_new_user)

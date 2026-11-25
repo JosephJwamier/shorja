@@ -64,7 +64,7 @@ def balance(user):
 
 def test_owner_cannot_rewind_an_executed_agreement_and_charge_again(owner, reseller, transfer):
     owner_client = client_for(owner)
-    assert owner_client.post(f'/api/transfers/{transfer.id}/approve/').status_code == 200
+    assert owner_client.post(f'/api/transfers/{transfer.id}/approve/', {'escrow_ack': True}, format='json').status_code == 200
     assert balance(reseller) == Decimal('900')
 
     rewind = owner_client.patch(f'/api/transfers/{transfer.id}/',
@@ -113,7 +113,8 @@ def test_reseller_cannot_approve_their_own_request(reseller, transfer):
 
 
 def test_owner_approve_still_charges_once(owner, reseller, transfer):
-    response = client_for(owner).post(f'/api/transfers/{transfer.id}/approve/')
+    response = client_for(owner).post(
+        f'/api/transfers/{transfer.id}/approve/', {'escrow_ack': True}, format='json')
 
     assert response.status_code == 200
     transfer.refresh_from_db()
@@ -138,7 +139,9 @@ def test_reseller_can_still_cancel_and_owner_can_still_reject(owner, reseller, t
 
 
 def test_reseller_can_still_complete_an_active_agreement(owner, reseller, transfer):
-    client_for(owner).post(f'/api/transfers/{transfer.id}/approve/')
+    client_for(owner).post(
+        f'/api/transfers/{transfer.id}/approve/', {'escrow_ack': True}, format='json')
+    ItemTransfer.objects.filter(pk=transfer.pk).update(released_quantity=1)
 
     response = client_for(reseller).post(f'/api/transfers/{transfer.id}/complete/')
 

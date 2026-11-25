@@ -33,10 +33,13 @@ x-firebase-key: &firebase-key
   bind:
     create_host_path: false
 
+# mem_limit لكل خدمة: 4GB لكل شيء على خادم واحد، وخدمة تتضخّم بلا سقف تجعل
+# النواة تقتل MySQL أولاً لأنها الأكبر.
 services:
   db:
     image: mysql:8.0
     restart: unless-stopped
+    mem_limit: 1600m
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
@@ -65,8 +68,10 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    mem_limit: 400m
     # appendonly: مهام Celery المجدولة لا تضيع عند إعادة تشغيل الخادم.
-    command: redis-server --appendonly yes
+    # volatile-lru: يُخلى ما له عمر (الذاكرة المؤقتة) ولا تُمسّ مهام Celery.
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy volatile-lru
     volumes:
       - redis_data:/data
     healthcheck:
@@ -80,6 +85,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
+    mem_limit: 900m
     env_file: ../.env
     environment:
       FIREBASE_CREDENTIALS_PATH: /run/secrets/firebase-credentials.json
@@ -115,6 +121,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
+    mem_limit: 800m
     env_file: ../.env
     # العامل هو من يرسل أغلب الإشعارات (المهامّ المجدولة والتذكيرات)، فله
     # المفتاح كما لـweb.
@@ -133,6 +140,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
+    mem_limit: 300m
     env_file: ../.env
     # beat لا يرسل إشعاراً بنفسه، لكنه يأخذ المفتاح كغيره. بدونه يفشل فحص
     # Firebase في NEW_SERVER.md حين يُشغَّل هنا، فيبدو أن الإشعارات معطّلة
@@ -151,6 +159,7 @@ services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+    mem_limit: 300m
     # يسأل Caddy عن كل قائمة ومقطع HLS قبل خدمته، ويثبت أنه نحن بهذا
     # السرّ نفسه — انظر handle /live/* في Caddyfile. فارغاً يردّ Django
     # 403 على كل طلب فلا يعمل البثّ البديل إطلاقاً.
@@ -182,6 +191,7 @@ services:
   srs:
     image: ossrs/srs:5
     restart: unless-stopped
+    mem_limit: 900m
     network_mode: host
     environment:
       CANDIDATE: ${PUBLIC_IP}
@@ -229,6 +239,7 @@ services:
   coturn:
     image: coturn/coturn:4.6
     restart: unless-stopped
+    mem_limit: 200m
     network_mode: host
     environment:
       TURN_SECRET: ${TURN_SECRET}

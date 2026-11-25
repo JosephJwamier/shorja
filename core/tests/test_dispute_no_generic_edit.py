@@ -13,9 +13,10 @@ Generic create/update now answer 405 and the serializer is output-only. The
 real paths — create_dispute for the buyer, resolve for an admin — are pinned.
 """
 import pytest
+from django.utils import timezone
 from rest_framework.test import APIClient
 
-from core.models import Category, Dispute, Item, User
+from core.models import Category, Dispute, Item, Reservation, User
 
 pytestmark = pytest.mark.django_db
 
@@ -93,8 +94,11 @@ def test_party_cannot_use_resolve(seller, dispute):
 
 
 def test_buyer_can_still_open_a_dispute(buyer, item):
+    order = Reservation.objects.create(
+        item=item, buyer=buyer, deposit_amount=1, total_price=1, status='completed',
+        completed_at=timezone.now(), expires_at=timezone.now())
     response = client_for(buyer).post('/api/disputes/create_dispute/', {
-        'item_id': item.id, 'title': 'broken', 'description': 'arrived broken',
+        'item_id': item.id, 'reservation_id': order.id, 'title': 'broken', 'description': 'arrived broken',
         'reason': 'damaged'}, format='json')
 
     assert response.status_code == 201, response.data

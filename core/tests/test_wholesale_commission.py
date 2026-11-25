@@ -44,6 +44,11 @@ def make_transfer(owner, reseller, category, quantity=2):
 
 
 def approve(owner, transfer):
+    # A wholesale store is paid at approval; what any other seller is paid, and
+    # when, is test_wholesale_money.py.
+    store, _ = UserStore.objects.get_or_create(user=owner, defaults={'name': 'متجر'})
+    StoreBadge.objects.create(store=store, kind=StoreBadge.KIND_WHOLESALE)
+    owner = User.objects.get(pk=owner.pk)
     client = APIClient()
     client.force_authenticate(user=owner)
     return client.post(f'/api/transfers/{transfer.id}/approve/')

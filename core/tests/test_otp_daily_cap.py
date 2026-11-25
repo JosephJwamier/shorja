@@ -32,7 +32,7 @@ def _number(i):
     return f'077012345{i:02d}'
 
 
-@override_settings(OTP_DAILY_SEND_CAP=3)
+@override_settings(OTP_DAILY_SEND_CAP=3, OTP_MEMBERS_SHARE=0)
 def test_sending_stops_at_the_daily_cap():
     for i in range(3):
         assert _send(_number(i))[0].status_code == 200
@@ -44,14 +44,14 @@ def test_sending_stops_at_the_daily_cap():
     sent.assert_not_called()
 
 
-@override_settings(OTP_DAILY_SEND_CAP=3)
+@override_settings(OTP_DAILY_SEND_CAP=3, OTP_MEMBERS_SHARE=0)
 def test_a_send_wevlix_refused_is_not_counted():
     assert _send(_number(0), side_effect=WevlixError('down'))[0].status_code == 502
     for i in range(1, 4):
         assert _send(_number(i))[0].status_code == 200
 
 
-@override_settings(OTP_DAILY_SEND_CAP=3)
+@override_settings(OTP_DAILY_SEND_CAP=3, OTP_MEMBERS_SHARE=0)
 def test_asking_again_for_a_live_code_costs_nothing():
     assert _send(_number(0))[0].status_code == 200
     for _ in range(5):
@@ -60,9 +60,9 @@ def test_asking_again_for_a_live_code_costs_nothing():
 
 
 @override_settings(OTP_DAILY_SEND_CAP=10)
-def test_eighty_percent_of_the_cap_raises_an_alert(caplog):
+def test_seventy_percent_of_the_cap_raises_an_alert(caplog):
     with caplog.at_level(logging.ERROR, logger='core.otp_views'):
         for i in range(8):
             _send(_number(i))
-    assert any('of today' in r.getMessage() for r in caplog.records
-               if r.levelno == logging.ERROR)
+    assert sum('of today' in r.getMessage() for r in caplog.records
+               if r.levelno == logging.ERROR) == 1

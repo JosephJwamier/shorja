@@ -336,6 +336,8 @@ def test_a_withdrawal_says_where_to(w, bad):
 
 
 def test_the_account_number_is_for_the_admin_and_only_until_the_decision(w):
+    User.objects.filter(pk=w.buyer.pk).update(phone='+9647801234567', phone_verified=True)
+    w.buyer.refresh_from_db()
     x = withdraw(w)
     wd = WithdrawalRequest.objects.get()
     assert (x.status_code, wd.account_number, wd.card_last4) == (201, '6330123456789012', '9012')

@@ -266,6 +266,10 @@ OTP_TTL_SECONDS = int(os.environ.get('OTP_TTL_SECONDS', '600'))
 # otp_send يوقف عنواناً واحداً، أما مهاجم بعناوين كثيرة يرسل رموزاً لأرقام
 # عشوائية فلا يوقفه إلا سقف للمجموع — وكل رسالة تُدفع من رصيد Wevlix.
 # عند 80% منه يصل تنبيه إلى Sentry؛ ارفعه من .env قبل حملة إعلانية.
+# حصة من السقف لا تمسّها إلا أرقام لها حساب: من يستنفد الباقي بأرقام عشوائية
+# لا يمنع أصحاب الحسابات من استعادتها. ولكل عنوان حدّ يومي لتلك الأرقام.
+OTP_MEMBERS_SHARE = float(os.environ.get('OTP_MEMBERS_SHARE', '0.4'))
+OTP_STRANGERS_PER_IP_PER_DAY = int(os.environ.get('OTP_STRANGERS_PER_IP_PER_DAY', '40'))
 OTP_DAILY_SEND_CAP = int(os.environ.get('OTP_DAILY_SEND_CAP', '500'))
 
 CACHES = {
@@ -294,6 +298,15 @@ CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes
 CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60  # 25 minutes
 
+# ما يحجزه رابط المندوب قبل الدفع، ومدّته.
+REP_HOLD_MINUTES = int(os.environ.get('REP_HOLD_MINUTES', '30'))
+REP_HOLD_MAX_QUANTITY = int(os.environ.get('REP_HOLD_MAX_QUANTITY', '10'))
+# من رفض الاستلام هذا العدد خلال هذه الأيام يدفع كاملاً قبل الشحن.
+REFUSALS_BEFORE_FULL_PAYMENT = int(os.environ.get('REFUSALS_BEFORE_FULL_PAYMENT', '3'))
+REFUSALS_WINDOW_DAYS = int(os.environ.get('REFUSALS_WINDOW_DAYS', '90'))
+REEL_MAX_VIDEO_BYTES = 100 * 1024 * 1024
+REEL_MAX_UPLOADS_PER_DAY = int(os.environ.get('REEL_MAX_UPLOADS_PER_DAY', '30'))
+
 CELERY_BEAT_SCHEDULE = {
     # تذكير البائع بالتسليم — داخل نافذة الدوام وحدها.
     #
@@ -316,6 +329,12 @@ CELERY_BEAT_SCHEDULE = {
     'collect-storage-fees': {
         'task': 'core.tasks.collect_storage_fees',
         'schedule': crontab(hour=9, minute=0),
+    },
+
+    # ثمن جملة أعلن البائع تسليمه ولم يعترض المشتري
+    'settle-wholesale-handovers': {
+        'task': 'core.tasks.settle_wholesale_handovers',
+        'schedule': crontab(hour=10, minute=30),
     },
 
     # Reservation Management

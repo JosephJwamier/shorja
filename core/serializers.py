@@ -2,6 +2,7 @@
 ReSell Trust - Django REST Framework Serializers
 ENHANCED: Updated to support new Location tracking, Storage Fees, and Transfer features
 """
+from django.conf import settings
 from django.utils import timezone
 from decimal import Decimal
 from rest_framework import serializers
@@ -63,6 +64,14 @@ def store_name_of(user):
     return store.name if store is not None and store.is_active else ''
 
 
+def check_display_name(value, field=None):
+    from .reserved_names import poses_as_platform
+    if poses_as_platform(value):
+        message = 'هذا الاسم محجوز للمنصة'
+        raise serializers.ValidationError({field: message} if field else message)
+    return value
+
+
 def check_username(value):
     from .reserved_names import is_reserved_username
     if is_reserved_username(value):
@@ -88,6 +97,12 @@ class UserSerializer(serializers.ModelSerializer):
                             'store_badges', 'date_joined']
 
     def validate(self, attrs):
+        if self.instance is not None and ('first_name' in attrs or 'last_name' in attrs):
+            first = attrs.get('first_name', self.instance.first_name)
+            last = attrs.get('last_name', self.instance.last_name)
+            if (first, last) != (self.instance.first_name, self.instance.last_name) \
+                    and not self.instance.is_staff:
+                check_display_name('%s %s' % (first or '', last or ''), 'first_name')
         # Where a reset would go, so adding one counts as changing it.
         # See identity_proof.
         request = self.context.get('request')
@@ -164,6 +179,9 @@ class UserSerializer(serializers.ModelSerializer):
             instance.email_verified = False
         if 'phone' in validated_data and validated_data['phone'] != instance.phone:
             instance.phone_verified = False
+            # A first number is not a swap.
+            if instance.phone:
+                instance.phone_changed_at = timezone.now()
         return super().update(instance, validated_data)
 
 
@@ -375,6 +393,16 @@ class ItemVariantSerializer(serializers.ModelSerializer):
         return request.build_absolute_uri(url) if request else url
 
 
+MAX_VARIANTS = 100
+MAX_DESCRIPTION = 5000
+
+
+def check_description(value):
+    if len(value or '') > MAX_DESCRIPTION:
+        raise serializers.ValidationError('الوصف %d حرف كحد أقصى' % MAX_DESCRIPTION)
+    return value
+
+
 def validate_options_and_variants(options, variants):
     """Shared by create and update.
 
@@ -383,6 +411,9 @@ def validate_options_and_variants(options, variants):
     offers. A variant for a colour the seller never declared would be
     unreachable from the picker and its stock silently unsellable."""
     options = options or []
+    if len(options) > 5 or len(variants or []) > MAX_VARIANTS:
+        raise serializers.ValidationError(
+            {'variants': 'المنتج يقبل %d تركيبة و5 خيارات كحد أقصى' % MAX_VARIANTS})
     names = []
     for opt in options:
         if not isinstance(opt, dict) or not str(opt.get('name', '')).strip():
@@ -391,6 +422,8 @@ def validate_options_and_variants(options, variants):
         if not values:
             raise serializers.ValidationError(
                 {'options': 'الخيار "%s" بلا قيم' % opt['name']})
+        if len(values) > MAX_VARIANTS or any(len(v) > 100 for v in values):
+            raise serializers.ValidationError({'options': 'قيم الخيار كثيرة أو طويلة جداً'})
         if len(set(values)) != len(values):
             raise serializers.ValidationError(
                 {'options': 'قيم مكرّرة في الخيار "%s"' % opt['name']})
@@ -567,6 +600,9 @@ class ItemSerializer(serializers.ModelSerializer):
     def to_internal_value(self, data):
         return super().to_internal_value(decode_json_form_fields(data))
 
+    def validate_description(self, value):
+        return check_description(value)
+
     def validate(self, attrs):
         # Options and the variant table travel together: changing the axes
         # without the rows would leave stock on combinations that no longer
@@ -693,6 +729,9 @@ class ItemCreateSerializer(serializers.ModelSerializer):
                 {'variants': 'منتج بخيارات يحتاج متغيّراً واحداً على الأقل'})
         attrs['options'] = validate_options_and_variants(options, variants)
         return attrs
+
+    def validate_description(self, value):
+        return check_description(value)
 
     def validate_current_location_id(self, value):
         if value:
@@ -1357,7 +1396,7 @@ class CreateReservationSerializer(serializers.Serializer):
     def validate_item_id(self, value):
         try:
             item = Item.objects.get(id=value)
-            if item.status not in ['active', 'reserved']:
+            if item.status not in ['active', 'reserved'] or not item.owner.is_active:
                 raise serializers.ValidationError('المنتج غير متاح للحجز')
             return value
         except Item.DoesNotExist:
@@ -1474,7 +1513,7 @@ class CreateDisputeSerializer(serializers.Serializer):
     item_id = serializers.IntegerField()
     reservation_id = serializers.IntegerField(required=False, allow_null=True)
     title = serializers.CharField(max_length=200)
-    description = serializers.CharField()
+    description = serializers.CharField(max_length=5000)
     reason = serializers.CharField(max_length=100, required=False, allow_blank=True)
 
     def validate_item_id(self, value):
@@ -1738,6 +1777,15 @@ class ItemTransferSerializer(serializers.ModelSerializer):
     can_approve = serializers.SerializerMethodField()
     can_reject = serializers.SerializerMethodField()
     can_cancel = serializers.SerializerMethodField()
+    # The money being held, and who may do what about it.
+    held_quantity = serializers.IntegerField(read_only=True)
+    held_amount = serializers.FloatField(read_only=True)
+    escrow_notice = serializers.SerializerMethodField()
+    pays_immediately = serializers.SerializerMethodField()
+    can_confirm_received = serializers.SerializerMethodField()
+    can_request_refund = serializers.SerializerMethodField()
+    can_accept_refund = serializers.SerializerMethodField()
+    can_claim_handover = serializers.SerializerMethodField()
 
     class Meta:
         model = ItemTransfer
@@ -1758,6 +1806,10 @@ class ItemTransferSerializer(serializers.ModelSerializer):
             'initiated_at', 'approved_at', 'rejected_at', 'completed_at', 'cancelled_at',
             # Permissions
             'can_approve', 'can_reject', 'can_cancel',
+            # Held money
+            'escrow', 'held_quantity', 'held_amount', 'released_quantity', 'refunded_quantity',
+            'refund_requested_at', 'handover_claimed_at', 'escrow_notice', 'pays_immediately',
+            'can_confirm_received', 'can_request_refund', 'can_accept_refund', 'can_claim_handover',
         ]
         # Output only. Status, quantity, price and storage fees decide what is
         # charged to whose wallet, so only the views' actions write them.
@@ -1768,11 +1820,46 @@ class ItemTransferSerializer(serializers.ModelSerializer):
 
     def get_owner_net_amount(self, obj):
         # ما وصل البائع فعلاً: الثمن ناقص عمولة المنصة. فارغ قبل الموافقة
-        # لأن الثمن نفسه لم يُثبَّت بعد.
+        # لأن الثمن نفسه لم يُثبَّت بعد. وفي المحجوز: ما حُرِّر وحده.
         total = obj.total_wholesale_price
         if total is None or obj.approved_at is None:
             return None
-        return float(total - (obj.platform_commission_amount or 0))
+        net = total - (obj.platform_commission_amount or 0)
+        if obj.escrow:
+            net = net * obj.released_quantity / obj.quantity
+        return float(round(net, 2))
+
+    def _viewer(self, obj, side):
+        req = self.context.get('request')
+        return bool(req) and getattr(obj, side) == req.user.id
+
+    def _held_for(self, obj, side):
+        return self._viewer(obj, side) and obj.status == 'active' and obj.held_quantity > 0
+
+    def get_pays_immediately(self, obj):
+        from .services.wholesale import is_wholesale_store
+        if obj.status != 'pending' or not self._viewer(obj, 'from_user_id'):
+            return None
+        return is_wholesale_store(obj.from_user)
+
+    def get_escrow_notice(self, obj):
+        from .services.wholesale import NOTICE, needs_notice
+        if obj.status != 'pending' or not self._viewer(obj, 'from_user_id'):
+            return None
+        return NOTICE if needs_notice(obj.from_user) else None
+
+    def get_can_confirm_received(self, obj):
+        return self._held_for(obj, 'to_user_id')
+
+    def get_can_request_refund(self, obj):
+        return self._held_for(obj, 'to_user_id') and obj.refund_requested_at is None
+
+    def get_can_accept_refund(self, obj):
+        return self._held_for(obj, 'from_user_id') and obj.refund_requested_at is not None
+
+    def get_can_claim_handover(self, obj):
+        return (self._held_for(obj, 'from_user_id') and obj.refund_requested_at is None
+                and obj.handover_claimed_at is None)
 
     def get_is_expired(self, obj):
         return obj.is_expired()
@@ -1801,7 +1888,7 @@ class ItemTransferSerializer(serializers.ModelSerializer):
             return False
         return (
             (obj.to_user == req.user and obj.status == 'pending') or
-            (obj.from_user == req.user and obj.status == 'active')
+            (obj.from_user == req.user and obj.status == 'active' and not obj.held_quantity)
         )
 
 
@@ -1819,13 +1906,13 @@ class ResaleAgreementCreateSerializer(serializers.Serializer):
     )
     storage_fee_period_days = serializers.IntegerField(default=30, min_value=1, max_value=365)
     duration_days = serializers.IntegerField(required=False, allow_null=True, min_value=1, max_value=730)
-    request_message = serializers.CharField(required=False, allow_blank=True)
-    notes = serializers.CharField(required=False, allow_blank=True)
+    request_message = serializers.CharField(required=False, allow_blank=True, max_length=2000)
+    notes = serializers.CharField(required=False, allow_blank=True, max_length=2000)
 
     def validate_item_id(self, value):
         try:
             item = Item.objects.get(id=value)
-            if item.status not in ['active', 'reserved']:
+            if item.status not in ['active', 'reserved'] or not item.owner.is_active:
                 raise serializers.ValidationError('المنتج غير متاح')
             fixed_listing = getattr(item, 'fixed_listing', None)
             if not fixed_listing or not fixed_listing.price or fixed_listing.price <= 0:
@@ -2323,6 +2410,9 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         if data['password'] != data['password2']:
             raise serializers.ValidationError('كلمتا المرور غير متطابقتين')
 
+        check_display_name('%s %s' % (data.get('first_name') or '', data.get('last_name') or ''),
+                           'first_name')
+
         # AUTH_PASSWORD_VALIDATORS كانت مُعلَنة ولا تُنفَّذ: min_length=8
         # على الحقل كان كل ما يُفرض، فـ`12345678` و`password` مقبولتان.
         # ويُمرَّر مستخدم غير محفوظ كي يعمل مُدقِّق التشابه — فلا يجعل
@@ -2449,7 +2539,7 @@ class UserStoreCreateSerializer(serializers.Serializer):
         """Ensure store name is not empty"""
         if not value.strip():
             raise serializers.ValidationError('اسم المتجر مطلوب')
-        return value.strip()
+        return check_display_name(value.strip())
 
 
 class UserStoreUpdateSerializer(serializers.ModelSerializer):
@@ -2481,7 +2571,13 @@ class UserStoreUpdateSerializer(serializers.ModelSerializer):
         """Ensure store name is not empty"""
         if value and not value.strip():
             raise serializers.ValidationError('اسم المتجر مطلوب')
+        # Someone already holding the name may still save the rest of a form.
+        if value and not (self.instance is not None and value.strip() == self.instance.name):
+            check_display_name(value)
         return value.strip() if value else value
+
+    def validate_description(self, value):
+        return check_description(value)
 
     def validate_default_location_id(self, value):
         """Validate location belongs to user"""
@@ -2880,6 +2976,9 @@ class RequestReelUploadSerializer(serializers.Serializer):
     through Django (see ReelViewSet.request_upload_url)."""
     content_type = serializers.CharField()
     has_thumbnail = serializers.BooleanField(default=False)
+    content_length = serializers.IntegerField(
+        required=False, min_value=1, max_value=settings.REEL_MAX_VIDEO_BYTES)
+    thumbnail_length = serializers.IntegerField(required=False, min_value=1, max_value=5 * 1024 * 1024)
 
     def validate_content_type(self, value):
         if not value.startswith('video/'):
@@ -3293,10 +3392,15 @@ from .models import Wallet, DepositRequest, WithdrawalRequest
 
 class WalletSerializer(serializers.ModelSerializer):
     available_balance = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    withdrawable_balance = serializers.SerializerMethodField()
 
     class Meta:
         model = Wallet
-        fields = ['balance', 'held_balance', 'available_balance', 'updated_at']
+        fields = ['balance', 'held_balance', 'available_balance', 'withdrawable_balance', 'updated_at']
+
+    def get_withdrawable_balance(self, obj):
+        from .services.withdrawals import withdrawable_balance
+        return str(withdrawable_balance(obj.user))
 
 
 class DepositCreateSerializer(serializers.Serializer):
