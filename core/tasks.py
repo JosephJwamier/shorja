@@ -59,16 +59,14 @@ def process_expired_reservations():
                 reservation.status = 'expired'
                 reservation.save(update_fields=['status'])
 
-                # A represented sale is the one kind that takes stock at
-                # creation (see ReservationViewSet.create_representative_
-                # reservation) and books a pending commission — both must be
-                # undone here or the stock leaks on every expiry.
-                if reservation.representative_id:
+                # A represented sale books its commission at creation, and the
+                # old ones took their stock too (Reservation.stock_held).
+                if reservation.stock_held:
                     variant = reservation.stock_variant
                     if variant is not None:
                         variant = ItemVariant.objects.select_for_update().get(pk=variant.pk)
                         variant.return_stock(reservation.quantity)
-                    cancel_pending_commission(reservation)
+                cancel_pending_commission(reservation)
                 release_promotions(reservation)
 
                 processed_count += 1
@@ -603,6 +601,31 @@ def sync_pending_payments(days=7, limit=60):
         except Exception as e:
             logger.error(f"pending payment {intent.reference} failed to sync: {e}")
     return f"Settled {settled} pending payment(s)"
+
+
+@shared_task
+def recheck_settled_payments(days=90, limit=200):
+    """Were credited card payments taken back since? Each is asked about once
+    a week while a card holder can still dispute it."""
+    from .models import PaymentIntent
+    from .services.payments.base import ProviderError
+    from .services.payments.service import check_still_paid
+
+    now = timezone.now()
+    taken_back = 0
+    for intent in PaymentIntent.objects.filter(
+            applied_at__gte=now - timedelta(days=days), reversed_at__isnull=True,
+            updated_at__lt=now - timedelta(days=7)).select_related('user').order_by('updated_at')[:limit]:
+        try:
+            taken_back += check_still_paid(intent)
+        except ProviderError as e:
+            logger.warning(f"settled payment {intent.reference} not rechecked: {e}")
+            continue
+        except Exception as e:
+            logger.error(f"settled payment {intent.reference} failed to recheck: {e}")
+            continue
+        PaymentIntent.objects.filter(pk=intent.pk).update(updated_at=now)
+    return f"{taken_back} payment(s) taken back"
 
 
 @shared_task

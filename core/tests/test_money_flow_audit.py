@@ -205,8 +205,9 @@ def test_a_large_coupon_caps_the_deposit_at_the_discounted_total(client):
     }, format='json')
     assert response.status_code == 201, response.data
     reservation = Reservation.objects.get(buyer=buyer)
-    assert reservation.total_price == Decimal('2000.00')
-    assert reservation.deposit_amount == Decimal('2000.00'), 'not the 5,000 sized on the full price'
+    # The coupon is held to 70% of the price (COUPON_MAX_PERCENT).
+    assert reservation.total_price == Decimal('3000.00')
+    assert reservation.deposit_amount == Decimal('3000.00'), 'not the 5,000 sized on the full price'
 
 
 # ---------------------------------------------------------------------------
@@ -227,8 +228,9 @@ def test_represented_sale_takes_stock_once_and_returns_it_on_expiry():
     variant.quantity = 2; variant.save()
 
     def represented(buyer, **extra):
+        # Orders made before representatives' orders became ordinary ones.
         reservation = make_reservation(item, buyer, representative=rep,
-                                       commission_amount=Decimal('5.00'), **extra)
+                                       commission_amount=Decimal('5.00'), stock_held=True, **extra)
         variant.take_stock(1)  # what create_representative_reservation does
         Transaction.objects.create(user=rep, transaction_type='commission', amount=Decimal('5'),
                                    status='pending', reservation=reservation, item=item)

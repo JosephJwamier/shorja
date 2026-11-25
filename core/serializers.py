@@ -1443,6 +1443,8 @@ class DisputeSerializer(serializers.ModelSerializer):
     complainant = UserSerializer(read_only=True)
     defendant = UserSerializer(read_only=True)
     can_resolve = serializers.SerializerMethodField()
+    replies = serializers.SerializerMethodField()
+    can_reply = serializers.SerializerMethodField()
 
     class Meta:
         model = Dispute
@@ -1450,11 +1452,27 @@ class DisputeSerializer(serializers.ModelSerializer):
             'id', 'item', 'reservation', 'complainant', 'defendant',
             'title', 'description', 'reason', 'status', 'admin_notes',
             'resolution', 'resolution_action', 'created_at', 'resolved_at',
-            'can_resolve'
+            'can_resolve', 'replies', 'can_reply',
         ]
         # Output only: the decision and the admin's notes are written by
         # DisputeViewSet.resolve, never by either party.
         read_only_fields = fields
+
+    def get_replies(self, obj):
+        request = self.context.get('request')
+
+        def url(image):
+            return request.build_absolute_uri(image.url) if request else image.url
+        return [{
+            'id': r.id, 'author': r.author_id, 'text': r.text, 'created_at': r.created_at,
+            'is_complainant': r.author_id == obj.complainant_id,
+            'images': [url(i.image) for i in r.images.all()],
+        } for r in obj.replies.all()]
+
+    def get_can_reply(self, obj):
+        user = viewer_of(self.context)
+        return obj.status in ('open', 'investigating') and getattr(user, 'id', None) in (
+            obj.complainant_id, obj.defendant_id)
 
     def get_can_resolve(self, obj):
         return obj.status in ['open', 'investigating']
@@ -3439,9 +3457,14 @@ class DepositRequestSerializer(serializers.ModelSerializer):
 
 
 class WithdrawalCreateSerializer(serializers.Serializer):
-    amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('1.00'))
+    amount = serializers.DecimalField(max_digits=14, decimal_places=2)
     account_number = serializers.CharField(max_length=40, write_only=True)
     holder_name = serializers.CharField(max_length=120)
+
+    def validate_amount(self, value):
+        if value < settings.WITHDRAWAL_MIN:
+            raise serializers.ValidationError('أقل مبلغ للسحب %s د.ع' % '{:,}'.format(settings.WITHDRAWAL_MIN))
+        return value
 
     def validate_account_number(self, value):
         from .services.installments.cards import InvalidCardNumber, validate_account

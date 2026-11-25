@@ -39,6 +39,24 @@
     </dl>
   </div>
 
+  <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-6">
+    <h2 class="text-sm font-semibold mb-3">ردود الطرفين</h2>
+    {% for reply in dispute.replies.all %}
+      <div class="mb-4">
+        <div class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">
+          {% if reply.author_id == dispute.complainant_id %}المشتكي{% else %}المُشتكى عليه{% endif %}
+          — {{ reply.author.username }} — {{ reply.created_at|date:"Y-m-d H:i" }}
+        </div>
+        <p class="text-sm mb-2">{{ reply.text|linebreaksbr }}</p>
+        {% for picture in reply.images.all %}
+          <a href="{{ picture.image.url }}" target="_blank" rel="noopener"><img src="{{ picture.image.url }}" class="max-h-64 rounded-default border border-base-200 dark:border-base-700 inline-block" alt="صورة مرفقة"></a>
+        {% endfor %}
+      </div>
+    {% empty %}
+      <p class="text-sm text-font-subtle-light dark:text-font-subtle-dark">لا ردود بعد.</p>
+    {% endfor %}
+  </div>
+
   {% if reservation %}
   <div class="rounded-default border border-base-200 dark:border-base-700 bg-white dark:bg-base-800 p-6">
     <h2 class="text-sm font-semibold mb-3">تفاصيل الحجز #{{ reservation.id }}</h2>

@@ -124,6 +124,31 @@ def sync_intent(intent):
     return locked
 
 
+def check_still_paid(intent):
+    """Asks again about a payment already credited. A card holder who disputes
+    the charge gets it back from the bank; the gateway then answers 'revoked',
+    and nobody here would have known. Returns True when it was taken back.
+
+    The wallet is not touched: what was bought with it is already someone's. A
+    person decides, which is why they are told."""
+    status = get_provider(intent.provider).fetch_status(intent=intent)
+    if status.state not in (PaymentIntent.STATE_FAILED, PaymentIntent.STATE_CANCELLED):
+        return False
+    flagged = PaymentIntent.objects.filter(pk=intent.pk, reversed_at__isnull=True).update(
+        reversed_at=timezone.now(), last_provider_response=status.raw)
+    if flagged:
+        logger.error("payment %s of user %s (%s) was taken back by the gateway",
+                     intent.reference, intent.user_id, intent.amount)
+        from core.models import User
+        from core.notifications import notify_push
+        for admin in User.objects.filter(is_active=True, is_superuser=True):
+            notify_push(admin, "دفعة بطاقة أُلغيت بعد نجاحها",
+                        "أعادت البوابة %s د.ع لصاحب البطاقة (%s، %s). راجع الحساب."
+                        % ("{:,.0f}".format(intent.amount), intent.user.username, intent.reference),
+                        data={"type": "general"})
+    return bool(flagged)
+
+
 def _apply(intent):
     """Credits what the payment bought. Caller holds the row lock."""
     if intent.purpose != PaymentIntent.PURPOSE_WALLET_TOPUP:

@@ -7,6 +7,7 @@ the buyer" or "pay the seller" actually does — extracted from what used to
 be inline in the view (Phase 3) so the admin console can't drift from the
 API's behavior.
 """
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
@@ -14,6 +15,7 @@ from ..delivery_utils import (
     create_return_delivery_order, get_active_delivery_company, presume_receipt,
 )
 from ..models import Dispute, Reservation
+from ..uploads import validate_image
 from ..wallet_utils import (
     cancel_pending_commission, claw_back_release, delivery_fee_in_pot,
     refund_to_buyer, release_reservation_payment, undo_sold_count,
@@ -26,6 +28,39 @@ class DisputeResolutionError(Exception):
     partial refund larger than what the buyer was charged). Distinct from
     ValueError, which here means the money movement itself failed
     (insufficient balance) — see wallet_utils.debit_balance."""
+
+
+MAX_REPLIES_EACH = 10
+MAX_IMAGES_EACH = 5
+
+
+def add_reply(dispute, author, text, images):
+    """One side's reply. `dispute` is locked. Raises ValidationError."""
+    from ..models import DisputeImage, DisputeReply
+    from ..notifications import bidi_isolate, notify_push
+
+    if dispute.status not in ('open', 'investigating'):
+        raise ValidationError('حُسم هذا النزاع')
+    if not text and not images:
+        raise ValidationError('اكتب ردّك أو أرفق صورة')
+    if len(text) > 3000:
+        raise ValidationError('الرد 3000 حرف كحد أقصى')
+    if DisputeReply.objects.filter(dispute=dispute, author=author).count() >= MAX_REPLIES_EACH:
+        raise ValidationError('بلغت الحد الأقصى من الردود على هذا النزاع')
+    sent = DisputeImage.objects.filter(reply__dispute=dispute, reply__author=author).count()
+    if sent + len(images) > MAX_IMAGES_EACH:
+        raise ValidationError('%d صور كحد أقصى لكل طرف' % MAX_IMAGES_EACH)
+    for image in images:
+        validate_image(image)
+    reply = DisputeReply.objects.create(dispute=dispute, author=author, text=text)
+    for image in images:
+        DisputeImage.objects.create(reply=reply, image=image)
+    other = dispute.defendant if author.pk == dispute.complainant_id else dispute.complainant
+    transaction.on_commit(lambda: notify_push(
+        other, 'رد جديد على النزاع',
+        'أضاف الطرف الآخر رداً على نزاع "%s".' % bidi_isolate(dispute.title),
+        data={'type': 'dispute_created', 'dispute_id': str(dispute.pk)}))
+    return reply
 
 
 def resolve_dispute(dispute, *, resolution_action, resolution='', admin_notes='',

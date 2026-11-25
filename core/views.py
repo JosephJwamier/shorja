@@ -21,7 +21,7 @@ from .wallet_utils import (
     settle_cancelled_auction_win,
     park_if_unlisted,
 )
-from .services.disputes import resolve_dispute, DisputeResolutionError
+from .services.disputes import add_reply, resolve_dispute, DisputeResolutionError
 from .services.open_sellers import open_seller_q
 from .services.refusals import FULL_PAYMENT_ONLY, deposit_refused_to
 from .services.wholesale import (
@@ -29,8 +29,8 @@ from .services.wholesale import (
     refund_rest, request_refund,
 )
 from .services.withdrawals import (
-    WithdrawalReviewError, approve_withdrawal, not_withdrawable, reject_withdrawal,
-    withdrawal_refusal,
+    WithdrawalReviewError, approve_withdrawal, cancel_withdrawal, not_withdrawable,
+    reject_withdrawal, tell_reviewers, withdrawal_refusal,
 )
 from .services.blocking import CANNOT_MESSAGE, blocked_between
 from .services.support import SUPPORT_USERNAME, start_support_chat
@@ -4320,7 +4320,11 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
                     deposit_amount = fixed_listing.deposit_amount * quantity
 
                 if coupon_collection:
-                    coupon_discount = min(coupon_collection.coupon.amount, total_price)
+                    # A coupon is a discount, not a gift: one that left a dinar
+                    # to pay made a confirmed sale and a review for no commission.
+                    coupon_discount = min(
+                        coupon_collection.coupon.amount,
+                        (total_price * settings.COUPON_MAX_PERCENT / 100).quantize(Decimal('0.01')))
                     total_price -= coupon_discount
                     # The deposit was sized on the undiscounted price; a big
                     # coupon could leave it larger than the whole order, which
@@ -4529,7 +4533,7 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
             return Response({
                 'success': False,
                 'code': 'out_of_stock',
-                'message': 'نفدت الكمية قبل إتمام الدفع، ولم يُخصم منك شيء',
+                'message': e.for_buyer,
                 'errors': str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
         except ValueError as e:
@@ -4637,12 +4641,15 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
             }, status=status.HTTP_400_BAD_REQUEST)
 
         outbound_order = reservation.delivery_orders.filter(direction='outbound').first()
-        # Nothing paid and nothing shipped is nothing to settle: two friends made
-        # confirmed sales of it, with their reviews, and no commission.
-        if outbound_order is None and reservation.amount_charged <= 0:
+        # A deposit settles nothing by itself: the rest is collected at the door.
+        # Handed over in person instead, the platform held 1% of the price and
+        # took its 3% out of that; and two friends with a free order made
+        # confirmed sales, with their reviews, out of nothing.
+        if outbound_order is None and reservation.is_deposit_only:
             return Response({
                 'success': False,
-                'message': 'لم يُدفع شيء من هذا الطلب ولم يُشحن — يُؤكَّد بعد توصيله'
+                'code': 'needs_delivery',
+                'message': 'لم يُدفع ثمن هذا الطلب كاملاً — يُؤكَّد استلامه بعد توصيله عبر شركة التوصيل وتحصيل الباقي'
             }, status=status.HTTP_400_BAD_REQUEST)
         if outbound_order and outbound_order.status != 'confirmed':
             return Response({
@@ -4940,9 +4947,7 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
                 forfeit = bool(reservation.auction_id and is_buyer
                                and not reservation.seller_cancellation_approved)
                 old_status = reservation.status
-                # Stock is normally taken at completion; a represented sale
-                # takes it at creation, so it comes back on cancel either way.
-                stock_was_taken = old_status == 'completed' or bool(reservation.representative_id)
+                stock_was_taken = old_status == 'completed' or reservation.stock_held
 
                 # Stock is only taken at completion, so only restore it if
                 # this reservation had actually reached that point.
@@ -5476,7 +5481,7 @@ class DisputeViewSet(viewsets.ModelViewSet):
         disputes = Dispute.objects.order_by('-created_at', '-id')
         if self.action == 'list':
             disputes = user_related(reservation_related(item_related(disputes, 'item'), 'reservation'),
-                                    'complainant', 'defendant')
+                                    'complainant', 'defendant').prefetch_related('replies__images', 'replies__author')
 
         # Users see disputes they're involved in
         if self.request.user.is_staff:
@@ -5515,6 +5520,26 @@ class DisputeViewSet(viewsets.ModelViewSet):
 
     def partial_update(self, request, *args, **kwargs):
         return self._closed()
+
+    @action(detail=True, methods=['post'], parser_classes=[MultiPartParser, FormParser, JSONParser])
+    def reply(self, request, pk=None):
+        """Either side's words and pictures, while the dispute is open."""
+        dispute = self.get_object()
+        if request.user.id not in (dispute.complainant_id, dispute.defendant_id):
+            return Response({'success': False, 'message': 'لست طرفاً في هذا النزاع'},
+                            status=status.HTTP_403_FORBIDDEN)
+        text = str(request.data.get('text') or '').strip()
+        images = request.FILES.getlist('images')
+        try:
+            with transaction.atomic():
+                dispute = Dispute.objects.select_for_update().get(pk=dispute.pk)
+                add_reply(dispute, request.user, text, images)
+        except DjangoValidationError as exc:
+            return Response({'success': False, 'message': exc.messages[0]},
+                            status=status.HTTP_400_BAD_REQUEST)
+        return Response({'success': True, 'message': 'أُرسل ردّك',
+                         'data': DisputeSerializer(dispute, context={'request': request}).data},
+                        status=status.HTTP_201_CREATED)
 
     @swagger_auto_schema(
         operation_description="Create a dispute for an item or reservation",
@@ -6235,13 +6260,6 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                 'message': 'الكمية واحد على الأقل'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # These pieces leave the shelf before a dinar is paid.
-        if quantity > settings.REP_HOLD_MAX_QUANTITY:
-            return Response({
-                'success': False,
-                'message': f'الكمية عبر المندوب {settings.REP_HOLD_MAX_QUANTITY} كحد أقصى في الطلب الواحد'
-            }, status=status.HTTP_400_BAD_REQUEST)
-
         try:
             with transaction.atomic():
                 # Lock the item
@@ -6303,7 +6321,9 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                 # Commission is calculated on total sale price, not on deposit
                 commission_amount = (total_price * representative_assignment.commission_percentage) / 100
 
-                expiry_time = timezone.now() + timedelta(minutes=settings.REP_HOLD_MINUTES)
+                expiry_time = timezone.now() + timedelta(
+                    hours=getattr(settings, 'RESERVATION_EXPIRY_HOURS', 24)
+                )
 
                 # Create reservation WITH representative info
                 from .services.commission import commission_for
@@ -6334,17 +6354,7 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
                     reservation=reservation
                 )
 
-                # Decrease stock on the reserved variant (the reservation's
-                # own variant, or the item's default one for a plain item).
-                stock_variant = ItemVariant.objects.select_for_update().get(
-                    pk=reservation.stock_variant.pk
-                )
-                stock_variant.take_stock(quantity)
-                # sync_stock_from_variants() sets active/sold; a represented
-                # sale that still has stock reads as 'reserved' here as before.
-                if item.quantity > 0:
-                    item.status = 'reserved'
-                    item.save(update_fields=['status'])
+                # The stock is taken when the buyer completes, as for any order.
 
                 # Notify representative about the sale
                 from .tasks import send_representative_sale_notification
@@ -9153,6 +9163,13 @@ class WalletViewSet(viewsets.ViewSet):
                         'message': f'المتاح للسحب الآن {free:,.0f} د.ع. لا يُسحب بعد: {why}'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
+                if WithdrawalRequest.objects.filter(
+                        user=request.user, status='pending').count() >= settings.WITHDRAWALS_MAX_PENDING:
+                    return Response({
+                        'success': False,
+                        'message': f'لديك {settings.WITHDRAWALS_MAX_PENDING} طلبات سحب قيد المراجعة — انتظر البتّ فيها أو ألغِ أحدها'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
                 wallet.hold(amount)  # lock the funds
                 wd = WithdrawalRequest.objects.create(
                     user=request.user,
@@ -9162,6 +9179,7 @@ class WalletViewSet(viewsets.ViewSet):
                     holder_name=serializer.validated_data['holder_name'].strip(),
                     status='pending',
                 )
+                tell_reviewers(wd)
 
             return Response({
                 'success': True,
@@ -9170,6 +9188,18 @@ class WalletViewSet(viewsets.ViewSet):
             }, status=status.HTTP_201_CREATED)
         except Exception:
             return server_error('تعذّر إرسال طلب السحب')
+
+    @action(detail=False, methods=['post'], url_path=r'withdrawals/(?P<withdrawal_id>\d+)/cancel')
+    def cancel_withdrawal(self, request, withdrawal_id=None):
+        """Take back a request nobody has decided yet."""
+        wd = get_object_or_404(WithdrawalRequest, pk=withdrawal_id, user=request.user)
+        try:
+            wd = cancel_withdrawal(wd)
+        except WithdrawalReviewError:
+            return Response({'success': False, 'message': 'بُتّ في هذا الطلب ولا يُلغى'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        return Response({'success': True, 'message': 'أُلغي الطلب وعاد المبلغ إلى رصيدك',
+                         'data': WithdrawalRequestSerializer(wd).data})
 
     @action(detail=False, methods=['get'])
     def my_deposits(self, request):

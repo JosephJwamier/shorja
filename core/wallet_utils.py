@@ -146,6 +146,17 @@ def refund_to_buyer(reservation, amount, item=None, reason=''):
 class OutOfStockError(ValueError):
     """What the buyer is paying for was sold while they were deciding."""
 
+    def __init__(self, message='', left=0):
+        super().__init__(message)
+        self.left = left
+
+    @property
+    def for_buyer(self):
+        if self.left > 0:
+            return ('لم يبقَ سوى %d من الكمية لأن إكمال الحجز تأخر واشترى غيرك الباقي. '
+                    'لم يُخصم منك شيء.' % self.left)
+        return 'نفدت الكمية لأن إكمال الحجز تأخر واشتراها غيرك. لم يُخصم منك شيء.'
+
 
 class ItemWithdrawnError(OutOfStockError):
     """The item was taken down, by its seller or by a moderator."""
@@ -330,16 +341,15 @@ def complete_reservation(reservation, payment_type):
     # Stock first, before a dinar moves: pending reservations hold none, so
     # two buyers can both be paying for the last piece. This used to clamp to
     # what was left and charge the second one for nothing.
-    # Represented sales are the exception: theirs was taken at creation.
     from .models import ItemVariant
     if (Item.objects.filter(pk=reservation.item_id, status='archived').exists()
             or not reservation.item.owner.is_active):
         raise ItemWithdrawnError('لم يعد المنتج معروضاً للبيع')
     variant = reservation.stock_variant
-    if variant is not None and not reservation.representative_id:
+    if variant is not None and not reservation.stock_held:
         variant = ItemVariant.objects.select_for_update().get(pk=variant.pk)
         if variant.quantity < reservation.quantity:
-            raise OutOfStockError('المتوفّر الآن %d فقط' % variant.quantity)
+            raise OutOfStockError('المتوفّر الآن %d فقط' % variant.quantity, left=variant.quantity)
 
     if reservation.auction_id:
         # Winning an auction already charged deposit_amount as the winning
@@ -389,7 +399,7 @@ def complete_reservation(reservation, payment_type):
     reservation.save(update_fields=['status', 'is_deposit_only', 'completed_at', 'delivery_fee'])
 
     # Locked and checked above, before the charge.
-    if variant is not None and not reservation.representative_id:
+    if variant is not None and not reservation.stock_held:
         variant.take_stock(reservation.quantity)
     item = Item.objects.select_for_update().get(id=reservation.item_id)
     item.sold_count += reservation.quantity

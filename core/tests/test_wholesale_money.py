@@ -287,11 +287,11 @@ def verify(u, **kw):
 
 
 def test_withdrawing_needs_a_verified_settled_phone(w):
-    assert withdraw(w.buyer, 1000).status_code == 400
+    assert withdraw(w.buyer, 5000).status_code == 400
     verify(w.buyer, phone_changed_at=timezone.now() - timedelta(hours=47))
-    assert withdraw(w.buyer, 1000).status_code == 400
+    assert withdraw(w.buyer, 5000).status_code == 400
     verify(w.buyer, phone_changed_at=timezone.now() - timedelta(hours=49))
-    assert withdraw(w.buyer, 1000).status_code == 201
+    assert withdraw(w.buyer, 5000).status_code == 201
 
 
 def test_disputable_earnings_are_spendable_not_withdrawable(w):
@@ -301,12 +301,12 @@ def test_disputable_earnings_are_spendable_not_withdrawable(w):
         complete_reservation(r, 'full'); release_reservation_payment(r)
     Reservation.objects.filter(pk=r.pk).update(status='confirmed')
     assert bal(w.seller) > 0
-    assert withdraw(w.seller, 1000).status_code == 400
+    assert withdraw(w.seller, 5000).status_code == 400
     me = api(User.objects.get(pk=w.seller.pk)).get('/api/wallet/me/').data['data']
     assert D(me['withdrawable_balance']) == 0 and D(me['available_balance']) > 0
     Reservation.objects.filter(pk=r.pk).update(
         completed_at=timezone.now() - timedelta(days=60), payment_released_at=timezone.now() - timedelta(days=60))
-    assert withdraw(w.seller, 1000).status_code == 201
+    assert withdraw(w.seller, 5000).status_code == 201
 
 
 # ---- auctions, disputes, refusals, rep links
@@ -360,15 +360,6 @@ def test_a_repeat_refuser_pays_in_full(w):
     Dispute.objects.create(item=w.item, reservation=orders[0].reservation, complainant=w.buyer, defendant=w.seller,
                            title='t', description='d', status='resolved', resolution_action='refund_buyer')
     assert not deposit_refused_to(w.buyer)
-
-
-def test_a_rep_link_holds_little_for_a_short_while(w):
-    a = Representative.objects.create(item=w.item, owner=w.seller, representative=w.rep, commission_percentage=1, status='accepted')
-    ItemVariant.objects.filter(item=w.item).update(quantity=50)
-    go = lambda n: api(w.buyer).post(f'/api/representatives/{a.id}/create_reservation_for_buyer/', {'item_id': w.item.id, 'quantity': n}, format='json')
-    assert go(11).status_code == 400
-    assert go(10).status_code == 201
-    assert Reservation.objects.get().expires_at < timezone.now() + timedelta(minutes=31)
 
 
 # ---- sizes

@@ -1166,6 +1166,9 @@ class Reservation(models.Model):
     )
     buyer = models.ForeignKey(User, on_delete=models.CASCADE, related_name='reservations')
 
+    # Orders made through a representative used to take their stock before being
+    # paid for. True only on the ones made then and still open.
+    stock_held = models.BooleanField(default=False, editable=False)
     item_snapshot = models.JSONField(default=dict, blank=True, editable=False)
     quantity = models.PositiveIntegerField(default=1)
     deposit_amount = models.DecimalField(max_digits=14, decimal_places=2)
@@ -1502,6 +1505,34 @@ class Dispute(models.Model):
 
     def __str__(self):
         return f"Dispute #{self.id} - {self.title}"
+
+
+def _dispute_image_path(instance, filename):
+    # Unguessable: a complaint's pictures are for its two sides and the admins.
+    return 'dispute_images/%s.%s' % (uuid.uuid4().hex, filename.rsplit('.', 1)[-1].lower()[:5])
+
+
+class DisputeReply(models.Model):
+    """What one side said, or showed, about a dispute."""
+    dispute = models.ForeignKey(Dispute, on_delete=models.CASCADE, related_name='replies')
+    author = models.ForeignKey(User, on_delete=models.CASCADE, related_name='+')
+    text = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['id']
+        verbose_name = 'رد على نزاع'
+        verbose_name_plural = 'الردود على النزاعات'
+
+
+class DisputeImage(models.Model):
+    reply = models.ForeignKey(DisputeReply, on_delete=models.CASCADE, related_name='images')
+    image = models.ImageField(upload_to=_dispute_image_path, validators=[validate_image])
+
+    class Meta:
+        ordering = ['id']
+        verbose_name = 'صورة نزاع'
+        verbose_name_plural = 'صور النزاعات'
 
 
 class Report(models.Model):
@@ -2858,6 +2889,7 @@ class WithdrawalRequest(models.Model):
         ('pending', 'Pending Approval'),
         ('approved', 'Approved / Paid'),
         ('rejected', 'Rejected'),
+        ('cancelled', 'Cancelled by its owner'),
     ]
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='withdrawals'
@@ -3056,6 +3088,8 @@ class PaymentIntent(models.Model):
         'DepositRequest', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='payment_intent'
     )
+    # The gateway took a settled payment back (a chargeback, a void).
+    reversed_at = models.DateTimeField(null=True, blank=True)
     applied_at = models.DateTimeField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)

@@ -27,7 +27,7 @@ from .models import (
     DeliveryCompany, DeliveryOrder, CashSettlement, DeliveryBatch,
     Wallet, Notification, DepositRequest, WithdrawalRequest,
     Reel, ReelLike, ReelComment, ReelView, SavedReel,
-    ItemVariant, PaymentIntent, StoreBadge, DeliveryRate, UserBlock,
+    ItemVariant, PaymentIntent, StoreBadge, DeliveryRate, UserBlock, DisputeReply, DisputeImage,
     InstallmentPlan, InstallmentCollection, InstallmentReversal,
     LiveSessionViewer, LiveSessionBan, LiveSessionModerator, UserCategoryAffinity,
     Campaign, CampaignEvent,
@@ -1648,8 +1648,8 @@ class PaymentIntentAdmin(ModelAdmin):
     matter is set by the gateway flow, and a hand-edit here would desync the
     row from what the gateway holds."""
     list_display = ('reference', 'user', 'provider', 'purpose', 'amount', 'currency',
-                    'state', 'applied_at', 'created_at')
-    list_filter = ('provider', 'state', 'purpose')
+                    'state', 'applied_at', 'reversed_at', 'created_at')
+    list_filter = ('provider', 'state', 'purpose', ('reversed_at', admin.EmptyFieldListFilter))
     search_fields = ('reference', 'provider_payment_id', 'user__username')
     raw_id_fields = ('user', 'deposit')
     list_select_related = ('user',)
@@ -1795,7 +1795,7 @@ class InstallmentPlanAdmin(ModelAdmin):
             rep_commission=rep_commission,
             seller_net=seller_net,
             stock=stock,
-            stock_short=(stock is not None and not reservation.representative_id
+            stock_short=(stock is not None and not reservation.stock_held
                          and stock < reservation.quantity),
             opts=self.model._meta,
         )
@@ -2049,3 +2049,28 @@ class UserBlockAdmin(ModelAdmin):
 
     def has_change_permission(self, request, obj=None):
         return False
+
+
+class _ReadOnlyAdmin(ModelAdmin):
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(DisputeReply)
+class DisputeReplyAdmin(_ReadOnlyAdmin):
+    """Read in the dispute's own page (resolve_view); here for searching."""
+    list_display = ('dispute', 'author', 'text', 'created_at')
+    search_fields = ('author__username', 'text')
+    list_select_related = ('dispute', 'author')
+
+
+@admin.register(DisputeImage)
+class DisputeImageAdmin(_ReadOnlyAdmin):
+    list_display = ('reply', 'image')
+    list_select_related = ('reply',)

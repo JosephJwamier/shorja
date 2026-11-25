@@ -139,6 +139,39 @@ def _lock_pending(withdrawal):
         raise WithdrawalReviewError(f'Already {current.status}')
 
 
+def _tell_owner(withdrawal, title, body):
+    from ..notifications import notify_push
+    text = body.format(amount='{:,.0f}'.format(withdrawal.amount), last4=withdrawal.card_last4)
+    transaction.on_commit(lambda: notify_push(
+        withdrawal.user, title, text, data={'type': 'general', 'withdrawal_id': str(withdrawal.pk)}))
+
+
+def tell_reviewers(withdrawal):
+    """Whoever may decide on it: the owner of the platform and the finance team."""
+    from ..notifications import notify_push
+    reviewers = User.objects.filter(is_active=True, is_staff=True).filter(
+        Q(is_superuser=True) | Q(groups__permissions__codename='change_withdrawalrequest')).distinct()
+    text = 'طلب سحب %s د.ع من %s.' % ('{:,.0f}'.format(withdrawal.amount), withdrawal.user.username)
+
+    def send():
+        for reviewer in reviewers:
+            notify_push(reviewer, 'طلب سحب جديد', text,
+                        data={'type': 'general', 'withdrawal_id': str(withdrawal.pk)})
+    transaction.on_commit(send)
+
+
+def cancel_withdrawal(withdrawal):
+    """Its owner changed their mind before anyone decided."""
+    with transaction.atomic():
+        _lock_pending(withdrawal)
+        Wallet.objects.select_for_update().get(user=withdrawal.user).release_hold(withdrawal.amount)
+        withdrawal.status = 'cancelled'
+        withdrawal.account_number = ''
+        withdrawal.reviewed_at = timezone.now()
+        withdrawal.save(update_fields=['status', 'account_number', 'reviewed_at'])
+    return withdrawal
+
+
 def approve_withdrawal(withdrawal, *, reviewed_by, admin_notes=''):
     """Settle the held funds (removes from both held_balance and balance)
     and record the payout. Raises WithdrawalReviewError if not pending."""
@@ -155,6 +188,7 @@ def approve_withdrawal(withdrawal, *, reviewed_by, admin_notes=''):
             amount=withdrawal.amount,
             status='completed',
         )
+        _tell_owner(withdrawal, 'حُوّل مبلغ السحب', 'حُوّل {amount} د.ع إلى حسابك المنتهي بـ{last4}.')
         withdrawal.status = 'approved'
         withdrawal.account_number = ''
         withdrawal.reviewed_by = reviewed_by
@@ -173,6 +207,8 @@ def reject_withdrawal(withdrawal, *, reviewed_by, admin_notes=''):
         wallet = Wallet.objects.select_for_update().get(user=withdrawal.user)
         wallet.release_hold(withdrawal.amount)
 
+        _tell_owner(withdrawal, 'رُفض طلب السحب', 'رُفض سحب {amount} د.ع وعاد المبلغ إلى رصيدك.'
+                    + (' السبب: %s' % admin_notes.replace('{', '').replace('}', '') if admin_notes else ''))
         withdrawal.status = 'rejected'
         withdrawal.account_number = ''
         withdrawal.reviewed_by = reviewed_by

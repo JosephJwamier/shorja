@@ -298,13 +298,13 @@ CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes
 CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60  # 25 minutes
 
-# ما يحجزه رابط المندوب قبل الدفع، ومدّته.
 # اسم يبدأ بـ '=' يعمل معادلةً عند فتح التصدير في Excel.
 IMPORT_EXPORT_ESCAPE_FORMULAE_ON_EXPORT = True
 
 OFFER_VALID_HOURS = int(os.environ.get('OFFER_VALID_HOURS', '48'))
-REP_HOLD_MINUTES = int(os.environ.get('REP_HOLD_MINUTES', '30'))
-REP_HOLD_MAX_QUANTITY = int(os.environ.get('REP_HOLD_MAX_QUANTITY', '10'))
+COUPON_MAX_PERCENT = int(os.environ.get('COUPON_MAX_PERCENT', '70'))
+WITHDRAWAL_MIN = int(os.environ.get('WITHDRAWAL_MIN', '5000'))
+WITHDRAWALS_MAX_PENDING = int(os.environ.get('WITHDRAWALS_MAX_PENDING', '2'))
 # من رفض الاستلام هذا العدد خلال هذه الأيام يدفع كاملاً قبل الشحن.
 REFUSALS_BEFORE_FULL_PAYMENT = int(os.environ.get('REFUSALS_BEFORE_FULL_PAYMENT', '3'))
 REFUSALS_WINDOW_DAYS = int(os.environ.get('REFUSALS_WINDOW_DAYS', '90'))
@@ -327,6 +327,12 @@ CELERY_BEAT_SCHEDULE = {
     'sync-pending-payments': {
         'task': 'core.tasks.sync_pending_payments',
         'schedule': crontab(minute='*/20'),
+    },
+
+    # دفعات بطاقة أُعيدت لصاحبها بعد أن صارت رصيداً
+    'recheck-settled-payments': {
+        'task': 'core.tasks.recheck_settled_payments',
+        'schedule': crontab(hour=4, minute=30),
     },
 
     # رسوم التخزين في اتفاقيات الجملة

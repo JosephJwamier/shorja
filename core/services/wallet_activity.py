@@ -179,6 +179,8 @@ def _withdrawal_entries(user):
     for w in WithdrawalRequest.objects.filter(user=user).exclude(status="approved"):
         if w.status == "pending":
             direction, title, note = "hold", "طلب سحب قيد المراجعة", "محجوز من رصيدك حتى البتّ"
+        elif w.status == "cancelled":
+            direction, title, note = "release", "طلب سحب ألغيتَه", "أُعيد المبلغ إلى رصيدك المتاح"
         else:
             direction, title, note = "release", "طلب سحب مرفوض", "أُعيد المبلغ إلى رصيدك المتاح"
         out.append(_entry(

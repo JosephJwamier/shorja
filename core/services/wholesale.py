@@ -171,7 +171,7 @@ def refund_rest(transfer):
     mine = mine and ItemVariant.objects.select_for_update().get(pk=mine.pk)
     on_the_way = Reservation.objects.filter(
         item=transfer.resulting_item, payment_released_to_seller=False,
-    ).filter(Q(status__in=('completed', 'disputed')) | Q(status='pending', representative__isnull=False)
+    ).filter(Q(status__in=('completed', 'disputed')) | Q(status='pending', stock_held=True)
              ).aggregate(n=Sum('quantity'))['n'] or 0
     units = min(transfer.held_quantity - on_the_way, mine.quantity if mine else 0)
     if units <= 0:
