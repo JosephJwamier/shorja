@@ -155,6 +155,7 @@ def notify_push(user, title, body, data=None, actionable=False):
     from .models import Notification
     notification_type = (data or {}).get('type', 'general')
     payload = dict(data or {})
+    title = str(title)[:Notification._meta.get_field('title').max_length]
     if actionable:
         payload['actionable'] = '1'
 
@@ -625,8 +626,8 @@ def notify_new_message(message):
                 data={
                     'type': 'new_message',
                     'chat_id': str(message.chat.id),
-                    'content': message.content,
-                    'message_type': message.message_type,
+                    'content': message.content[:300],
+                    'msg_type': message.message_type,
                     'created_at': message.created_at.isoformat(),
                 })
     NotificationService.send_email(recipient.email, subject, email_message)

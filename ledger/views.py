@@ -142,7 +142,10 @@ class LedgerEntryViewSet(StoreScopedMixin, viewsets.ModelViewSet):
             kinds = [k for k in kind.split(',') if k in dict(LedgerEntry.KIND_CHOICES)]
             qs = qs.filter(kind__in=kinds)
         if params.get('contact'):
-            qs = qs.filter(contact_id=params['contact'])
+            try:
+                qs = qs.filter(contact_id=min(int(params['contact']), 2 ** 62))
+            except ValueError:
+                raise ValidationError({'contact': 'رقم غير صالح'})
         if params.get('source') in (LedgerEntry.SOURCE_MANUAL, LedgerEntry.SOURCE_APP):
             qs = qs.filter(source=params['source'])
         if params.get('include_void') != '1':

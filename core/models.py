@@ -47,6 +47,8 @@ class User(AbstractUser):
     # Support decided this person may take card money back out.
     topups_withdrawable = models.BooleanField(
         default=False, help_text='السماح بسحب الرصيد المشحون بالبطاقة')
+    # Access tokens issued before this are dead (core.auth_tokens).
+    tokens_valid_after = models.DateTimeField(null=True, blank=True, editable=False)
     # When they were told, once, that wholesale money is held.
     wholesale_notice_at = models.DateTimeField(null=True, blank=True)
     email_verified = models.BooleanField(default=False)
@@ -191,8 +193,10 @@ class Location(models.Model):
     country = models.CharField(max_length=100, default='العراق', blank=True)
 
     # GPS coordinates (optional)
-    latitude = models.DecimalField(max_digits=11, decimal_places=6, null=True, blank=True)
-    longitude = models.DecimalField(max_digits=11, decimal_places=6, null=True, blank=True)
+    latitude = models.DecimalField(max_digits=11, decimal_places=6, null=True, blank=True,
+                                   validators=[MinValueValidator(-90), MaxValueValidator(90)])
+    longitude = models.DecimalField(max_digits=11, decimal_places=6, null=True, blank=True,
+                                    validators=[MinValueValidator(-180), MaxValueValidator(180)])
 
     # Contact info — required so a courier always has someone to reach
     contact_person = models.CharField(max_length=200)
@@ -500,7 +504,7 @@ class Item(models.Model):
     )
     warranty_days = models.PositiveIntegerField(
         default=7,
-        validators=[MinValueValidator(1)],
+        validators=[MinValueValidator(1), MaxValueValidator(365)],
         help_text='مدة الضمان بالأيام قبل تحرير الدفعة المحجوزة تلقائياً للبائع (ما لم يوافق المشتري أو يُفتح نزاع). الحد الأدنى يوم واحد — انظر Reservation.can_release_payment.'
     )
 

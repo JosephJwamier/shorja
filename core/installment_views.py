@@ -309,6 +309,7 @@ class InstallmentWebhookView(APIView):
     """
     permission_classes = [AllowAny]
     authentication_classes = []
+    throttle_classes = []
 
     def post(self, request, provider_name):
         try:

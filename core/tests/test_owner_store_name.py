@@ -30,4 +30,9 @@ def test_no_store_means_an_empty_name():
 
 
 def test_an_inactive_store_is_not_named():
-    assert owner_of_item({'name': 'مغلق', 'is_active': False})['store_name'] == ''
+    # A closed shop's goods are hidden from others (open_sellers), so the name
+    # is asked for directly.
+    from core.serializers import store_name_of
+    u = User.objects.create_user(username='closed', password='x')
+    UserStore.objects.create(user=u, name='مغلق', is_active=False)
+    assert store_name_of(u) == ''

@@ -86,6 +86,7 @@ class SrsHookView(APIView):
     """One view for every SRS event; the URL's <event> selects the handler."""
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = []  # every viewer's hook comes from the one media server
 
     def post(self, request, event):
         expected = getattr(settings, "SRS_HOOK_SECRET", "") or ""

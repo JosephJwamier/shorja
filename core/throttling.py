@@ -16,7 +16,13 @@ Two axes, because one is not enough here:
 Rates live in settings.REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] under the
 scope names used here. DRF stores the counters in the default cache (Redis).
 """
+import hashlib
+import logging
+
+from django.conf import settings
 from rest_framework.throttling import SimpleRateThrottle, UserRateThrottle
+
+logger = logging.getLogger(__name__)
 
 
 class _RequestFieldThrottle(SimpleRateThrottle):
@@ -68,6 +74,61 @@ class PasswordResetEmailThrottle(_RequestFieldThrottle):
     step is a 6-digit code, so this is what makes guessing infeasible."""
     scope = 'auth_reset_email'
     field = 'email'
+
+
+class _Ceiling(SimpleRateThrottle):
+    """A ceiling on everything, high enough that a person never meets it. Read
+    from settings on each request, and open when the cache is down: a limit
+    that takes the site down with it is worse than none."""
+
+    def get_rate(self):
+        return settings.REQUEST_RATES[self.scope]
+
+    def allow_request(self, request, view):
+        try:
+            return super().allow_request(request, view)
+        except Exception:
+            logger.warning('request ceiling skipped', exc_info=True)
+            return True
+
+    def member(self, request):
+        return bool(request.user and request.user.is_authenticated)
+
+
+class VisitorAddressThrottle(_Ceiling):
+    scope = 'visitor_address'
+
+    def get_cache_key(self, request, view):
+        if self.member(request):
+            return None
+        return self.cache_format % {'scope': self.scope, 'ident': self.get_ident(request)}
+
+
+class VisitorDeviceThrottle(_Ceiling):
+    """The address and what the browser says it is: one phone behind a carrier's
+    shared address does not use up its neighbours'."""
+    scope = 'visitor_device'
+
+    def get_cache_key(self, request, view):
+        if self.member(request):
+            return None
+        device = hashlib.sha256((self.get_ident(request) + '|' + request.META.get(
+            'HTTP_USER_AGENT', '')[:200]).encode()).hexdigest()[:24]
+        return self.cache_format % {'scope': self.scope, 'ident': device}
+
+
+class MemberThrottle(_Ceiling):
+    scope = 'member'
+
+    def get_cache_key(self, request, view):
+        if not self.member(request):
+            return None
+        return self.cache_format % {'scope': self.scope, 'ident': request.user.pk}
+
+
+class PaymentThrottle(UserRateThrottle):
+    """Each one opens a page at the gateway, which counts them too."""
+    scope = 'payments'
 
 
 class InstallmentThrottle(UserRateThrottle):

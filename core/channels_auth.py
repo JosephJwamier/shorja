@@ -35,7 +35,9 @@ def _get_user_from_token(token):
         # or one an admin banned would otherwise keep its chat and live
         # sockets open for the rest of its access token's 30 minutes.
         # REST already refuses those users; the socket has to match.
-        return User.objects.get(id=user_id, is_active=True)
+        user = User.objects.get(id=user_id, is_active=True)
+        from .auth_tokens import token_is_stale
+        return AnonymousUser() if token_is_stale(user, validated_token) else user
     except (TokenError, KeyError, User.DoesNotExist) as e:
         logger.debug(f"WebSocket JWT auth failed: {e}")
         return AnonymousUser()

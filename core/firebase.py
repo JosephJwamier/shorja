@@ -43,6 +43,23 @@ def get_firebase_app():
         return None
 
 
+# Google refuses the whole message over one of these keys, and over 4 KB.
+_RESERVED_KEYS = ('from', 'message_type', 'collapse_key', 'notification')
+MAX_DATA_BYTES = 2500
+MAX_BODY = 500
+
+
+def fcm_data(data):
+    """Strings, without a key FCM keeps for itself, and small enough to send.
+    The whole text is in the database; a push only has to say it is there."""
+    out = {k: str(v) for k, v in (data or {}).items()
+           if k not in _RESERVED_KEYS and not k.startswith(('google', 'gcm'))}
+    while sum(len(k) + len(v.encode()) for k, v in out.items()) > MAX_DATA_BYTES:
+        longest = max(out, key=lambda k: len(out[k].encode()))
+        out[longest] = out[longest][:len(out[longest]) // 2]
+    return out
+
+
 def send_push_notification(fcm_token, title, body, data=None, data_only=False):
     """
     Send a push notification to a single device.
@@ -78,7 +95,8 @@ def send_push_notification(fcm_token, title, body, data=None, data_only=False):
 
     try:
         # Ensure all data values are strings (FCM requirement)
-        str_data = {k: str(v) for k, v in (data or {}).items()}
+        title, body = str(title)[:200], str(body)[:MAX_BODY]
+        str_data = fcm_data(data)
 
         if data_only:
             # العنوان والنصّ داخل data: بلا كتلة notification لا يعرفهما
@@ -143,7 +161,8 @@ def send_push_to_multiple(fcm_tokens, title, body, data=None):
         return 0
 
     try:
-        str_data = {k: str(v) for k, v in (data or {}).items()}
+        title, body = str(title)[:200], str(body)[:MAX_BODY]
+        str_data = fcm_data(data)
 
         message = messaging.MulticastMessage(
             notification=messaging.Notification(title=title, body=body),

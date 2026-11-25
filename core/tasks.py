@@ -942,6 +942,19 @@ def send_auction_ending_reminder(auction_id):
 
 
 @shared_task
+def cleanup_old_notifications_and_tokens():
+    """Notifications past 90 days, and sign-in tokens that have expired: rows
+    nobody reads again, which otherwise grow for as long as the site runs."""
+    from django.core.management import call_command
+    from .models import Notification
+
+    gone = Notification.objects.filter(
+        created_at__lt=timezone.now() - timedelta(days=90)).delete()[0]
+    call_command('flushexpiredtokens')
+    return f"Deleted {gone} notifications"
+
+
+@shared_task
 def cleanup_old_messages():
     """
     Clean up old system messages older than 90 days

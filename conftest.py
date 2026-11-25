@@ -29,6 +29,12 @@ def plain_static_storage(settings):
 
 
 @pytest.fixture(autouse=True)
+def no_request_ceiling(settings):
+    """Every test client is one address; a test about the ceiling sets its own."""
+    settings.REQUEST_RATES = {k: '1000000/min' for k in settings.REQUEST_RATES}
+
+
+@pytest.fixture(autouse=True)
 def isolated_cache(settings):
     settings.CACHES = {
         'default': {

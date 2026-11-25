@@ -6,12 +6,14 @@ stolen a token stayed inside the account after its owner "secured" it.
 Blacklisting every outstanding refresh token is what actually signs the other
 devices out.
 
-An access token already issued keeps working until it expires
-(ACCESS_TOKEN_LIFETIME, 30 minutes): simplejwt verifies those without the
-database. That window is the price of stateless access tokens, and it is short.
+An access token is verified by its signature, so it used to outlive that by up to
+30 minutes. `tokens_valid_after` ends those too: the user row is read on every
+request anyway, so comparing one more column costs nothing.
 """
 from django.contrib.auth.models import update_last_login
+from django.utils import timezone
 from rest_framework import exceptions
+from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.serializers import (
     TokenObtainPairSerializer, TokenObtainSerializer,
 )
@@ -54,7 +56,25 @@ def revoke_refresh_tokens(user):
     live = OutstandingToken.objects.filter(user=user, blacklistedtoken__isnull=True)
     rows = [BlacklistedToken(token=token) for token in live]
     BlacklistedToken.objects.bulk_create(rows, ignore_conflicts=True)
+    user.tokens_valid_after = timezone.now()
+    type(user).objects.filter(pk=user.pk).update(tokens_valid_after=user.tokens_valid_after)
     return len(rows)
+
+
+def token_is_stale(user, token):
+    """Issued before this user's sessions were ended? `iat` is in whole seconds,
+    so the pair minted right after the change is on the good side of it."""
+    after = user.tokens_valid_after
+    return after is not None and int(token.get('iat', 0)) < int(after.timestamp())
+
+
+class SessionJWTAuthentication(JWTAuthentication):
+    def get_user(self, validated_token):
+        user = super().get_user(validated_token)
+        if token_is_stale(user, validated_token):
+            raise exceptions.AuthenticationFailed('انتهت الجلسة — سجّل الدخول من جديد',
+                                                  code='session_ended')
+        return user
 
 
 def fresh_token_pair(user):

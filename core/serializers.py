@@ -2,6 +2,7 @@
 ReSell Trust - Django REST Framework Serializers
 ENHANCED: Updated to support new Location tracking, Storage Fees, and Transfer features
 """
+from datetime import timedelta
 from django.conf import settings
 from django.utils import timezone
 from decimal import Decimal
@@ -24,6 +25,7 @@ from .models import (
     Reel, ReelLike, ReelComment, ReelView,
     InstallmentPlan,
 )
+from .services.open_sellers import is_open
 from .services.support import SUPPORT_USERNAME
 
 User = get_user_model()
@@ -1006,6 +1008,9 @@ def _check_bid_deposit(attrs, auction=None):
             {'bid_deposit': 'عربون المزايدة لا يمكن أن يتجاوز السعر الافتتاحي.'})
 
 
+MAX_AUCTION_LENGTH = timedelta(days=30)
+
+
 class AuctionListingCreateSerializer(serializers.ModelSerializer):
     """Create auction listing serializer"""
 
@@ -1049,6 +1054,11 @@ class AuctionListingCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"end_time": "End time must be in the future."}
             )
+
+        # Bidders' deposits sit for as long as it runs.
+        if end_time > max(start_time, now) + MAX_AUCTION_LENGTH or start_time > now + MAX_AUCTION_LENGTH:
+            raise serializers.ValidationError(
+                {'end_time': 'مدة المزاد %d يوماً كحد أقصى' % MAX_AUCTION_LENGTH.days})
 
         _check_bid_deposit(attrs, self.instance)
 
@@ -1404,7 +1414,7 @@ class CreateReservationSerializer(serializers.Serializer):
     def validate_item_id(self, value):
         try:
             item = Item.objects.get(id=value)
-            if item.status not in ['active', 'reserved'] or not item.owner.is_active:
+            if item.status not in ['active', 'reserved'] or not is_open(item.owner):
                 raise serializers.ValidationError('المنتج غير متاح للحجز')
             return value
         except Item.DoesNotExist:
@@ -1920,7 +1930,7 @@ class ResaleAgreementCreateSerializer(serializers.Serializer):
     def validate_item_id(self, value):
         try:
             item = Item.objects.get(id=value)
-            if item.status not in ['active', 'reserved'] or not item.owner.is_active:
+            if item.status not in ['active', 'reserved'] or not is_open(item.owner):
                 raise serializers.ValidationError('المنتج غير متاح')
             fixed_listing = getattr(item, 'fixed_listing', None)
             if not fixed_listing or not fixed_listing.price or fixed_listing.price <= 0:

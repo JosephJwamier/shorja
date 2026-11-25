@@ -386,6 +386,10 @@ CELERY_BEAT_SCHEDULE = {
     },
 
     # Cleanup Tasks
+    'cleanup-old-records': {
+        'task': 'core.tasks.cleanup_old_notifications_and_tokens',
+        'schedule': crontab(hour=3, minute=30),
+    },
     'cleanup-old-messages': {
         'task': 'core.tasks.cleanup_old_messages',
         'schedule': crontab(hour=3, minute=0, day_of_week=0),  # Weekly on Sunday at 3 AM
@@ -464,10 +468,18 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Custom User Model
 AUTH_USER_MODEL = 'core.User'
 
+# سقف عام لكل الطلبات (core.throttling): سخيّ، فهو لإيقاف سيل لا لتقنين
+# مستخدم. العنوان الواحد في العراق قد يحمل آلاف الأجهزة، فله سقف أعلى من الجهاز.
+REQUEST_RATES = {
+    'visitor_device': os.environ.get('RATE_VISITOR_DEVICE', '300/min'),
+    'visitor_address': os.environ.get('RATE_VISITOR_ADDRESS', '1500/min'),
+    'member': os.environ.get('RATE_MEMBER', '400/min'),
+}
+
 # REST Framework
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'core.auth_tokens.SessionJWTAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
@@ -494,10 +506,15 @@ REST_FRAMEWORK = {
     # Caddy is the one proxy: the last X-Forwarded-For entry is the caller, and
     # whatever a client writes before it does not buy a fresh bucket.
     'NUM_PROXIES': 1,
+    'DEFAULT_THROTTLE_CLASSES': [
+        'core.throttling.VisitorDeviceThrottle', 'core.throttling.VisitorAddressThrottle',
+        'core.throttling.MemberThrottle',
+    ],
     'DEFAULT_THROTTLE_RATES': {
         'auth_login': '60/min',           # per IP: login/, token/, social-login/
         'auth_login_account': '5/min',    # per account and address
         'auth_login_account_total': '20/min',  # per account, all addresses
+        'payments': '20/hour',            # per user: opening a card payment
         'auth_register': '30/hour',       # per IP
         'auth_reset': '30/hour',          # per IP: reset-password[-confirm]/
         'auth_reset_email': '5/hour',

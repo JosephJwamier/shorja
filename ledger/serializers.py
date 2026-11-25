@@ -15,7 +15,8 @@ class ContactSerializer(serializers.ModelSerializer):
         model = Contact
         fields = ['id', 'kind', 'kind_display', 'name', 'phone', 'notes', 'linked_user',
                   'linked_user_username', 'is_archived', 'balance', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'is_archived', 'balance', 'created_at', 'updated_at']
+        # linked_user: any id typed in used to answer with its account's name.
+        read_only_fields = ['id', 'linked_user', 'is_archived', 'balance', 'created_at', 'updated_at']
 
     def validate_name(self, value):
         value = value.strip()

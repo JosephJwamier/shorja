@@ -22,6 +22,7 @@ from .wallet_utils import (
     park_if_unlisted,
 )
 from .services.disputes import resolve_dispute, DisputeResolutionError
+from .services.open_sellers import open_seller_q
 from .services.refusals import FULL_PAYMENT_ONLY, deposit_refused_to
 from .services.wholesale import (
     NOTICE, WholesaleError, claim_handover, confirm_received, mark_notice_seen, needs_notice,
@@ -148,6 +149,14 @@ def announce_live(session):
     from .tasks import notify_store_followers_live
     if cache.add(f'live-announced:{session.store_id}', 1, 2 * 3600):
         notify_store_followers_live.delay(session.id)
+
+
+def _limit(request, default=50, most=200):
+    """?limit= as a sane number, whatever was typed."""
+    try:
+        return max(1, min(int(request.query_params.get('limit', default)), most))
+    except (TypeError, ValueError):
+        return default
 
 
 # A map shows its closest pins; an unbounded radius asked for every row.
@@ -421,7 +430,7 @@ class ItemViewSet(viewsets.ModelViewSet):
             return queryset
         # Not published, or taken down: its owner's, and whoever has an order
         # on it (their order page still opens it). Nobody else's.
-        visible = ~Q(status__in=['draft', 'archived']) & Q(owner__is_active=True)
+        visible = ~Q(status__in=['draft', 'archived']) & open_seller_q('owner')
         if user.is_authenticated:
             visible |= Q(owner=user) | Q(current_holder=user) | Q(
                 Exists(Reservation.objects.filter(item=OuterRef('pk'), buyer=user)))
@@ -948,7 +957,7 @@ class ItemViewSet(viewsets.ModelViewSet):
             return Response({'success': False, 'message': 'lat و lng مطلوبان'}, status=status.HTTP_400_BAD_REQUEST)
         try:
             queryset = Item.objects.filter(
-                status='active', current_location__isnull=False, owner__is_active=True
+                open_seller_q('owner'), status='active', current_location__isnull=False
             ).select_related('current_location', 'owner', 'category').prefetch_related('images')
             results = filter_by_proximity(queryset, lat, lng, radius, 'current_location')
             data = ItemSerializer(results, many=True, context={'request': request}).data
@@ -1074,7 +1083,7 @@ class FixedPriceListingViewSet(SafeRankingCacheMixin, viewsets.ReadOnlyModelView
     """View fixed price listings — supports category browsing"""
     queryset = (
         FixedPriceListing.objects
-        .filter(is_active=True, item__status__in=['active', 'reserved'], item__owner__is_active=True)
+        .filter(open_seller_q('item__owner'), is_active=True, item__status__in=['active', 'reserved'])
         .select_related('item', 'item__category', 'item__owner', 'item__current_holder')
         .prefetch_related('item__images', 'item__location_history')
     )
@@ -1454,7 +1463,8 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                 ).get(pk=auction.pk)
 
                 # Check if auction is active (re-checked against the locked row)
-                if not auction.is_active() or not auction.item.owner.is_active:
+                if (not auction.is_active() or not auction.item.owner.is_active
+                        or auction.item.status == 'archived'):
                     return Response({
                         'success': False,
                         'message': 'المزاد غير نشط'
@@ -2791,7 +2801,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         session = self.get_object()
 
         if request.method == 'GET':
-            limit = min(int(request.query_params.get('limit', 50)), 200)
+            limit = _limit(request)
             recent = list(session.comments.select_related('user').order_by('-created_at')[:limit])
             recent.reverse()  # oldest first, chat-feed order
             return Response({
@@ -3719,7 +3729,7 @@ class ReelViewSet(SafeRankingCacheMixin,
         ctx = {'store_owner_id': reel.store.user_id if reel.store_id else None}
 
         if request.method == 'GET':
-            limit = min(int(request.query_params.get('limit', 50)), 200)
+            limit = _limit(request)
             # الحدّ على التعليقات الرئيسية وحدها: ردود تعليقٍ مقطوعة من
             # منتصفها تُبقي سؤالاً بلا جوابه الظاهر.
             recent = list(
@@ -7596,7 +7606,7 @@ class MessageViewSet(viewsets.ModelViewSet):
                         'type': 'new_message',
                         'chat_id': str(message.chat_id),
                         'content': system_message.content,
-                        'message_type': system_message.message_type,
+                        'msg_type': system_message.message_type,
                         'created_at': system_message.created_at.isoformat(),
                     },
                 )
@@ -7672,7 +7682,7 @@ class MessageViewSet(viewsets.ModelViewSet):
                         'type': 'new_message',
                         'chat_id': str(message.chat_id),
                         'content': system_message.content,
-                        'message_type': system_message.message_type,
+                        'msg_type': system_message.message_type,
                         'created_at': system_message.created_at.isoformat(),
                     },
                 )
@@ -8768,7 +8778,7 @@ class LocationViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_400_BAD_REQUEST)
         try:
             queryset = Item.objects.filter(
-                status='active', current_location__isnull=False, owner__is_active=True
+                open_seller_q('owner'), status='active', current_location__isnull=False
             ).select_related('current_location', 'owner', 'category').prefetch_related('images')
             results = filter_by_proximity(queryset, lat, lng, radius, 'current_location')
             data = ItemSerializer(results, many=True, context={'request': request}).data

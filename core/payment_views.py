@@ -18,7 +18,7 @@ from html import escape
 from urllib.parse import quote
 
 from rest_framework import serializers, status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -27,6 +27,7 @@ from .models import PaymentIntent
 from .services.payments.base import ProviderError
 from .services.payments.registry import enabled_providers, get_provider
 from .services.payments.service import create_intent, sync_intent
+from .throttling import PaymentThrottle
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,7 @@ def payment_methods(request):
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
+@throttle_classes([PaymentThrottle])
 def create_payment(request):
     serializer = CreatePaymentSerializer(data=request.data)
     if not serializer.is_valid():
@@ -168,6 +170,7 @@ class PaymentWebhookView(APIView):
     """
     permission_classes = [AllowAny]
     authentication_classes = []
+    throttle_classes = []  # a payment's news is never turned away
 
     def post(self, request, provider_name):
         try:
