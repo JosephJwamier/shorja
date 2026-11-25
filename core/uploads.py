@@ -29,7 +29,9 @@ def validate_image(upload):
     source = getattr(upload, 'file', upload)
     try:
         source.seek(0)
-        with Image.open(source) as image:
+        # Only our formats reach a decoder at all: the rest are where most of
+        # Pillow's holes are found.
+        with Image.open(source, formats=tuple(EXTENSIONS)) as image:
             kind, (width, height) = image.format, image.size
             if width * height > MAX_PIXELS:
                 raise ValidationError('أبعاد الصورة كبيرة جداً')

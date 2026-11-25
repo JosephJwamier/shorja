@@ -31,7 +31,8 @@ from .services.withdrawals import (
     WithdrawalReviewError, approve_withdrawal, not_withdrawable, reject_withdrawal,
     withdrawal_refusal,
 )
-from .services.support import start_support_chat
+from .services.blocking import CANNOT_MESSAGE, blocked_between
+from .services.support import SUPPORT_USERNAME, start_support_chat
 from .services.moderation import archive_item, resolve_report, ReportResolutionError
 from .api_errors import server_error
 
@@ -61,7 +62,7 @@ class ItemStandardPagination(PageNumberPagination):
     page_size_query_param = 'page_size'
     max_page_size = 100
 from .models import (ItemImage, ItemVariant, Location,
-    Item, FixedPriceListing, AuctionListing, Bid,
+    Item, FixedPriceListing, AuctionListing, Bid, UserBlock,
     Reservation, Representative, ItemTransfer, Category,
     UserStore, Rating, Transaction, Chat, Message, Dispute, Report, Notification,
     ProductReview, StoreReview, StoreFollow, StoreCoupon, CouponCollection,
@@ -71,7 +72,7 @@ from .models import (ItemImage, ItemVariant, Location,
     Reel, ReelLike, ReelComment, ReelView, SavedReel, Favorite,
 )
 
-from .serializers import (ItemImageSerializer, FixedPriceListingCreateSerializer,
+from .serializers import (store_name_of, ItemImageSerializer, FixedPriceListingCreateSerializer,
                           ItemSerializer, ItemCreateSerializer, ItemListSerializer,
                           FixedPriceListingCardSerializer, AuctionListingCardSerializer,
                           AuctionListingCreateSerializer,
@@ -513,9 +514,11 @@ class ItemViewSet(viewsets.ModelViewSet):
         created_images = []
         errors = []
 
-        if len(images) > MAX_IMAGES_PER_REQUEST:
-            errors.append('%d صورة كحد أقصى' % MAX_IMAGES_PER_REQUEST)
-            images = images[:MAX_IMAGES_PER_REQUEST]
+        # For the product, not for each request to add some.
+        room = max(MAX_IMAGES_PER_REQUEST - item.images.count(), 0)
+        if len(images) > room:
+            errors.append('%d صورة للمنتج كحد أقصى' % MAX_IMAGES_PER_REQUEST)
+            images = images[:room]
 
         for idx, image in enumerate(images):
             try:
@@ -1715,9 +1718,11 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
 
         Returns the created Reservation, or None if there were no bids.
         """
-        from .auction_utils import create_winner_reservation, refund_losing_deposits
+        from .auction_utils import (
+            create_winner_reservation, refund_losing_deposits, settle_on_winner,
+        )
 
-        winning_bid = auction.bids.filter(is_winning=True).first()
+        winning_bid = settle_on_winner(auction)
         if not winning_bid:
             return None  # No bids — nothing to settle
 
@@ -1960,7 +1965,8 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                 auction.end_time = timezone.now()
                 auction.save(update_fields=['status', 'end_time'])
 
-                winning_bid = auction.bids.filter(is_winning=True).first()
+                from .auction_utils import settle_on_winner
+                winning_bid = settle_on_winner(auction)
                 if winning_bid:
                     # Refund losers + turn the win into a reservation the winner must complete
                     reservation = self._finalize_auction_payments(auction)
@@ -4217,6 +4223,14 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
                             'message': 'هذا العرض لم يُقبل بعد من البائع'
                         }, status=status.HTTP_400_BAD_REQUEST)
 
+                    # A price agreed for now, not for good.
+                    agreed = offer_message.offer_accepted_at or offer_message.created_at
+                    if timezone.now() > agreed + timedelta(hours=settings.OFFER_VALID_HOURS):
+                        return Response({
+                            'success': False,
+                            'message': f'انتهت مدة العرض ({settings.OFFER_VALID_HOURS} ساعة من قبوله) — أرسل عرضاً جديداً'
+                        }, status=status.HTTP_400_BAD_REQUEST)
+
                     if offer_message.chat.item_id != item.id:
                         return Response({
                             'success': False,
@@ -6116,6 +6130,12 @@ class RepresentativeViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # Verify representative can complete sales
+        if not representative_assignment.representative.is_active:
+            return Response({
+                'success': False,
+                'message': 'المندوبية غير نشطة'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         if not representative_assignment.can_complete_sale:
             return Response({
                 'success': False,
@@ -6901,7 +6921,7 @@ class ChatViewSet(viewsets.ModelViewSet):
                 chat.save(update_fields=['is_archived_by_seller'])
 
             # Send initial message if provided and chat is new
-            if created and initial_message:
+            if created and initial_message and not blocked_between(chat.buyer_id, chat.seller_id):
                 message = Message.objects.create(
                     chat=chat,
                     sender=request.user,
@@ -6969,7 +6989,7 @@ class ChatViewSet(viewsets.ModelViewSet):
                 chat.is_archived_by_seller = False
                 chat.save(update_fields=['is_archived_by_seller'])
 
-            if created and initial_message:
+            if created and initial_message and not blocked_between(chat.buyer_id, chat.seller_id):
                 message = Message.objects.create(
                     chat=chat,
                     sender=request.user,
@@ -7038,6 +7058,36 @@ class ChatViewSet(viewsets.ModelViewSet):
         }
     )
     @action(detail=True, methods=['post'])
+    def block(self, request, pk=None):
+        """Stop the other side of this chat from messaging me, anywhere."""
+        other = self.get_object().get_other_user(request.user)
+        if other.is_staff or other.username == SUPPORT_USERNAME:
+            return Response({'success': False, 'message': 'لا يمكن حظر حساب الدعم'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        UserBlock.objects.get_or_create(blocker=request.user, blocked=other)
+        return Response({'success': True, 'message': 'حُظر المستخدم — لن يستطيع مراسلتك'})
+
+    @action(detail=True, methods=['post'])
+    def unblock(self, request, pk=None):
+        other = self.get_object().get_other_user(request.user)
+        UserBlock.objects.filter(blocker=request.user, blocked=other).delete()
+        return Response({'success': True, 'message': 'أُلغي الحظر'})
+
+    @action(detail=False, methods=['get'])
+    def blocked(self, request):
+        """Everyone I blocked, with a chat to open (and unblock) them from."""
+        rows = UserBlock.objects.filter(blocker=request.user).select_related('blocked')
+        data = []
+        for row in rows:
+            chat = Chat.objects.filter(
+                Q(buyer=request.user, seller=row.blocked) | Q(seller=request.user, buyer=row.blocked)
+            ).order_by('-updated_at').first()
+            data.append({'chat_id': chat.id if chat else None, 'blocked_at': row.created_at,
+                         'username': row.blocked.username,
+                         'name': store_name_of(row.blocked) or row.blocked.get_full_name() or row.blocked.username})
+        return Response({'success': True, 'data': data})
+
+    @action(detail=True, methods=['post'])
     def send_message(self, request, pk=None):
         """Send a message in a chat"""
         chat = self.get_object()
@@ -7048,6 +7098,9 @@ class ChatViewSet(viewsets.ModelViewSet):
                 'success': False,
                 'message': 'لست طرفاً في هذه المحادثة'
             }, status=status.HTTP_403_FORBIDDEN)
+        if blocked_between(chat.buyer_id, chat.seller_id):
+            return Response({'success': False, 'code': 'blocked', 'message': CANNOT_MESSAGE},
+                            status=status.HTTP_403_FORBIDDEN)
 
         serializer = MessageCreateSerializer(data=request.data)
         if not serializer.is_valid():
@@ -7127,6 +7180,10 @@ class ChatViewSet(viewsets.ModelViewSet):
                 'success': False,
                 'message': 'العرض للمشتري فقط'
             }, status=status.HTTP_403_FORBIDDEN)
+
+        if blocked_between(chat.buyer_id, chat.seller_id):
+            return Response({'success': False, 'code': 'blocked', 'message': CANNOT_MESSAGE},
+                            status=status.HTTP_403_FORBIDDEN)
 
         if not chat.item:
             return Response({
@@ -7495,7 +7552,8 @@ class MessageViewSet(viewsets.ModelViewSet):
         try:
             with transaction.atomic():
                 message.offer_status = 'accepted'
-                message.save(update_fields=['offer_status'])
+                message.offer_accepted_at = timezone.now()
+                message.save(update_fields=['offer_status', 'offer_accepted_at'])
 
                 # Create system message
                 system_message = Message.objects.create(

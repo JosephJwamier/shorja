@@ -2000,6 +2000,20 @@ class Transaction(models.Model):
         verbose_name_plural = 'المعاملات المالية'
 
 
+class UserBlock(models.Model):
+    """`blocker` does not want to hear from `blocked`: neither can message the
+    other, in any chat, until the blocker changes their mind."""
+    blocker = models.ForeignKey(User, on_delete=models.CASCADE, related_name='blocks_made')
+    blocked = models.ForeignKey(User, on_delete=models.CASCADE, related_name='blocks_received')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [('blocker', 'blocked')]
+        ordering = ['-created_at']
+        verbose_name = 'حظر بين مستخدمين'
+        verbose_name_plural = 'الحظر بين المستخدمين'
+
+
 class Chat(models.Model):
     """Chat between users about an item, or directly with a store"""
     # item is optional: null when the chat is a direct store-level conversation
@@ -2068,6 +2082,7 @@ class Message(models.Model):
     # Which combination the price was offered for; null for a plain item.
     offer_variant = models.ForeignKey(
         'ItemVariant', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    offer_accepted_at = models.DateTimeField(null=True, blank=True)
     offer_status = models.CharField(
         max_length=20,
         choices=[

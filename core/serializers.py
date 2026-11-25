@@ -2166,6 +2166,8 @@ class ChatDetailSerializer(serializers.ModelSerializer):
     unread_count = serializers.SerializerMethodField()
     other_user = serializers.SerializerMethodField()
     other_user_online = serializers.SerializerMethodField()
+    blocked_by_me = serializers.SerializerMethodField()
+    can_message = serializers.SerializerMethodField()
     is_support = serializers.SerializerMethodField()
     is_own_store = serializers.SerializerMethodField()
 
@@ -2175,8 +2177,19 @@ class ChatDetailSerializer(serializers.ModelSerializer):
             'id', 'item', 'store', 'buyer', 'seller', 'other_user',
             'other_user_online', 'messages', 'has_more_messages',
             'unread_count', 'is_active',
-            'is_support', 'is_own_store', 'created_at', 'updated_at'
+            'is_support', 'is_own_store', 'blocked_by_me', 'can_message', 'created_at', 'updated_at'
         ]
+
+    def get_blocked_by_me(self, obj):
+        from .services.blocking import has_blocked
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        return has_blocked(request.user.id, obj.get_other_user(request.user).id)
+
+    def get_can_message(self, obj):
+        from .services.blocking import blocked_between
+        return not blocked_between(obj.buyer_id, obj.seller_id)
 
     # مكرّرة عمداً من ChatSerializer (نفس نمط other_user/unread_count أدناه) —
     # الشاشة التي تفتح محادثة عبر chatId فقط (مثلاً من إشعار push) تحتاج هذه

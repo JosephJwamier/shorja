@@ -51,12 +51,36 @@ def refund_losing_deposits(auction, winning_bid):
     )
     refunded = 0
     for bidder in get_user_model().objects.filter(id__in=bidder_ids):
-        if bidder.id != winning_bid.bidder_id and deposit > 0:
+        if (winning_bid is None or bidder.id != winning_bid.bidder_id) and deposit > 0:
             credit_earnings(user=bidder, amount=deposit, transaction_type='refund',
                             auction=auction)
             refunded += 1
         Bid.objects.filter(auction=auction, bidder=bidder).update(deposit_refunded=True)
     return refunded
+
+
+def settle_on_winner(auction):
+    """The bid that wins: the highest from an account still allowed to buy.
+
+    A suspended bidder cannot pay, so letting them win took the item off sale
+    for nothing. When nobody is left, every deposit goes back. Call inside
+    transaction.atomic(), with the auction row locked."""
+    winning = auction.bids.filter(is_winning=True).select_related('bidder').first()
+    if winning is None or winning.bidder.is_active:
+        return winning
+    runner_up = (auction.bids.filter(bidder__is_active=True).exclude(bidder=winning.bidder)
+                 .select_related('bidder').order_by('-amount', 'created_at').first())
+    auction.bids.filter(is_winning=True).update(is_winning=False)
+    if runner_up is None:
+        refund_losing_deposits(auction, None)
+        auction.winner = None
+        auction.save(update_fields=['winner'])
+        return None
+    runner_up.is_winning = True
+    runner_up.save(update_fields=['is_winning'])
+    auction.current_price = runner_up.amount
+    auction.save(update_fields=['current_price'])
+    return runner_up
 
 
 def create_winner_reservation(auction, winning_bid):

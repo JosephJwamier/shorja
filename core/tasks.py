@@ -447,6 +447,7 @@ def process_ended_auctions():
     from .models import AuctionListing
     from .auction_utils import (
         create_winner_reservation, broadcast_live_auction_ended, refund_losing_deposits,
+        settle_on_winner,
     )
 
     now = timezone.now()
@@ -467,7 +468,7 @@ def process_ended_auctions():
                 if auction.status != 'active':
                     continue
 
-                winning_bid = auction.bids.filter(is_winning=True).first()
+                winning_bid = settle_on_winner(auction)
 
                 if winning_bid:
                     refund_losing_deposits(auction, winning_bid)
@@ -550,7 +551,8 @@ def finalize_live_auction(auction_id):
             auction.status = 'ended'
             auction.save(update_fields=['status'])
 
-            winning_bid = auction.bids.filter(is_winning=True).first()
+            from .auction_utils import settle_on_winner
+            winning_bid = settle_on_winner(auction)
             if winning_bid:
                 reservation = AuctionViewSet._finalize_auction_payments(auction)
             elif auction.item.status != 'archived':

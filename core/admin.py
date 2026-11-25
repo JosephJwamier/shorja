@@ -27,7 +27,7 @@ from .models import (
     DeliveryCompany, DeliveryOrder, CashSettlement, DeliveryBatch,
     Wallet, Notification, DepositRequest, WithdrawalRequest,
     Reel, ReelLike, ReelComment, ReelView, SavedReel,
-    ItemVariant, PaymentIntent, StoreBadge, DeliveryRate,
+    ItemVariant, PaymentIntent, StoreBadge, DeliveryRate, UserBlock,
     InstallmentPlan, InstallmentCollection, InstallmentReversal,
     LiveSessionViewer, LiveSessionBan, LiveSessionModerator, UserCategoryAffinity,
     Campaign, CampaignEvent,
@@ -136,8 +136,41 @@ class UserAdmin(DjangoUserAdmin, ExportActionMixin, ModelAdmin):
     resource_classes = [UserExportResource]
     export_form_class = SelectableFieldsExportForm
 
+    # change_user is given to support so they can suspend and verify. Django's
+    # own page goes with it: the superuser box, the groups, the password, and
+    # here the phone a reset code goes to. Those are the owner's alone, and so
+    # is every account that can sign in to this panel.
+    OWNER_ONLY = (
+        'username', 'password', 'email', 'phone', 'phone_verified', 'email_verified',
+        'is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions',
+        'topups_withdrawable', 'last_login', 'date_joined',
+    )
+
+    def get_readonly_fields(self, request, obj=None):
+        fields = super().get_readonly_fields(request, obj)
+        return fields if request.user.is_superuser else tuple(fields) + self.OWNER_ONLY
+
+    def has_change_permission(self, request, obj=None):
+        if obj is not None and (obj.is_staff or obj.is_superuser) and not request.user.is_superuser:
+            return False
+        return super().has_change_permission(request, obj)
+
+    def has_add_permission(self, request):
+        return request.user.is_superuser and super().has_add_permission(request)
+
+    def user_change_password(self, request, id, form_url=''):
+        if not request.user.is_superuser:
+            raise PermissionDenied
+        return super().user_change_password(request, id, form_url)
+
+    def _reachable(self, request, queryset):
+        """Of the selected, those this admin may act on."""
+        return queryset if request.user.is_superuser else queryset.filter(
+            is_staff=False, is_superuser=False)
+
     @admin.action(description='توثيق الهوية للمحددين', permissions=['change'])
     def verify_identity_action(self, request, queryset):
+        queryset = self._reachable(request, queryset)
         count = 0
         for user in queryset.filter(identity_verified=False):
             user.identity_verified = True
@@ -147,6 +180,7 @@ class UserAdmin(DjangoUserAdmin, ExportActionMixin, ModelAdmin):
 
     @admin.action(description='إعادة تفعيل الحسابات المحددة', permissions=['change'])
     def reactivate_users_action(self, request, queryset):
+        queryset = self._reachable(request, queryset)
         count = 0
         for user in queryset.filter(is_active=False):
             reactivate_user(user, actor=request.user)
@@ -157,7 +191,7 @@ class UserAdmin(DjangoUserAdmin, ExportActionMixin, ModelAdmin):
     def suspend_users_action(self, request, queryset):
         if 'apply' in request.POST:
             ids = request.POST.getlist(ACTION_CHECKBOX_NAME)
-            selected = User.objects.filter(pk__in=ids)
+            selected = self._reachable(request, User.objects.filter(pk__in=ids))
             reason = request.POST.get('reason', '').strip()
 
             if not reason:
@@ -550,6 +584,11 @@ class AuctionListingAdmin(ModelAdmin):
     list_select_related = ('item', 'item__owner', 'winner')
     inlines = [BidInline]
 
+    def get_readonly_fields(self, request, obj=None):
+        # Who won and at what price is decided by the bids.
+        return () if request.user.is_superuser else (
+            'item', 'winner', 'current_price', 'bid_deposit', 'starting_price', 'minimum_increment')
+
 
 @admin.register(ItemTransfer)
 class ItemTransferAdmin(ModelAdmin):
@@ -560,9 +599,20 @@ class ItemTransferAdmin(ModelAdmin):
     search_fields = ('item__title', 'from_user__username', 'to_user__username')
     raw_id_fields = ('item', 'from_user', 'to_user', 'resulting_item')
     list_select_related = ('item', 'item__owner', 'from_user', 'to_user')
-    # What was paid and what was not: moved by services/wholesale.py only.
-    readonly_fields = ('escrow', 'released_quantity', 'refunded_quantity')
+    # An executed agreement is money: who, how many, at what price. Moved by
+    # services/wholesale.py only, whoever is looking.
+    EDITABLE = ('notes', 'rejection_reason')
     actions = ['pay_the_seller', 'refund_the_reseller']
+
+    def get_readonly_fields(self, request, obj=None):
+        return [f.name for f in self.model._meta.fields if f.name not in self.EDITABLE]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_settle_permission(self, request):
+        """Deciding who gets held money is the finance team's, as a withdrawal is."""
+        return request.user.has_perm('core.change_withdrawalrequest')
 
     @admin.display(description='المحجوز')
     def held_display(self, obj):
@@ -577,12 +627,12 @@ class ItemTransferAdmin(ModelAdmin):
             except WholesaleError as exc:
                 self.message_user(request, '%s: %s' % (transfer, exc), level=messages.ERROR)
 
-    @admin.action(description='تحرير المحجوز للبائع (سلّم البضاعة)', permissions=['change'])
+    @admin.action(description='تحرير المحجوز للبائع (سلّم البضاعة)', permissions=['settle'])
     def pay_the_seller(self, request, queryset):
         from .services.wholesale import confirm_received
         self._decide(request, queryset, confirm_received, 'حُرِّر المحجوز للبائع')
 
-    @admin.action(description='ردّ المحجوز للمشتري (لم تُسلَّم البضاعة)', permissions=['change'])
+    @admin.action(description='ردّ المحجوز للمشتري (لم تُسلَّم البضاعة)', permissions=['settle'])
     def refund_the_reseller(self, request, queryset):
         from .services.wholesale import refund_rest
         self._decide(request, queryset, refund_rest, 'رُدّ المحجوز للمشتري')
@@ -633,6 +683,16 @@ class TransactionAdmin(ExportActionMixin, ModelAdmin):
     list_select_related = ('user',)
     resource_classes = [TransactionExportResource]
     export_form_class = SelectableFieldsExportForm
+
+    # The record of what moved. Editing a row moves nothing, and hides what did.
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 # =============================================================================
@@ -1216,8 +1276,19 @@ class DeliveryOrderAdmin(ModelAdmin):
     search_fields = ('reservation__id', 'item_summary', 'to_name', 'from_name')
     raw_id_fields = ('reservation', 'company', 'dispute')
     list_select_related = ('reservation', 'reservation__item', 'reservation__buyer', 'company', 'cash_settlement')
-    readonly_fields = ('cash_settlement',)
     actions = ['settle_cash_action']
+
+    # What the courier owes and has handed over. A team that could edit the
+    # sums could forgive them; the superuser keeps the way to fix a mistake.
+    EDITABLE = ('special_notes', 'failure_reason')
+
+    def get_readonly_fields(self, request, obj=None):
+        if request.user.is_superuser:
+            return ('cash_settlement',)
+        return [f.name for f in self.model._meta.fields if f.name not in self.EDITABLE]
+
+    def has_add_permission(self, request):
+        return request.user.is_superuser
 
     @admin.action(description='تسجيل تسوية نقدية للمبالغ المُحصَّلة', permissions=['change'])
     def settle_cash_action(self, request, queryset):
@@ -1963,4 +2034,18 @@ class CampaignEventAdmin(ModelAdmin):
         return False
 
     def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(UserBlock)
+class UserBlockAdmin(ModelAdmin):
+    """Who blocked whom in the chats. Theirs to lift, so only to read here."""
+    list_display = ('blocker', 'blocked', 'created_at')
+    search_fields = ('blocker__username', 'blocked__username')
+    list_select_related = ('blocker', 'blocked')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
         return False

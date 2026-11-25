@@ -15,6 +15,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from ..live_utils import end_live_session
+from ..models import LiveSession
 
 
 def _append_note(existing, actor, action_label, reason=''):
@@ -37,6 +38,9 @@ def suspend_user(user, *, reason, actor):
     user.is_active = False
     user.admin_notes = _append_note(user.admin_notes, actor, 'تعليق الحساب', reason)
     user.save(update_fields=['is_active', 'admin_notes'])
+    # On air is the one thing the next request does not stop.
+    for session in LiveSession.objects.filter(store__user=user, status='live'):
+        stop_live_session(session)
     return user
 
 

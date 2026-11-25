@@ -133,6 +133,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
         if not message_content or len(message_content) > 4000:
             return
 
+        if await self.is_blocked():
+            from .services.blocking import CANNOT_MESSAGE
+            await self.send(text_data=json.dumps({'type': 'blocked', 'message': CANNOT_MESSAGE}))
+            return
+
         # Save message to database
         message = await self.save_message(message_content)
 
@@ -246,6 +251,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
             return chat.get_other_user(self.user).id
         except Chat.DoesNotExist:
             return None
+
+    @database_sync_to_async
+    def is_blocked(self):
+        from .models import Chat
+        from .services.blocking import blocked_between
+        chat = Chat.objects.get(id=self.chat_id)
+        return blocked_between(chat.buyer_id, chat.seller_id)
 
     @database_sync_to_async
     def save_message(self, content):
