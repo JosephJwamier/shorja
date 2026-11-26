@@ -1710,14 +1710,14 @@ def purge_archived_items(retention_days=365):
     Permanently deletes Item rows that have sat archived (status='archived',
     see ItemViewSet.destroy / archive_item) for at least `retention_days`.
 
-    Item is CASCADE-referenced by Reservation/ItemTransfer/Representative/
-    ProductReview/Chat/LiveSessionItem, and Reservation is in turn
-    CASCADE-referenced by Dispute/DeliveryOrder — so this only deletes items
-    with no reservation still open (pending/completed/disputed), no dispute
-    still open (open/investigating), and no delivery order still in flight
-    (assigned/picked_up/delivered). Anything mid-transaction is left alone
-    no matter how long ago it was archived; it'll be picked up on a later
-    run once it settles into a terminal state.
+    Only items nothing was ever sold, bought or argued over: Item is
+    CASCADE-referenced by Reservation, ItemTransfer, Dispute and Report, and
+    those in turn by DeliveryOrder, InstallmentPlan, StorageFeePayment and the
+    held wholesale money. This used to delete any archived item whose orders
+    were *finished* — and with it the year's sales, disputes, installment
+    plans (Qi's reference among them) and money still held for a reseller.
+    Since deleting an account archives its products, a year after a seller
+    left, their buyers' records would have gone too.
     """
     from .models import Item
 
@@ -1725,12 +1725,9 @@ def purge_archived_items(retention_days=365):
 
     candidates = Item.objects.filter(
         status='archived', updated_at__lt=cutoff_date
-    ).exclude(
-        reservations__status__in=['pending', 'completed', 'disputed']
-    ).exclude(
-        disputes__status__in=['open', 'investigating']
-    ).exclude(
-        reservations__delivery_orders__status__in=['assigned', 'picked_up', 'delivered']
+    ).filter(
+        reservations__isnull=True, transfers__isnull=True,
+        acquired_via_transfer__isnull=True, disputes__isnull=True, reports__isnull=True,
     ).distinct()
 
     item_ids = list(candidates.values_list('id', flat=True))

@@ -19,6 +19,17 @@ from core.models import (
 User = get_user_model()
 pytestmark = pytest.mark.django_db
 
+@pytest.fixture(autouse=True)
+def a_courier(db):
+    """A deposit or a live order is finished by a courier collecting the rest;
+    without one it is refused (twelfth audit). Fees 0: the sums here are the
+    goods'."""
+    from core.models import DeliveryCompany, User
+    DeliveryCompany.objects.create(
+        name='courier', account=User.objects.create_user(username='courier_acc', password='x'),
+        is_active=True, intra_governorate_fee=0, inter_governorate_fee=0)
+
+
 
 def make_user(username, phone):
     user = User.objects.create_user(username=username, password='x', phone=phone)

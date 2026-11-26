@@ -154,6 +154,9 @@ def announce_live(session):
         notify_store_followers_live.delay(session.id)
 
 
+NO_COURIER = 'الدفع بالعربون غير متاح حالياً لعدم وجود شركة توصيل — ادفع المبلغ كاملاً'
+
+
 def _no_pickup_address():
     """A driver was sent to nowhere: the order went out with a blank address."""
     return Response({
@@ -3132,6 +3135,9 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 if total_price > MAX_AMOUNT:
                     return Response({'success': False, 'message': 'المبلغ أكبر من المسموح — قلّل الكمية'},
                                     status=status.HTTP_400_BAD_REQUEST)
+                if not get_active_delivery_company():
+                    return Response({'success': False, 'code': 'no_courier', 'message': NO_COURIER},
+                                    status=status.HTTP_400_BAD_REQUEST)
                 if deposit_refused_to(request.user):
                     return Response({'success': False, 'code': 'full_payment_only', 'message': FULL_PAYMENT_ONLY},
                                     status=status.HTTP_400_BAD_REQUEST)
@@ -4477,6 +4483,15 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
             return Response({
                 'success': False,
                 'message': 'payment_type must be "full" or "deposit"'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # A deposit order is finished by the courier who collects the rest; with
+        # none active it could only ever be cancelled.
+        if payment_type == 'deposit' and not reservation.auction_id and not get_active_delivery_company():
+            return Response({
+                'success': False,
+                'code': 'full_payment_only',
+                'message': NO_COURIER
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if payment_type == 'deposit' and not reservation.auction_id and deposit_refused_to(request.user):

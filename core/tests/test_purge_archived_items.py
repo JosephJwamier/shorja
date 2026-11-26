@@ -78,7 +78,8 @@ def test_item_with_open_reservation_is_kept():
     assert Item.objects.filter(id=item.id).exists()
 
 
-def test_item_with_terminal_reservation_only_is_purged():
+def test_item_with_a_finished_order_is_kept():
+    """Its order is the buyer's history, and deleting the item deleted it."""
     owner = make_user('purge_owner5')
     buyer = make_user('purge_buyer5')
     item = make_item(owner, age_days=400)
@@ -86,7 +87,7 @@ def test_item_with_terminal_reservation_only_is_purged():
 
     purge_archived_items()
 
-    assert not Item.objects.filter(id=item.id).exists()
+    assert Item.objects.filter(id=item.id).exists()
 
 
 def test_item_with_open_dispute_is_kept():

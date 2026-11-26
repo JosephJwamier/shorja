@@ -23,6 +23,17 @@ from core.wallet_utils import complete_reservation
 
 pytestmark = pytest.mark.django_db
 
+@pytest.fixture
+def a_courier(db):
+    """A deposit or a live order is finished by a courier collecting the rest;
+    without one it is refused (twelfth audit). Fees 0: the sums here are the
+    goods'."""
+    from core.models import DeliveryCompany, User
+    DeliveryCompany.objects.create(
+        name='courier', account=User.objects.create_user(username='courier_acc', password='x'),
+        is_active=True, intra_governorate_fee=0, inter_governorate_fee=0)
+
+
 
 @pytest.fixture
 def live(w):
@@ -95,6 +106,7 @@ def show(w, who=None, **k):
     return api(who or w.seller).post(f'/api/live-sessions/{w.s.id}/show-item/', {'item_id': w.item.id, **k})
 
 
+@pytest.mark.usefixtures('a_courier')
 def test_live_price_cannot_jump_under_the_tap(live):
     LiveSessionItem.objects.filter(pk=live.q.pk).update(shown_at=timezone.now())
     assert show(live, price='900000', deposit_amount='900000').status_code == 200
@@ -130,6 +142,7 @@ def test_quick_live_item_can_be_listed_after_the_stream(live):
     assert y.status_code == 201, (y.status_code, y.data, i.status)
 
 
+@pytest.mark.usefixtures('a_courier')
 def test_live_sale_is_in_the_sellers_book(live):
     from ledger.models import LedgerEntry
     reserve(live, delivery_location_id=live.loc.id)
@@ -165,6 +178,7 @@ def test_a_listed_item_stays_published_after_the_stream(live):
     assert live.item.status == 'active'
 
 
+@pytest.mark.usefixtures('a_courier')
 def test_a_live_order_called_off_after_the_stream_returns_to_draft(live):
     x = api(live.seller).post(f'/api/live-sessions/{live.s.id}/quick-show/', {
         'title': 'new', 'price': '5000', 'deposit_amount': '1000', 'quantity': 1}, format='json')

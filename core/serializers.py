@@ -1149,9 +1149,11 @@ class ReservationSerializer(serializers.ModelSerializer):
     can_request_payment_release = serializers.SerializerMethodField()
     installment = serializers.SerializerMethodField()
 
+    can_pay_deposit = serializers.SerializerMethodField()
     class Meta:
         model = Reservation
         fields = [
+            'can_pay_deposit',
             'id', 'item', 'buyer', 'quantity', 'deposit_amount', 'total_price',
             'status', 'reserved_at', 'expires_at', 'completed_at',
             'is_deposit_only', 'amount_charged',
@@ -1194,6 +1196,13 @@ class ReservationSerializer(serializers.ModelSerializer):
 
     def get_installment(self, obj):
         return _reservation_installment(obj)
+
+    def get_can_pay_deposit(self, obj):
+        """Only with a courier to collect the rest at the door."""
+        from .delivery_utils import get_active_delivery_company
+        if obj.status != 'pending' or obj.auction_id:
+            return obj.status == 'pending'
+        return get_active_delivery_company() is not None
 
     def get_delivery_location(self, obj):
         return party_location(obj, self.context)
