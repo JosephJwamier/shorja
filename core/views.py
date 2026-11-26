@@ -4736,6 +4736,12 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
                 'message': 'أُرسل الطلب للتوصيل مسبقاً'
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        if reservation.handed_over_at:
+            return Response({
+                'success': False,
+                'message': 'سلّمت هذا الطلب للمشتري يداً بيد'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         if not get_active_delivery_company():
             return Response({
                 'success': False,
@@ -4766,6 +4772,51 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
 
         except Exception:
             return server_error('تعذّر الإرسال للتوصيل')
+
+    @swagger_auto_schema(
+        operation_description="Seller records handing a fully paid order to the buyer face to face."
+    )
+    @action(detail=True, methods=['post'], url_path='hand-over')
+    def hand_over(self, request, pk=None):
+        """Without a courier leg, a paid order waited on the buyer's tap for
+        ever, and a buyer who collected it inside the first two hours could
+        still cancel it and get the money back. Pressing this ends both: the
+        buyer can no longer cancel alone, and the warranty clock starts — a
+        problem is a dispute, otherwise the money goes to the seller."""
+        reservation = self.get_object()
+        item = reservation.item
+        if request.user.id not in (item.owner_id, item.current_holder_id):
+            return Response({'success': False, 'message': 'التسليم للبائع فقط'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        with transaction.atomic():
+            reservation = Reservation.objects.select_for_update().select_related(
+                'item', 'buyer').get(pk=reservation.pk)
+            refusal = reservation.hand_over_refusal()
+            if refusal:
+                return Response({'success': False, 'message': refusal},
+                                status=status.HTTP_400_BAD_REQUEST)
+            reservation.handed_over_at = timezone.now()
+            reservation.save(update_fields=['handed_over_at'])
+
+        days = reservation.warranty_days
+        try:
+            send_websocket_notification(
+                user_id=reservation.buyer_id,
+                notification_type='reservation_handed_over',
+                title='سلّمك البائع الطلب',
+                message=(f'سجّل البائع أنه سلّمك "{bidi_isolate(reservation.item.title)}" يداً بيد. '
+                         f'إن لم تستلمه أو فيه مشكلة افتح نزاعاً خلال {days} يوم، وإلا يُحوَّل المبلغ للبائع.'),
+                data={'reservation_id': reservation.id},
+            )
+        except Exception as e:
+            logger.error(f"Failed to send hand-over notification: {e}")
+
+        return Response({
+            'success': True,
+            'message': f'سُجّل التسليم — يُحوَّل المبلغ إليك بعد {days} يوم إن لم يفتح المشتري نزاعاً',
+            'data': ReservationSerializer(reservation, context={'request': request}).data,
+        })
 
     @swagger_auto_schema(
         operation_description="Seller bundles several paid reservations for the same buyer/address into as few delivery trips as fit the size cap — one delivery fee per trip instead of one per reservation."
@@ -4926,7 +4977,9 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
             if not reservation.can_buyer_cancel():
                 return Response({
                     'success': False,
-                    'message': 'انتهت مهلة الإلغاء أو خرج الطلب للتوصيل — تلزم موافقة البائع'
+                    # The app has no "approve" button for the seller; what
+                    # they do have is their own cancel, which refunds in full.
+                    'message': 'انتهت مهلة إلغائك للطلب — راسل البائع ليلغيه هو من صفحة الطلب، فيعود إليك المبلغ'
                 }, status=status.HTTP_400_BAD_REQUEST)
 
         try:

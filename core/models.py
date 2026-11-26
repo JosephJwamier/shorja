@@ -1209,6 +1209,10 @@ class Reservation(models.Model):
     # Approval fields
     buyer_approved = models.BooleanField(default=False)
     buyer_approved_at = models.DateTimeField(null=True, blank=True)
+    # The seller gave it to the buyer face to face, with no courier leg: from
+    # here the buyer cannot cancel alone, and the warranty clock runs as if
+    # it had been delivered (see received_at).
+    handed_over_at = models.DateTimeField(null=True, blank=True, editable=False)
     seller_cancellation_approved = models.BooleanField(default=False)
     payment_released_to_seller = models.BooleanField(default=False)
     payment_released_at = models.DateTimeField(null=True, blank=True)
@@ -1384,9 +1388,28 @@ class Reservation(models.Model):
         if any(o.direction == 'outbound' and o.status not in ('assigned', 'cancelled', 'failed')
                for o in self.delivery_orders.all()):
             return False
+        # Collected in person: the goods are with the buyer already, so only
+        # the seller's agreement opens a cancel (and its refund).
+        if self.handed_over_at:
+            return self.seller_cancellation_approved
         time_since_reservation = timezone.now() - self.reserved_at
         within_two_hours = time_since_reservation.total_seconds() <= 7200  # 2 hours
         return within_two_hours or self.seller_cancellation_approved
+
+    def hand_over_refusal(self):
+        """Why the seller cannot record a face-to-face hand-over, or None."""
+        if self.status != 'completed' or self.payment_released_to_seller:
+            return 'يُسلَّم الطلب المدفوع الذي لم تُحرَّر دفعته فقط'
+        if self.handed_over_at:
+            return 'سُجّل تسليم هذا الطلب مسبقاً'
+        if self.is_deposit_only:
+            # The rest is cash at the door; only a courier's record says it
+            # was collected (see approve_and_release_payment).
+            return 'لم يُدفع ثمن هذا الطلب كاملاً — يُسلَّم عبر شركة التوصيل'
+        if any(o.direction == 'outbound' and o.status not in ('cancelled', 'failed')
+               for o in self.delivery_orders.all()):
+            return 'الطلب مُسند لشركة التوصيل'
+        return None
 
     @property
     def received_at(self):
@@ -1405,9 +1428,10 @@ class Reservation(models.Model):
         when the seller hasn't sent it to a delivery company at all), in
         which case can_release_payment() can only succeed via buyer_approved.
         """
-        return max((o.delivered_at for o in self.delivery_orders.all()
-                    if o.direction == 'outbound' and o.delivered_at
-                    and o.status in ('delivered', 'confirmed')), default=None)
+        delivered = max((o.delivered_at for o in self.delivery_orders.all()
+                         if o.direction == 'outbound' and o.delivered_at
+                         and o.status in ('delivered', 'confirmed')), default=None)
+        return delivered or self.handed_over_at
 
     def save(self, *args, **kwargs):
         # What was being sold, as it read when it was ordered: the seller may

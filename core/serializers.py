@@ -1150,10 +1150,12 @@ class ReservationSerializer(serializers.ModelSerializer):
     installment = serializers.SerializerMethodField()
 
     can_pay_deposit = serializers.SerializerMethodField()
+    can_hand_over = serializers.SerializerMethodField()
+
     class Meta:
         model = Reservation
         fields = [
-            'can_pay_deposit',
+            'can_pay_deposit', 'can_hand_over', 'handed_over_at',
             'id', 'item', 'buyer', 'quantity', 'deposit_amount', 'total_price',
             'status', 'reserved_at', 'expires_at', 'completed_at',
             'is_deposit_only', 'amount_charged',
@@ -1339,6 +1341,15 @@ class ReservationSerializer(serializers.ModelSerializer):
         if not _active_company(self.context):
             return False
         return _latest_leg(obj, 'outbound') is None
+
+    def get_can_hand_over(self, obj):
+        """Mirrors ReservationViewSet.hand_over — the seller's, while
+        Reservation.hand_over_refusal has nothing to say."""
+        request = self.context.get('request')
+        user = getattr(request, 'user', None) if request else None
+        if user is None or user.id not in (obj.item.owner_id, obj.item.current_holder_id):
+            return False
+        return obj.hand_over_refusal() is None
 
     def get_can_request_payment_release(self, obj):
         """

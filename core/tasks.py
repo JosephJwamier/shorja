@@ -331,13 +331,17 @@ def release_payments_after_week():
     # per-reservation answer below.
     min_possible_warranty_ago = timezone.now() - timedelta(days=1)
 
+    from django.db.models import Q
     reservations = Reservation.objects.filter(
+        Q(delivery_orders__direction='outbound',
+          delivery_orders__status__in=['delivered', 'confirmed'],
+          delivery_orders__delivered_at__lte=min_possible_warranty_ago)
+        # Handed over in person: no courier ever reports it delivered, and
+        # without this the seller waited on the buyer's tap for good.
+        | Q(handed_over_at__lte=min_possible_warranty_ago),
         status__in=['completed', 'confirmed'],
         payment_released_to_seller=False,
         buyer_approved=False,
-        delivery_orders__direction='outbound',
-        delivery_orders__status__in=['delivered', 'confirmed'],
-        delivery_orders__delivered_at__lte=min_possible_warranty_ago,
     ).select_related('item__owner', 'representative').distinct()
 
     released_count = 0
@@ -503,7 +507,9 @@ def process_ended_auctions():
             broadcast_live_auction_ended(auction, reservation)
 
         except Exception as e:
-            logger.error(f"Error processing auction {auction.id}: {str(e)}")
+            # auction_id, not auction: a failure before the row was read left
+            # `auction` unset, and the NameError here stopped the whole sweep.
+            logger.error(f"Error processing auction {auction_id}: {str(e)}")
 
     return f"Processed {processed_count} ended auctions"
 

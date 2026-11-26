@@ -43,7 +43,7 @@ def earnings_still_disputable(user):
             reservation=OuterRef('pk'), direction='outbound', delivered_at__isnull=False,
             status__in=('delivered', 'confirmed'),
         ).order_by('-delivered_at').values('delivered_at')[:1]),
-        'buyer_approved_at', 'payment_released_at', 'completed_at'))
+        'handed_over_at', 'buyer_approved_at', 'payment_released_at', 'completed_at'))
     still_open = Q(status='disputed')
     for days in set(sales.order_by().values_list('warranty_days', flat=True).distinct()):
         still_open |= Q(warranty_days=days, since__gte=now - timedelta(
