@@ -22,7 +22,7 @@ const DIRECTION_LABELS = {
 const TABS = [
   { key: 'active', label: 'نشطة', statuses: ['assigned', 'picked_up', 'delivered'] },
   { key: 'assigned', label: 'بانتظار الاستلام', statuses: ['assigned'] },
-  { key: 'done', label: 'مكتملة', statuses: ['confirmed', 'refused', 'failed', 'cancelled'] },
+  { key: 'done', label: 'مكتملة', statuses: ['confirmed', 'refused', 'failed', 'cancelled'], days: 30 },
 ];
 
 // ترتيب المحافظات الثابت — يطابق core/iraq_governorates.py على الباكند، حتى
@@ -95,6 +95,10 @@ function renderTabs() {
   }
 }
 
+function failButton(id) {
+  return `<button class="btn btn--ghost" data-action="mark-failed" data-id="${id}">تعذّر التوصيل</button>`;
+}
+
 function orderCardHtml(order) {
   const statusLabel = STATUS_LABELS[order.status] || order.status;
   const directionLabel = DIRECTION_LABELS[order.direction] || order.direction;
@@ -107,9 +111,10 @@ function orderCardHtml(order) {
   if (order.status === 'assigned') {
     actionHtml = `<button class="btn btn--primary" data-action="pick-up" data-id="${order.id}">تأكيد الاستلام</button>`;
   } else if (order.status === 'picked_up' && !isReturn) {
-    actionHtml = `<button class="btn btn--primary" data-action="mark-arrived" data-id="${order.id}">تأكيد الوصول للزبون</button>`;
+    actionHtml = `<button class="btn btn--primary" data-action="mark-arrived" data-id="${order.id}">تأكيد الوصول للزبون</button>`
+      + failButton(order.id);
   } else if (order.status === 'picked_up' && isReturn) {
-    actionHtml = `<span class="hint">تم استلام المنتج — سيُعاد المبلغ للزبون تلقائياً</span>`;
+    actionHtml = `<button class="btn btn--primary" data-action="mark-arrived" data-id="${order.id}">تأكيد التسليم للبائع</button>`;
   } else if (order.status === 'delivered') {
     actionHtml = `<span class="hint">${hasCash ? 'بانتظار تأكيد الزبون داخل التطبيق واستلامه النقد' : 'بانتظار تأكيد الزبون داخل التطبيق'}</span>`;
   }
@@ -360,6 +365,16 @@ function bounceToLoginIfSessionLost() {
   return false;
 }
 
+/** كل صفحات حالة واحدة — لا أولاها وحدها. */
+async function loadAllWithStatus(status, days) {
+  const all = [];
+  for (let page = 1; ; page++) {
+    const r = await apiFetchJson(`/delivery-orders/?status=${status}&page_size=100&page=${page}${days ? `&days=${days}` : ''}`);
+    all.push(...(r.results || r || []));
+    if (!r.next) return all;
+  }
+}
+
 async function loadOrders() {
   state.loading = true;
   state.error = null;
@@ -368,10 +383,8 @@ async function loadOrders() {
     const tab = TABS.find((t) => t.key === state.tab);
     // فلترة الحالة تتم بجلب كل حالة على حدة ودمجها، لأن الـ API يقبل قيمة
     // واحدة لكل معامل status — التبويبات تحتاج أكثر من حالة أحياناً.
-    const results = await Promise.all(
-      tab.statuses.map((s) => apiFetchJson(`/delivery-orders/?status=${s}&page_size=100`))
-    );
-    const merged = results.flatMap((r) => r.results || r || []);
+    const results = await Promise.all(tab.statuses.map((s) => loadAllWithStatus(s, tab.days)));
+    const merged = results.flat();
     merged.sort((a, b) => new Date(b.assigned_at) - new Date(a.assigned_at));
     state.orders = merged;
   } catch (e) {
@@ -384,10 +397,14 @@ async function loadOrders() {
 }
 
 async function handleAction(action, id) {
-  const endpoint =
-    action === 'pick-up' ? `/delivery-orders/${id}/pick-up/` : `/delivery-orders/${id}/mark-arrived/`;
+  let body;
+  if (action === 'mark-failed') {
+    const reason = (window.prompt('ما سبب تعذّر التوصيل؟ (الزبون غائب، العنوان خطأ...)') || '').trim();
+    if (!reason) { renderOrders(); return; }
+    body = JSON.stringify({ reason });
+  }
   try {
-    await apiFetchJson(endpoint, { method: 'POST' });
+    await apiFetchJson(`/delivery-orders/${id}/${action}/`, { method: 'POST', body });
     await loadOrders();
   } catch (e) {
     if (bounceToLoginIfSessionLost()) return;
@@ -398,7 +415,11 @@ async function handleAction(action, id) {
 
 function startAutoRefresh() {
   stopAutoRefresh();
-  state.refreshTimer = setInterval(loadOrders, 30000);
+  // المكتملة لا تتغيّر وحدها، ونافذة مخفيّة لا يقرأها أحد.
+  state.refreshTimer = setInterval(() => {
+    if (document.hidden || TABS.find((t) => t.key === state.tab).days) return;
+    loadOrders();
+  }, 30000);
 }
 
 function stopAutoRefresh() {

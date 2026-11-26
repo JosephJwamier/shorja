@@ -28,7 +28,15 @@ const Auth = {
       body: JSON.stringify({ username, password }),
     });
     if (!res.ok) {
-      throw new Error('اسم المستخدم أو كلمة المرور غير صحيحة');
+      // 403 = كلمة صحيحة يرفضها الخادم لسبب يشرحه (كلمة مرور لم تعد مقبولة)،
+      // فرسالته تُعرض كما هي. أي خطأ آخر يبقى رسالة واحدة لا تكشف شيئاً.
+      let detail = null;
+      if (res.status === 403) {
+        try { detail = (await res.json()).detail; } catch (_) { /* not JSON */ }
+      }
+      throw new Error(typeof detail === 'string' && detail
+        ? detail
+        : 'اسم المستخدم أو كلمة المرور غير صحيحة');
     }
     const data = await res.json();
     this.setTokens({ access: data.access, refresh: data.refresh, username });
@@ -39,7 +47,18 @@ const Auth = {
     this.clearTokens();
   },
 
-  async refresh() {
+  // طلب تجديد واحد في كل وقت: الخادم يُبطل رمز التجديد بعد استعماله،
+  // وثلاثة طلبات متوازية كانت تستعمل الرمز نفسه فتُخرج الشركة.
+  _refreshing: null,
+
+  refresh() {
+    if (!this._refreshing) {
+      this._refreshing = this._doRefresh().finally(() => { this._refreshing = null; });
+    }
+    return this._refreshing;
+  },
+
+  async _doRefresh() {
     const tokens = this.getTokens();
     if (!tokens || !tokens.refresh) throw new Error('لا يوجد جلسة دخول');
     const res = await fetch(`${CONFIG.API_BASE_URL}/auth/token/refresh/`, {
@@ -47,12 +66,13 @@ const Auth = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refresh: tokens.refresh }),
     });
-    if (!res.ok) {
+    if (res.status === 400 || res.status === 401) {
       this.clearTokens();
       throw new Error('انتهت الجلسة، الرجاء تسجيل الدخول مجدداً');
     }
+    if (!res.ok) throw new Error('تعذّر الاتصال بالخادم، حاول بعد قليل');
     const data = await res.json();
-    this.setTokens({ ...tokens, access: data.access });
+    this.setTokens({ ...tokens, access: data.access, refresh: data.refresh || tokens.refresh });
     return data.access;
   },
 };
