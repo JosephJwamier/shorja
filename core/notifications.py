@@ -397,53 +397,43 @@ def notify_reservation_completed(reservation):
     )
 
 
-def notify_new_bid(auction, bid):
-    """Notify about new bid on auction"""
-    seller = auction.item.owner
+def notify_new_bid(auction, bid, previous_bid=None):
+    """A bid landed: the seller is told, and so is whoever it just overtook —
+    the one who has a reason to bid again. Pushes, which the app receives;
+    place_bid's socket notices reach only a screen that is open on the auction.
+    `previous_bid` is the bid that was winning before this one."""
     item_title = bidi_isolate(auction.item.title)
+    notify_push(
+        auction.item.owner, f"مزايدة جديدة: {item_title}",
+        f'{bidi_isolate(bid.bidder.username)} زايد بمبلغ {bid.amount:,.0f} د.ع على "{item_title}"',
+        data={'type': 'new_bid', 'auction_id': str(auction.id), 'bid_amount': str(bid.amount)})
+    if previous_bid is not None and previous_bid.bidder_id != bid.bidder_id:
+        notify_push(
+            previous_bid.bidder, f"تم تجاوز مزايدتك: {item_title}",
+            f'تجاوز مزايد آخر مزايدتك على "{item_title}". الأعلى الآن {bid.amount:,.0f} د.ع — زايد من جديد.',
+            data={'type': 'outbid', 'auction_id': str(auction.id)})
 
-    subject = f"مزايدة جديدة: {item_title}"
-    message = f"""
-    مرحباً {seller.username}،
 
-    تم تقديم مزايدة جديدة على مزادك "{item_title}".
-
-    تفاصيل المزايدة:
-    - المزايد: {bid.bidder.username}
-    - المبلغ: {bid.amount} IQD
-    - السعر السابق: {auction.current_price} IQD
-
-    شاهد المزاد: {settings.FRONTEND_URL}/auctions/{auction.id}
-
-    فريق سوقي
-    """
-
-    NotificationService.send_email(seller.email, subject, message)
-    notify_push(seller, subject, f'{bidi_isolate(bid.bidder.username)} زايد بمبلغ {bid.amount} IQD على "{item_title}"',
-                data={'type': 'new_bid', 'auction_id': str(auction.id), 'bid_amount': str(bid.amount)})
-
-    # Notify previous highest bidder they've been outbid
-    previous_winning_bids = auction.bids.filter(
-        is_winning=True
-    ).exclude(id=bid.id)
-
-    for prev_bid in previous_winning_bids:
-        outbid_subject = f"تم تجاوز مزايدتك: {item_title}"
-        outbid_message = f"""
-        مرحباً {prev_bid.bidder.username}،
-
-        تم تجاوز مزايدتك على "{item_title}".
-
-        مزايدتك: {prev_bid.amount} IQD
-        أعلى مزايدة حالياً: {bid.amount} IQD
-
-        قدّم مزايدة أعلى: {settings.FRONTEND_URL}/auctions/{auction.id}
-
-        فريق سوقي
-        """
-        NotificationService.send_email(prev_bid.bidder.email, outbid_subject, outbid_message)
-        notify_push(prev_bid.bidder, outbid_subject, f'تم تجاوز مزايدتك على "{item_title}". الأعلى الآن: {bid.amount} IQD',
-                    data={'type': 'outbid', 'auction_id': str(auction.id)})
+def notify_auction_result(auction):
+    """After an auction ends, those who did not win: each losing bidder (their
+    bid deposit went back), or the seller when nobody bid at all. The winner
+    has notify_auction_won."""
+    from django.contrib.auth import get_user_model
+    item_title = bidi_isolate(auction.item.title)
+    if auction.winner_id is None:
+        notify_push(
+            auction.item.owner, f"انتهى مزادك بلا مزايدات: {item_title}",
+            f'لم يزايد أحد على "{item_title}"، وعاد المنتج مسودة — اعرضه من جديد بسعر أو بمزاد.',
+            data={'type': 'auction_no_winner', 'auction_id': str(auction.id)})
+        return
+    back = ' وعاد إليك عربون المزايدة' if auction.bid_deposit > 0 else ''
+    losers = (auction.bids.exclude(bidder_id=auction.winner_id)
+              .values_list('bidder_id', flat=True).distinct())
+    for user in get_user_model().objects.filter(id__in=list(losers), is_active=True):
+        notify_push(
+            user, f"انتهى المزاد: {item_title}",
+            f'انتهى مزاد "{item_title}" بمبلغ {auction.current_price:,.0f} د.ع ولم تفز به{back}.',
+            data={'type': 'auction_lost', 'auction_id': str(auction.id)})
 
 
 def notify_auction_ending_soon(auction, minutes_remaining):
@@ -473,6 +463,11 @@ def notify_auction_ending_soon(auction, minutes_remaining):
             """
 
             NotificationService.send_email(user.email, subject, message)
+            notify_push(
+                user, subject,
+                f'باقي {minutes_remaining} دقيقة على نهاية مزاد "{item_title}". '
+                f'السعر الآن {auction.current_price:,.0f} د.ع — زايد قبل أن ينتهي.',
+                data={'type': 'auction_ending_soon', 'auction_id': str(auction.id)})
 
         except User.DoesNotExist:
             continue
@@ -539,6 +534,92 @@ def notify_auction_won(auction, reservation):
     """
 
     NotificationService.send_email(seller.email, seller_subject, seller_message)
+
+
+def notify_dispute_resolved(dispute, reservation, refunded=None):
+    """Both sides hear how a dispute ended, and what it did to their money.
+    `refunded`: what went back to the buyer, when something did."""
+    title = bidi_isolate(dispute.title)
+    action = dispute.resolution_action
+    amount = lambda v: '{:,.0f}'.format(v or 0)
+    returning = reservation is not None and reservation.status != 'refunded'
+    if action == 'refund_buyer':
+        to_buyer = ('حُسم النزاع "%s" لصالحك. ' % title) + (
+            'ستستلم شركة التوصيل القطعة منك، ثم يعود إليك المبلغ.' if returning
+            else 'عاد إليك %s د.ع.' % amount(refunded))
+        to_seller = 'حُسم النزاع "%s" لصالح المشتري، ويعود إليه المبلغ.' % title
+    elif action == 'partial_refund':
+        to_buyer = 'حُسم النزاع "%s": عاد إليك %s د.ع وتبقى القطعة معك.' % (title, amount(refunded))
+        to_seller = 'حُسم النزاع "%s": أُعيد للمشتري %s د.ع، وحُرّر لك الباقي.' % (title, amount(refunded))
+    else:  # pay_seller, no_action
+        to_buyer = 'حُسم النزاع "%s": يبقى البيع قائماً ولا استرداد.' % title
+        to_seller = 'حُسم النزاع "%s" لصالحك، وحُرّر لك ثمن البيع.' % title
+    note = (dispute.resolution or '').strip()
+    if note:
+        to_buyer += ' ' + note[:200]
+        to_seller += ' ' + note[:200]
+    data = {'type': 'dispute_resolved', 'dispute_id': str(dispute.pk)}
+    buyer = reservation.buyer if reservation is not None else dispute.complainant
+    seller = reservation.item.owner if reservation is not None else dispute.defendant
+    notify_push(buyer, 'حُسم النزاع', to_buyer, data=data)
+    notify_push(seller, 'حُسم النزاع', to_seller, data=data)
+
+
+def notify_payment_released(reservation, how):
+    """The seller's money for a sale reached their wallet. `how`: 'auto'
+    (the warranty ran out) or 'buyer' (the buyer confirmed receipt)."""
+    from .models import Transaction
+    from django.db.models import Sum
+    seller = reservation.item.owner
+    got = Transaction.objects.filter(
+        reservation=reservation, user=seller, transaction_type='payout', status='completed',
+    ).aggregate(t=Sum('amount'))['t']
+    why = 'انتهت مدة الضمان دون نزاع' if how == 'auto' else 'أكّد المشتري الاستلام'
+    notify_push(
+        seller, 'وصلك ثمن البيع',
+        'وصلك %s د.ع ثمن "%s" — %s.' % ('{:,.0f}'.format(got or 0), bidi_isolate(reservation.item.title), why),
+        data={'type': 'payment_released', 'reservation_id': str(reservation.id)})
+
+
+def notify_reservation_lapsed(reservation, can_rebook):
+    """A reservation nobody paid for ran out."""
+    item_title = bidi_isolate(reservation.item.title)
+    tail = ' احجزه من جديد إن ما زلت تريده.' if can_rebook else ''
+    notify_push(
+        reservation.buyer, 'انتهى حجزك',
+        f'انتهت مهلة حجزك لـ"{item_title}" دون دفع.{tail}',
+        data={'type': 'reservation_expired', 'reservation_id': str(reservation.id)})
+
+
+def notify_goods_still_with_buyer(reservation):
+    """A handed-over order was refunded or cancelled: its stock waits for the
+    seller (ReservationViewSet.goods_returned)."""
+    notify_push(
+        reservation.item.owner, 'القطعة ما زالت عند المشتري',
+        f'أُلغي طلب "{bidi_isolate(reservation.item.title)}" بعد تسليمه يداً بيد. '
+        'حين تستعيد القطعة اضغط «استلمت القطعة» في صفحة الطلب لتعود إلى المخزون.',
+        data={'type': 'general', 'reservation_id': str(reservation.id)},
+    )
+
+
+def notify_auction_win_lapsed(reservation):
+    """The winner never paid the rest, and the wallet could not: the win is
+    off, and the bid deposit went to the seller (tasks.auto_complete_unclaimed_
+    auction_reservations)."""
+    item_title = bidi_isolate(reservation.item.title)
+    deposit = reservation.deposit_amount
+    lost = (' وذهب عربون المزايدة (%s د.ع) إلى البائع' % '{:,.0f}'.format(deposit)) if deposit > 0 else ''
+    notify_push(
+        reservation.buyer, 'أُلغي فوزك بالمزاد',
+        f'انتهت مهلة إتمام شراء "{item_title}" ولم يكفِ رصيدك لدفع الباقي، فأُلغي الفوز{lost}.',
+        data={'type': 'general', 'reservation_id': str(reservation.id)},
+    )
+    gain = (' ووصلك عربونه (%s د.ع)' % '{:,.0f}'.format(deposit)) if deposit > 0 else ''
+    notify_push(
+        reservation.item.owner, 'لم يُكمل الفائز الشراء',
+        f'لم يدفع الفائز بمزاد "{item_title}" الباقي في المهلة، فأُلغي فوزه{gain}. المنتج متاح لك لعرضه من جديد.',
+        data={'type': 'general', 'reservation_id': str(reservation.id)},
+    )
 
 
 def notify_auction_no_winner(auction):
@@ -1065,8 +1146,9 @@ def notify_seller_to_hand_over(reservation):
 
     notify_push(
         seller,
-        'سلّم طلبك إلى شركة التوصيل',
-        f'طلب "{item_title}" مدفوع منذ أكثر من يوم ولم يُسلَّم بعد.',
+        'سلّم طلبك للمشتري',
+        f'طلب "{item_title}" مدفوع منذ أكثر من يوم ولم يُسلَّم بعد — '
+        'أرسله مع شركة التوصيل، أو سجّل تسليمه يداً بيد من صفحة الطلب.',
         data={'type': 'handover_reminder', 'reservation_id': str(reservation.id)},
     )
 

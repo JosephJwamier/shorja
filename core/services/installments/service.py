@@ -563,6 +563,11 @@ def approve_request(plan_id, *, reviewed_by, provider_reference='', notes=''):
                                 get_provider(plan.provider), check_expiry=False)
         except InstallmentNotAllowed as exc:
             raise InstallmentReviewError(exc.message_ar)
+        if not (plan.stock_held_at or reservation.stock_held):
+            # Qi is activated before this click; a piece sold meanwhile would
+            # leave the buyer's salary paying for nothing.
+            raise InstallmentReviewError(
+                'تحقّق من توفّر المنتج أولاً بزر «تحقّق من المخزون واحجزه» قبل التفعيل في كي كارد')
         if financed_amount(reservation) != plan.principal:
             raise InstallmentReviewError(
                 'تغيّر المبلغ الإجمالي للحجز منذ الطلب (%s بدل %s) — ارفض الطلب '
@@ -581,6 +586,65 @@ def approve_request(plan_id, *, reviewed_by, provider_reference='', notes=''):
 
     transaction.on_commit(lambda: _notify('notify_installment_approved', plan))
     return plan
+
+
+SOLD_OUT = 'نفدت الكمية المطلوبة من المنتج'
+
+
+def hold_stock(plan_id, *, reviewed_by):
+    """The admin's first step, before anything at Qi: is what the buyer asked
+    for still there? A pending reservation holds no stock, and the review takes
+    hours, so the last piece can sell to someone else meanwhile.
+
+    There: the pieces are taken off the shelf for this order, and come back if
+    the request is rejected or withdrawn. Gone: the request is rejected and the
+    buyer told why. Returns 'held' or 'sold_out'."""
+    from core.models import Item, ItemVariant, Reservation
+
+    with transaction.atomic():
+        plan = InstallmentPlan.objects.select_for_update().get(pk=plan_id)
+        if plan.state != InstallmentPlan.STATE_REQUESTED:
+            raise InstallmentReviewError(
+                'هذا الطلب ليس بانتظار المراجعة (%s)' % plan.get_state_display())
+        if plan.stock_held_at:
+            return 'held'
+        reservation = Reservation.objects.select_for_update().get(pk=plan.reservation_id)
+        if reservation.status != 'pending':
+            raise InstallmentReviewError('الحجز لم يعد معلّقاً (%s)' % reservation.get_status_display())
+        if reservation.stock_held:
+            return 'held'  # it carries its pieces already
+        variant = reservation.stock_variant
+        withdrawn = (Item.objects.filter(pk=reservation.item_id, status='archived').exists()
+                     or not reservation.item.owner.is_active)
+        if variant is not None and not withdrawn:
+            variant = ItemVariant.objects.select_for_update().get(pk=variant.pk)
+            if variant.quantity >= reservation.quantity:
+                variant.take_stock(reservation.quantity)
+                reservation.stock_held = True
+                reservation.save(update_fields=['stock_held'])
+                plan.stock_held_at = timezone.now()
+                plan.save(update_fields=['stock_held_at', 'updated_at'])
+                logger.info('installment %s: %d held for reservation %s',
+                            plan.reference, reservation.quantity, reservation.pk)
+                return 'held'
+    reject_request(plan_id, reviewed_by=reviewed_by, notes=SOLD_OUT)
+    return 'sold_out'
+
+
+def _release_held_stock(plan, reservation):
+    """Puts back what hold_stock took, while the order is still only waiting.
+    A cancelled order already got its stock back from the cancel itself.
+    Caller holds both rows' locks."""
+    from core.models import ItemVariant
+
+    if not plan.stock_held_at or reservation.status != 'pending' or not reservation.stock_held:
+        return
+    variant = reservation.stock_variant
+    if variant is not None:
+        ItemVariant.objects.select_for_update().get(pk=variant.pk).return_stock(reservation.quantity)
+    reservation.stock_held = False
+    reservation.save(update_fields=['stock_held'])
+    plan.stock_held_at = None
 
 
 def reject_request(plan_id, *, reviewed_by, notes):
@@ -604,9 +668,10 @@ def reject_request(plan_id, *, reviewed_by, notes):
         plan.reviewed_by = reviewed_by
         plan.reviewed_at = timezone.now()
         plan.account_number = ''
-        plan.save()
 
         reservation = Reservation.objects.select_for_update().get(pk=plan.reservation_id)
+        _release_held_stock(plan, reservation)
+        plan.save()
         grace = timezone.now() + timedelta(hours=24)
         if reservation.status == 'pending' and reservation.expires_at < grace:
             reservation.expires_at = grace
@@ -622,9 +687,11 @@ def cancel_request(plan, reason=''):
     locked = InstallmentPlan.objects.select_for_update().get(pk=plan.pk)
     if locked.state != InstallmentPlan.STATE_REQUESTED:
         return locked
+    from core.models import Reservation
     locked.state = InstallmentPlan.STATE_CANCELLED
     locked.failure_reason = (reason or 'ألغاه المشتري')[:255]
     locked.account_number = ''
+    _release_held_stock(locked, Reservation.objects.select_for_update().get(pk=locked.reservation_id))
     locked.save()
     return locked
 

@@ -77,6 +77,18 @@ def archive_reel(reel, *, reason, actor):
     return reel
 
 
+def close_store(store):
+    """A store stops selling: its owner closed it, or the platform did.
+    Its listings already hide (open_seller_q); a stream on air is the one
+    thing that would carry on selling, so it ends."""
+    if store.is_active:
+        store.is_active = False
+        store.save(update_fields=['is_active'])
+    for session in LiveSession.objects.filter(store=store, status='live'):
+        stop_live_session(session)
+    return store
+
+
 def stop_live_session(session):
     """Emergency-stops an active broadcast using the same end_live_session()
     the owner's own "end stream" button and the stale-session cleanup task
@@ -120,8 +132,7 @@ def resolve_report(report, *, new_status, action_taken='none', admin_notes='', a
             # UserStore has no admin_notes field to attribute a reason to —
             # matches the existing deactivate_stores_action in admin.py,
             # which also flips is_active with no reason trail.
-            report.reported_store.is_active = False
-            report.reported_store.save(update_fields=['is_active'])
+            close_store(report.reported_store)
         elif action_taken == 'reel_archived':
             archive_reel(report.reported_reel, reason=admin_notes or 'بلاغ من المستخدمين', actor=actor)
 

@@ -22,7 +22,7 @@ from .wallet_utils import (
     park_if_unlisted,
 )
 from .services.disputes import add_reply, resolve_dispute, DisputeResolutionError
-from .services.open_sellers import open_seller_q
+from .services.open_sellers import is_open, open_seller_q
 from .services.refusals import FULL_PAYMENT_ONLY, deposit_refused_to
 from .services.wholesale import (
     NOTICE, WholesaleError, claim_handover, confirm_received, mark_notice_seen, needs_notice,
@@ -152,6 +152,9 @@ def announce_live(session):
     from .tasks import notify_store_followers_live
     if cache.add(f'live-announced:{session.store_id}', 1, 2 * 3600):
         notify_store_followers_live.delay(session.id)
+
+
+STORE_CLOSED = 'متجرك مغلق — افتحه أولاً لتبدأ البث'
 
 
 NO_COURIER = 'الدفع بالعربون غير متاح حالياً لعدم وجود شركة توصيل — ادفع المبلغ كاملاً'
@@ -423,7 +426,10 @@ class UserViewSet(viewsets.ModelViewSet):
             user.set_unusable_password()
             user.save()
             Item.objects.filter(owner=user).exclude(status='sold').update(status='archived')
-            UserStore.objects.filter(user=user).update(is_active=False)
+            # close_store, not a bare update: a stream on air ends with it.
+            from .services.moderation import close_store
+            for store in UserStore.objects.filter(user=user):
+                close_store(store)
 
         return Response({'success': True, 'message': 'تم حذف الحساب بنجاح.'})
 
@@ -1494,7 +1500,7 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                 ).get(pk=auction.pk)
 
                 # Check if auction is active (re-checked against the locked row)
-                if (not auction.is_active() or not auction.item.owner.is_active
+                if (not auction.is_active() or not is_open(auction.item.owner)
                         or auction.item.status == 'archived'):
                     return Response({
                         'success': False,
@@ -1636,6 +1642,16 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                         'time_remaining': self._calculate_time_remaining(auction)
                     }
                 )
+
+            # 3b. The same two, by push: the socket notices above reach only a
+            # screen open on this auction. A live auction has its audience
+            # watching already, and a push per bid there is noise.
+            if not auction.live_session_id:
+                try:
+                    from .notifications import notify_new_bid
+                    notify_new_bid(auction, bid, previous_winning_bid)
+                except Exception as e:
+                    logger.error(f"Failed to push new-bid notices for auction {auction.id}: {e}")
 
             # 4. Notify all other bidders about the new bid
             for bidder_id in previous_bidders:
@@ -2055,6 +2071,13 @@ class AuctionViewSet(viewsets.ReadOnlyModelViewSet):
                     }
                 )
 
+            if not auction.live_session_id:
+                try:
+                    from .notifications import notify_auction_result
+                    notify_auction_result(auction)
+                except Exception as e:
+                    logger.error(f"Failed to push auction result for {auction.id}: {e}")
+
             from .auction_utils import broadcast_live_auction_ended
             broadcast_live_auction_ended(auction, reservation)
 
@@ -2159,6 +2182,9 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
     def get_queryset(self):
         queryset = super().get_queryset()
+        if self.action == 'list' and not getattr(self.request.user, 'is_staff', False):
+            # A closed store sells nothing, on air included.
+            queryset = queryset.filter(open_seller_q('store__user'))
         if self.action == 'retrieve':
             queryset = queryset.prefetch_related('items__item__images')
         return queryset
@@ -2174,6 +2200,10 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             }, status=status.HTTP_400_BAD_REQUEST)
 
         start_immediately = serializer.validated_data['start_immediately']
+
+        if not request.user.store.is_active:
+            return Response({'success': False, 'code': 'store_closed', 'message': STORE_CLOSED},
+                            status=status.HTTP_400_BAD_REQUEST)
 
         if start_immediately:
             existing_live = LiveSession.objects.filter(
@@ -2227,6 +2257,9 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 'success': False,
                 'message': 'لا يمكن بدء هذا البث'
             }, status=status.HTTP_400_BAD_REQUEST)
+        if not session.store.is_active:
+            return Response({'success': False, 'code': 'store_closed', 'message': STORE_CLOSED},
+                            status=status.HTTP_400_BAD_REQUEST)
 
         # Same rule create(start_immediately=True) enforces, and it was
         # missing here: schedule a second session while one is live, then
@@ -2491,6 +2524,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             'item_title': queue_item.item.title,
             'price': str(queue_item.price),
             'deposit_amount': str(queue_item.deposit_amount),
+            'pay_in_full': get_active_delivery_company() is None,
         })
 
         return Response({
@@ -2649,6 +2683,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             'item_title': item.title,
             'price': str(queue_item.price),
             'deposit_amount': str(queue_item.deposit_amount),
+            'pay_in_full': get_active_delivery_company() is None,
         })
 
         return Response({
@@ -2727,6 +2762,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
             'item_title': item.title,
             'price': str(queue_item.price),
             'deposit_amount': str(queue_item.deposit_amount),
+            'pay_in_full': get_active_delivery_company() is None,
         })
 
         return Response({
@@ -3109,7 +3145,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                         'success': False,
                         'message': 'لا يمكنك حجز منتجك'
                     }, status=status.HTTP_403_FORBIDDEN)
-                if item.status not in ('active', 'reserved') or not item.owner.is_active:
+                if item.status not in ('active', 'reserved') or not is_open(item.owner):
                     return Response({
                         'success': False,
                         'message': 'لم يعد المنتج معروضاً للبيع'
@@ -3135,10 +3171,15 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 if total_price > MAX_AMOUNT:
                     return Response({'success': False, 'message': 'المبلغ أكبر من المسموح — قلّل الكمية'},
                                     status=status.HTTP_400_BAD_REQUEST)
-                if not get_active_delivery_company():
-                    return Response({'success': False, 'code': 'no_courier', 'message': NO_COURIER},
+                # A live sale is a deposit now and the rest at the door. With no
+                # courier to collect it, the whole price is paid now and the
+                # seller hands it over in person, like any other paid order.
+                pay_in_full = get_active_delivery_company() is None
+                if pay_in_full and not serializer.validated_data['pay_in_full']:
+                    return Response({'success': False, 'code': 'update_app',
+                                     'message': 'الشراء من البث صار بدفع الثمن كاملاً — حدّث التطبيق لتشتري'},
                                     status=status.HTTP_400_BAD_REQUEST)
-                if deposit_refused_to(request.user):
+                if not pay_in_full and deposit_refused_to(request.user):
                     return Response({'success': False, 'code': 'full_payment_only', 'message': FULL_PAYMENT_ONLY},
                                     status=status.HTTP_400_BAD_REQUEST)
                 deposit_amount = queue_item.deposit_amount * quantity
@@ -3168,7 +3209,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                     deposit_amount=deposit_amount,
                     total_price=total_price,
                     status='completed',
-                    is_deposit_only=True,
+                    is_deposit_only=not pay_in_full,
                     completed_at=timezone.now(),
                     warranty_days=item.warranty_days,
                     expires_at=timezone.now() + timedelta(
@@ -3187,7 +3228,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
                 # the reservation above — rolls back.
                 debit_balance(
                     user=request.user,
-                    amount=deposit_amount,
+                    amount=total_price if pay_in_full else deposit_amount,
                     transaction_type='purchase',
                     item=item,
                     reservation=reservation
@@ -3195,7 +3236,8 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
 
                 # A live sale is deposit now and the rest at the door, so the
                 # trip's fee is collected there too. It was never set, and the
-                # courier drove for nothing.
+                # courier drove for nothing. Paid in full there is no courier,
+                # so no fee.
                 from .delivery_utils import compute_delivery_fee
                 reservation.delivery_fee = compute_delivery_fee(reservation)
                 reservation.save(update_fields=['delivery_fee'])
@@ -3215,7 +3257,7 @@ class LiveSessionViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin,
         except ValueError as e:
             return Response({
                 'success': False,
-                'message': 'رصيدك لا يكفي للعربون',
+                'message': 'رصيدك لا يكفي لهذا الحجز',
                 'errors': str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
         except (Location.DoesNotExist, TypeError, ValueError):
@@ -3331,6 +3373,12 @@ class ReelViewSet(SafeRankingCacheMixin,
         # direct retrieve/finalize by the owning store.
         if not getattr(self.request.user, 'is_staff', False):
             queryset = queryset.filter(store__user__is_active=True)
+            # A closed store's reels lead to goods nobody can buy; its owner
+            # still sees their own.
+            shown = Q(store__is_active=True)
+            if self.request.user.is_authenticated:
+                shown |= Q(store__user=self.request.user)
+            queryset = queryset.filter(shown)
         if self.action == 'list':
             queryset = queryset.filter(status='published')
         elif not getattr(self.request.user, 'is_staff', False):
@@ -3984,6 +4032,11 @@ def _mark_reservation_received(reservation):
     reservation.status = 'confirmed'
     reservation.save(update_fields=['buyer_approved', 'buyer_approved_at', 'status'])
     release_reservation_payment(reservation)
+    # The seller hears their money arrived (the email this task also sends
+    # is off on this platform; the push is what reaches them).
+    from .tasks import send_payment_release_notification
+    transaction.on_commit(
+        lambda: send_payment_release_notification.delay(reservation.id, 'buyer_approved'))
 
 
 class AddressNotChangeable(Exception):
@@ -4486,8 +4539,9 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # A deposit order is finished by the courier who collects the rest; with
-        # none active it could only ever be cancelled.
-        if payment_type == 'deposit' and not reservation.auction_id and not get_active_delivery_company():
+        # none active it could only ever be cancelled. An auction win too: its
+        # bid deposit is paid, but the rest has nobody to collect it either.
+        if payment_type == 'deposit' and not get_active_delivery_company():
             return Response({
                 'success': False,
                 'code': 'full_payment_only',
@@ -4776,6 +4830,28 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
     @swagger_auto_schema(
         operation_description="Seller records handing a fully paid order to the buyer face to face."
     )
+    @action(detail=True, methods=['post'], url_path='goods-returned')
+    def goods_returned(self, request, pk=None):
+        """The seller has the piece back from the buyer of a handed-over order
+        that was cancelled or refunded: it returns to stock now."""
+        reservation = self.get_object()
+        if request.user.id not in (reservation.item.owner_id, reservation.item.current_holder_id):
+            return Response({'success': False, 'message': 'هذا الإجراء للبائع فقط'},
+                            status=status.HTTP_403_FORBIDDEN)
+        with transaction.atomic():
+            reservation = Reservation.objects.select_for_update().select_related('item').get(pk=reservation.pk)
+            why = reservation.goods_return_refusal()
+            if why:
+                return Response({'success': False, 'message': why}, status=status.HTTP_400_BAD_REQUEST)
+            variant = reservation.stock_variant
+            if variant is not None:
+                ItemVariant.objects.select_for_update().get(pk=variant.pk).return_stock(reservation.quantity)
+            reservation.goods_returned_at = timezone.now()
+            reservation.save(update_fields=['goods_returned_at'])
+            park_if_unlisted(Item.objects.select_for_update().get(pk=reservation.item_id))
+        return Response({'success': True, 'message': 'أُعيدت القطعة إلى المخزون',
+                         'data': ReservationSerializer(reservation, context={'request': request}).data})
+
     @action(detail=True, methods=['post'], url_path='hand-over')
     def hand_over(self, request, pk=None):
         """Without a courier leg, a paid order waited on the buyer's tap for
@@ -4797,17 +4873,25 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
                 return Response({'success': False, 'message': refusal},
                                 status=status.HTTP_400_BAD_REQUEST)
             reservation.handed_over_at = timezone.now()
-            reservation.save(update_fields=['handed_over_at'])
+            # A prepaid delivery fee paid for a trip that will not happen.
+            # Left in, release_reservation_payment takes it off the pot and,
+            # with no courier leg, credits it to nobody.
+            fee = reservation.delivery_fee
+            if fee > 0:
+                refund_to_buyer(reservation, fee, reason='أجرة توصيل لم يُحتج إليها — سُلّم يداً بيد')
+                reservation.delivery_fee = Decimal('0.00')
+            reservation.save(update_fields=['handed_over_at', 'delivery_fee'])
 
         days = reservation.warranty_days
         try:
-            send_websocket_notification(
-                user_id=reservation.buyer_id,
-                notification_type='reservation_handed_over',
-                title='سلّمك البائع الطلب',
-                message=(f'سجّل البائع أنه سلّمك "{bidi_isolate(reservation.item.title)}" يداً بيد. '
-                         f'إن لم تستلمه أو فيه مشكلة افتح نزاعاً خلال {days} يوم، وإلا يُحوَّل المبلغ للبائع.'),
-                data={'reservation_id': reservation.id},
+            # A push, not the notifications socket: the app listens to FCM
+            # only, and the dispute window starts now.
+            back = (' وأُعيدت إليك أجرة التوصيل (%s د.ع).' % '{:,.0f}'.format(fee)) if fee > 0 else ''
+            notify_push(
+                reservation.buyer, 'سلّمك البائع الطلب',
+                f'سجّل البائع أنه سلّمك "{bidi_isolate(reservation.item.title)}" يداً بيد. '
+                f'إن لم تستلمه أو فيه مشكلة افتح نزاعاً خلال {days} يوم، وإلا يُحوَّل المبلغ للبائع.' + back,
+                data={'type': 'reservation_handed_over', 'reservation_id': str(reservation.id)},
             )
         except Exception as e:
             logger.error(f"Failed to send hand-over notification: {e}")
@@ -5019,9 +5103,12 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
 
                 # Stock is only taken at completion, so only restore it if
                 # this reservation had actually reached that point.
+                # Handed over in person, the piece is with the buyer: it goes
+                # back on the shelf when the seller says they have it again.
+                with_buyer = bool(reservation.handed_over_at)
                 if stock_was_taken:
                     stock_variant = reservation.stock_variant
-                    if stock_variant is not None:
+                    if stock_variant is not None and not with_buyer:
                         stock_variant = ItemVariant.objects.select_for_update().get(
                             pk=stock_variant.pk
                         )
@@ -5031,11 +5118,14 @@ class ReservationViewSet(mixins.RetrieveModelMixin,
                         void_app_sale(reservation, 'أُلغي الحجز')
                         undo_sold_count(reservation)
                     item = Item.objects.select_for_update().get(id=reservation.item_id)
+                    if with_buyer:
+                        from .notifications import notify_goods_still_with_buyer
+                        transaction.on_commit(lambda: notify_goods_still_with_buyer(reservation))
 
                     # This reservation may have been the one that sold out its
                     # live-session queue entry — now that stock is back,
                     # re-open that entry so viewers can reserve it again.
-                    if reservation.live_session_item_id:
+                    if reservation.live_session_item_id and not with_buyer:
                         LiveSessionItem.objects.filter(
                             id=reservation.live_session_item_id, status='sold_out',
                             session__status='live',
@@ -7451,10 +7541,14 @@ class ChatViewSet(viewsets.ModelViewSet):
                     'success': False,
                     'message': 'طلب غير صالح'
                 }, status=status.HTTP_400_BAD_REQUEST)
-            qs = qs.filter(created_at__lt=before_message.created_at)
+            # Two messages can share a timestamp (an offer and its system
+            # note, a fast sender): with `<` alone the one beside the cursor
+            # never loaded, and with no tiebreak a page came back shuffled.
+            qs = qs.filter(Q(created_at__lt=before_message.created_at)
+                           | Q(created_at=before_message.created_at, id__lt=before_message.id))
 
         page_size = MESSAGES_PAGE_SIZE
-        older = list(qs.order_by('-created_at')[:page_size])
+        older = list(qs.order_by('-created_at', '-id')[:page_size])
         older.reverse()  # صعوداً زمنياً، مطابقةً لبقية سجل المحادثة
 
         return Response({
@@ -8446,9 +8540,15 @@ class UserStoreViewSet(viewsets.ModelViewSet):
                 'message': 'is_active field is required'
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        # bool('false') is True: a form-encoded "false" opened the store.
+        is_active = str(is_active).strip().lower() in ('1', 'true', 'yes', 'on')
         try:
-            store.is_active = bool(is_active)
-            store.save(update_fields=['is_active'])
+            if is_active:
+                store.is_active = True
+                store.save(update_fields=['is_active'])
+            else:
+                from .services.moderation import close_store
+                close_store(store)
 
             status_text = 'activated' if is_active else 'deactivated'
 

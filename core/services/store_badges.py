@@ -119,6 +119,8 @@ def store_stats(store, *, now=None):
     sales = Reservation.objects.filter(
         item__owner=store.user, status='confirmed', payment_released_to_seller=True,
         payment_released_at__gte=since,
+        # Token sales are how two friends would build a diamond store.
+        total_price__gte=settings.MIN_TRUSTED_SALE,
     ).count()
     followers = StoreFollow.objects.filter(store=store).count()
     return {'sales': sales, 'rating': store.rating or Decimal('0'), 'followers': followers}
@@ -195,9 +197,8 @@ REWARD_COUPON = {
 def grant_reward_coupon(store, *, by=None, amount=None, min_order_amount=None, days=None):
     """Creates a collectable StoreCoupon for `store`'s customers.
 
-    It is a normal store coupon (the store bears the discount exactly as
-    with coupons it creates itself); what makes it a reward is who created
-    it and the `description` that says so. Returns None when the store
+    The platform's gift, so the platform bears the discount: the seller is
+    paid it at release (platform_funded; wallet_utils.pay_coupon_subsidy). Returns None when the store
     already has an active, unexpired reward coupon, so re-running the admin
     action does not stack them.
     """
@@ -218,5 +219,6 @@ def grant_reward_coupon(store, *, by=None, amount=None, min_order_amount=None, d
     return StoreCoupon.objects.create(
         store=store, code=code, amount=amount, min_order_amount=min_order,
         description='مكافأة من الشورجة لزبائن %s' % store.name,
+        platform_funded=True,
         expires_at=now + timedelta(days=days),
     )

@@ -166,11 +166,16 @@ def resolve_dispute(dispute, *, resolution_action, resolution='', admin_notes=''
                     )
 
                 # Stock was taken when the order was completed, even if
-                # nothing was paid for it — restore it now.
+                # nothing was paid for it — restore it now. Handed over in
+                # person, the piece is with the buyer and no courier brings it
+                # back: the seller returns it to stock once it is in hand.
                 if reservation.completed_at:
                     from ..models import ItemVariant
                     stock_variant = reservation.stock_variant
-                    if stock_variant is not None:
+                    if reservation.handed_over_at:
+                        from ..notifications import notify_goods_still_with_buyer
+                        transaction.on_commit(lambda: notify_goods_still_with_buyer(reservation))
+                    elif stock_variant is not None:
                         stock_variant = ItemVariant.objects.select_for_update().get(
                             pk=stock_variant.pk
                         )
@@ -216,9 +221,27 @@ def resolve_dispute(dispute, *, resolution_action, resolution='', admin_notes=''
                 remainder = reservation.amount_charged - partial_refund_amount
                 release_reservation_payment(reservation, amount=remainder)
 
+            # The seller's book shows what the sale finally brought in.
+            from ledger.services import reduce_app_sale
+            reduce_app_sale(reservation, partial_refund_amount,
+                            'استرداد جزئي بعد نزاع #%d' % dispute.pk)
+
             # Buyer keeps the item — this isn't a return, so stock
             # is not restored (unlike refund_buyer above).
             reservation.status = 'refunded'
             reservation.save(update_fields=['status'])
+
+        refunded = (partial_refund_amount if resolution_action == 'partial_refund'
+                    else reservation.amount_charged if reservation and resolution_action == 'refund_buyer'
+                    else None)
+        from ..notifications import notify_dispute_resolved
+
+        def tell():
+            try:
+                notify_dispute_resolved(dispute, reservation, refunded)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception('dispute %s: result notice failed', dispute.pk)
+        transaction.on_commit(tell)
 
     return dispute

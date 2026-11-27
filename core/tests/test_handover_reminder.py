@@ -121,6 +121,12 @@ class TestWhenItStaysSilent:
             assert 'Sent 0' in run_inside_window()
         push.assert_not_called()
 
+    def test_handed_over_in_person(self, paid_reservation):
+        Reservation.objects.filter(pk=paid_reservation.pk).update(handed_over_at=timezone.now())
+        with patch('core.notifications.notify_push') as push:
+            assert 'Sent 0' in run_inside_window()
+        push.assert_not_called()
+
     def test_not_yet_paid(self, paid_reservation):
         # 'pending' يعني أن المشتري لم يدفع — فلا واجب على البائع بعد.
         paid_reservation.status = 'pending'

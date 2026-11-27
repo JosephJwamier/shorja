@@ -81,6 +81,14 @@ def check_username(value):
     return value
 
 
+def at_least_min_price(value):
+    """No sale below settings.MIN_ITEM_PRICE (see store_badges.store_stats)."""
+    floor = Decimal(str(settings.MIN_ITEM_PRICE))
+    if value is not None and value < floor:
+        raise serializers.ValidationError('أقل سعر مسموح %s د.ع' % '{:,.0f}'.format(floor))
+    return value
+
+
 class UserSerializer(serializers.ModelSerializer):
     """User serializer"""
     avatar_url = serializers.SerializerMethodField()
@@ -371,7 +379,7 @@ class ItemVariantSerializer(serializers.ModelSerializer):
         fields = ['id', 'attributes', 'sku', 'quantity', 'price', 'cost_price',
                   'effective_price', 'image', 'image_url', 'is_active']
         read_only_fields = ['id', 'effective_price', 'image_url']
-        extra_kwargs = {'price': {'min_value': Decimal('0.01')},
+        extra_kwargs = {'price': {'min_value': Decimal('0.01'), 'validators': [at_least_min_price]},
                         'cost_price': {'min_value': Decimal('0')}}
 
     def to_representation(self, instance):
@@ -882,7 +890,7 @@ class FixedPriceListingSerializer(serializers.ModelSerializer):
         """Ensure price is positive"""
         if value <= 0:
             raise serializers.ValidationError('السعر أكبر من صفر')
-        return value
+        return at_least_min_price(value)
 
     def validate_original_price(self, value):
         """Ensure the reference price (if set) is positive"""
@@ -920,7 +928,7 @@ class FixedPriceListingCreateSerializer(serializers.ModelSerializer):
         """Ensure price is positive"""
         if value <= 0:
             raise serializers.ValidationError('السعر أكبر من صفر')
-        return value
+        return at_least_min_price(value)
 
     def validate_original_price(self, value):
         """Ensure the reference price (if set) is positive"""
@@ -1027,7 +1035,7 @@ class AuctionListingCreateSerializer(serializers.ModelSerializer):
     def validate_starting_price(self, value):
         if value <= Decimal('0'):
             raise serializers.ValidationError('السعر الافتتاحي أكبر من صفر')
-        return value
+        return at_least_min_price(value)
 
     def validate_minimum_increment(self, value):
         if value <= Decimal('0'):
@@ -1151,11 +1159,13 @@ class ReservationSerializer(serializers.ModelSerializer):
 
     can_pay_deposit = serializers.SerializerMethodField()
     can_hand_over = serializers.SerializerMethodField()
+    can_mark_goods_returned = serializers.SerializerMethodField()
 
     class Meta:
         model = Reservation
         fields = [
             'can_pay_deposit', 'can_hand_over', 'handed_over_at',
+            'can_mark_goods_returned', 'goods_returned_at',
             'id', 'item', 'buyer', 'quantity', 'deposit_amount', 'total_price',
             'status', 'reserved_at', 'expires_at', 'completed_at',
             'is_deposit_only', 'amount_charged',
@@ -1202,8 +1212,8 @@ class ReservationSerializer(serializers.ModelSerializer):
     def get_can_pay_deposit(self, obj):
         """Only with a courier to collect the rest at the door."""
         from .delivery_utils import get_active_delivery_company
-        if obj.status != 'pending' or obj.auction_id:
-            return obj.status == 'pending'
+        if obj.status != 'pending':
+            return False
         return get_active_delivery_company() is not None
 
     def get_delivery_location(self, obj):
@@ -1308,10 +1318,15 @@ class ReservationSerializer(serializers.ModelSerializer):
                 # becomes an available choice — releasing money before the buyer
                 # has even confirmed they hold the item defeats the escrow.
                 return False
-        elif _active_company(self.context) is not None:
+        elif obj.is_deposit_only:
+            # The rest is cash at the door: approve_and_release_payment refuses
+            # it until a courier has collected that (code needs_delivery).
+            return False
+        elif _active_company(self.context) is not None and not obj.handed_over_at:
             # A delivery company is available and will eventually carry this
             # sale — the seller just hasn't sent it off yet (send_to_delivery
-            # not called), so the buyer has nothing in hand to confirm.
+            # not called), so the buyer has nothing in hand to confirm. Handed
+            # over in person, they have.
             return False
         return (
             obj.status == 'completed'
@@ -1341,6 +1356,14 @@ class ReservationSerializer(serializers.ModelSerializer):
         if not _active_company(self.context):
             return False
         return _latest_leg(obj, 'outbound') is None
+
+    def get_can_mark_goods_returned(self, obj):
+        """Mirrors ReservationViewSet.goods_returned — the seller's."""
+        request = self.context.get('request')
+        user = getattr(request, 'user', None) if request else None
+        if user is None or user.id not in (obj.item.owner_id, obj.item.current_holder_id):
+            return False
+        return obj.goods_return_refusal() is None
 
     def get_can_hand_over(self, obj):
         """Mirrors ReservationViewSet.hand_over — the seller's, while
@@ -1376,7 +1399,7 @@ class ReservationSerializer(serializers.ModelSerializer):
         )
         if not is_seller or obj.status != 'completed' or obj.payment_released_to_seller:
             return False
-        if _latest_leg(obj, 'outbound') is not None:
+        if _latest_leg(obj, 'outbound') is not None or obj.handed_over_at:
             return True
         return _active_company(self.context) is None
 
@@ -2098,7 +2121,8 @@ class MessageCreateSerializer(serializers.Serializer):
 
 class MessageOfferSerializer(serializers.Serializer):
     """Serializer for sending price offers"""
-    offer_amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('1'))
+    offer_amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('1'),
+                                            validators=[at_least_min_price])
     # Required when the item has options — see views._resolve_variant.
     variant_id = serializers.IntegerField(required=False, allow_null=True)
     quantity = serializers.IntegerField(default=1, min_value=1)
@@ -2283,7 +2307,7 @@ class ChatDetailSerializer(serializers.ModelSerializer):
 
     def get_messages(self, obj):
         latest = list(
-            self._visible_messages(obj).order_by('-created_at')[:MESSAGES_PAGE_SIZE]
+            self._visible_messages(obj).order_by('-created_at', '-id')[:MESSAGES_PAGE_SIZE]
         )
         latest.reverse()  # صعوداً زمنياً، كما كانت قبل تفعيل الترقيم
         return MessageSerializer(latest, many=True, context=self.context).data
@@ -2349,7 +2373,8 @@ class ChatCreateSerializer(serializers.Serializer):
 def has_bought(user, *, item=None, owner=None):
     """Did `user` buy this item, or anything from this seller, and did it reach
     the point of having an opinion: received, or paid for and fought over."""
-    sales = Reservation.objects.filter(buyer=user)
+    # A token sale is not a purchase to judge by (MIN_TRUSTED_SALE).
+    sales = Reservation.objects.filter(buyer=user, total_price__gte=settings.MIN_TRUSTED_SALE)
     if item is not None:
         sales = sales.filter(item=item)
     if owner is not None:
@@ -2359,6 +2384,7 @@ def has_bought(user, *, item=None, owner=None):
         | Q(status__in=['disputed', 'refunded'], completed_at__isnull=False)
         | Q(status='completed', delivery_orders__direction='outbound',
             delivery_orders__status__in=['delivered', 'confirmed'])
+        | Q(status='completed', handed_over_at__isnull=False)
     ).exists()
 
 
@@ -3127,17 +3153,24 @@ class ReelCommentCreateSerializer(serializers.Serializer):
 class LiveSessionItemSerializer(serializers.ModelSerializer):
     """A queued/shown product during a live session, with its live-only price/deposit"""
     item = ItemListSerializer(read_only=True)
+    pay_in_full = serializers.SerializerMethodField()
 
     class Meta:
         model = LiveSessionItem
-        fields = ['id', 'item', 'price', 'deposit_amount', 'order', 'status', 'shown_at', 'created_at']
+        fields = ['id', 'item', 'price', 'deposit_amount', 'pay_in_full', 'order', 'status', 'shown_at', 'created_at']
         read_only_fields = ['status', 'shown_at', 'created_at']
+
+    def get_pay_in_full(self, obj):
+        """No courier to collect the rest at the door: the price is paid now."""
+        from .delivery_utils import get_active_delivery_company
+        return get_active_delivery_company() is None
 
 
 class LiveSessionItemCreateSerializer(serializers.Serializer):
     """Add a product to a live session's queue with a live-only price/deposit"""
     item_id = serializers.IntegerField()
-    price = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('0.01'))
+    price = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('0.01'),
+                                     validators=[at_least_min_price])
     deposit_amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('0.00'))
     order = serializers.IntegerField(required=False, default=0)
 
@@ -3233,6 +3266,9 @@ class ReserveLiveItemSerializer(serializers.Serializer):
     quantity = serializers.IntegerField(default=1, min_value=1)
     screenshot = serializers.ImageField(validators=[validate_image])
     delivery_location_id = serializers.IntegerField(required=False, allow_null=True)
+    # The app showed the full price as what is paid now (LiveSessionItem
+    # pay_in_full). An older one showed only the deposit.
+    pay_in_full = serializers.BooleanField(required=False, default=False)
 
     def validate_delivery_location_id(self, value):
         if value:
@@ -3330,7 +3366,7 @@ class ShowLiveItemSerializer(serializers.Serializer):
     item_id = serializers.IntegerField()
     price = serializers.DecimalField(
         max_digits=14, decimal_places=2, min_value=Decimal('0.01'),
-        required=False, allow_null=True
+        required=False, allow_null=True, validators=[at_least_min_price],
     )
     deposit_amount = serializers.DecimalField(
         max_digits=14, decimal_places=2, min_value=Decimal('0.00'),
@@ -3344,7 +3380,8 @@ class QuickShowItemSerializer(serializers.Serializer):
     right here; a minimal backing Item is created transparently so the
     seller never has to visit a separate 'add product' screen first."""
     title = serializers.CharField(max_length=200)
-    price = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('0.01'))
+    price = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('0.01'),
+                                     validators=[at_least_min_price])
     deposit_amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('0.00'))
     quantity = serializers.IntegerField(default=1, min_value=1)
     category_id = serializers.IntegerField(required=False, allow_null=True)
@@ -3370,7 +3407,8 @@ class QuickLiveAuctionSerializer(serializers.Serializer):
     QuickShowItemSerializer, but viewers bid instead of instantly reserving.
     A minimal backing Item is created the same way (see _create_quick_live_item)."""
     title = serializers.CharField(max_length=200)
-    starting_price = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('0.01'))
+    starting_price = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('0.01'),
+                                              validators=[at_least_min_price])
     minimum_increment = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('0.01'))
     bid_deposit = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal('0.00'))
     quantity = serializers.IntegerField(default=1, min_value=1)

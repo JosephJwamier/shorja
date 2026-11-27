@@ -1213,6 +1213,10 @@ class Reservation(models.Model):
     # here the buyer cannot cancel alone, and the warranty clock runs as if
     # it had been delivered (see received_at).
     handed_over_at = models.DateTimeField(null=True, blank=True, editable=False)
+    # The order came back (refund or cancel) after an in-person hand-over:
+    # the piece is with the buyer, so stock waits for the seller to say it is
+    # back on the shelf (ReservationViewSet.goods_returned).
+    goods_returned_at = models.DateTimeField(null=True, blank=True, editable=False)
     seller_cancellation_approved = models.BooleanField(default=False)
     payment_released_to_seller = models.BooleanField(default=False)
     payment_released_at = models.DateTimeField(null=True, blank=True)
@@ -1409,6 +1413,19 @@ class Reservation(models.Model):
         if any(o.direction == 'outbound' and o.status not in ('cancelled', 'failed')
                for o in self.delivery_orders.all()):
             return 'الطلب مُسند لشركة التوصيل'
+        return None
+
+    def goods_return_refusal(self):
+        """Why the seller cannot put this order's pieces back in stock, or None."""
+        if self.status not in ('cancelled', 'refunded') or not self.handed_over_at:
+            return 'يُعاد للمخزون الطلب المُسلَّم يداً بيد بعد إلغائه أو استرداده فقط'
+        if self.goods_returned_at:
+            return 'أُعيدت القطعة إلى المخزون مسبقاً'
+        if self.disputes.filter(resolution_action='partial_refund').exists():
+            return 'بقيت القطعة مع المشتري باسترداد جزئي'
+        if self.delivery_orders.filter(direction='return').exists():
+            # execute_return_refund puts it back when the courier brings it.
+            return 'تعود القطعة عبر شركة التوصيل'
         return None
 
     @property
@@ -2029,6 +2046,8 @@ class Transaction(models.Model):
         # services/installments/ و InstallmentPlan بالأسفل.
         ('installment', 'Installment Financing'),
         ('installment_fee', 'Installment Fee'),
+        # The platform paying a seller the discount of a coupon it granted.
+        ('coupon_subsidy', 'Coupon Subsidy'),
     ]
 
     STATUS_CHOICES = [
@@ -2311,6 +2330,10 @@ class StoreCoupon(models.Model):
     is_active = models.BooleanField(default=True)
     expires_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    # Granted by the platform (store_badges.grant_reward_coupon): the
+    # discount comes out of the platform's money, not the store's — the
+    # seller is paid it at release (wallet_utils.pay_coupon_subsidy).
+    platform_funded = models.BooleanField(default=False)
 
     class Meta:
         unique_together = ['store', 'code']
@@ -3293,6 +3316,10 @@ class InstallmentPlan(models.Model):
     )
     reviewed_at = models.DateTimeField(null=True, blank=True)
     admin_notes = models.TextField(blank=True)
+    # حين تحقّقت الإدارة من المخزون وحجزت القطع لهذا الطلب (hold_stock).
+    # فارغ إن لم تُحجز، أو إن كان الحجز يحمل مخزونه من قبل (stock_held) —
+    # فلا يُعاد عند الرفض إلا ما أخذه هذا الطلب.
+    stock_held_at = models.DateTimeField(null=True, blank=True, editable=False)
 
     card_last4 = models.CharField(max_length=4, blank=True)
     card_holder_name = models.CharField(max_length=120, blank=True)

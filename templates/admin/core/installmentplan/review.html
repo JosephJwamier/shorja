@@ -50,6 +50,7 @@ and these are figures an admin types into Qi's platform by hand.{% endcomment %}
         <dt class="text-xs text-font-subtle-light dark:text-font-subtle-dark mb-1">المخزون المتاح الآن</dt>
         <dd {% if stock_short %}style="color:#AC3A31;font-weight:600;"{% endif %}>
           {{ stock|default_if_none:"—" }}{% if stock_short %} — أقل من الكمية المطلوبة{% endif %}
+          {% if stock_held %}<div style="color:#2E7D57;font-weight:600;">✓ حُجزت {{ reservation.quantity }} قطعة لهذا الطلب</div>{% endif %}
         </dd>
       </div>
       <div>
@@ -183,7 +184,8 @@ and these are figures an admin types into Qi's platform by hand.{% endcomment %}
       {% if plan.admin_notes %}<p class="text-sm mt-2">{{ plan.admin_notes }}</p>{% endif %}
     {% else %}
       <ol class="text-sm list-decimal pr-5 mb-5 flex flex-col gap-1">
-        <li>تحقّق في منصة كي كارد أن الحساب أعلاه مؤهّل للتقسيط بمبلغ <b dir="ltr">{{ plan.amount_at_qi|floatformat:"0u" }}</b> — اكتب هذا المبلغ لا ثمن الطلب.</li>
+        <li>اضغط «تحقّق من المخزون واحجزه»: إن كان المنتج متوفّراً حُجزت القطع لهذا الطلب، وإن نفد رُفض الطلب وأُبلغ المشتري.</li>
+        <li>تحقّق في منصة كي كارد أن الحساب أعلاه مؤهّل للتقسيط بمبلغ <b dir="ltr">{{ plan.amount_at_qi|floatformat:"0u" }}</b> — اكتب هذا المبلغ لا ثمن الطلب. إن لم يُقبل فارفض الطلب، فتعود القطع المحجوزة إلى المخزون.</li>
         <li>اتصل بالمشتري واطلب منه الرمز الذي أرسلته كي كارد إليه.</li>
         <li>أدخل الرمز في منصة كي كارد لتفعيل الخطة.</li>
         <li>بعد التفعيل فقط: أدخل مرجع الخطة من كي كارد واضغط «فُعّل — اعتماد الحجز».</li>
@@ -202,9 +204,17 @@ and these are figures an admin types into Qi's platform by hand.{% endcomment %}
                       class="w-full rounded-default border border-base-200 dark:border-base-700 bg-base-50 dark:bg-base-900 px-3 py-2 text-sm"></textarea>
           </div>
           <div class="flex gap-3">
-            <button type="submit" name="decision" value="approve"
+            {% if not stock_held %}
+            <button type="submit" name="decision" value="hold_stock"
                     class="px-5 py-2.5 rounded-default text-white text-sm font-semibold"
-                    style="background:#2E7D57;">
+                    style="background:#1F5FA8;">
+              تحقّق من المخزون واحجزه
+            </button>
+            {% endif %}
+            <button type="submit" name="decision" value="approve"
+                    {% if not stock_held %}disabled title="تحقّق من المخزون أولاً"{% endif %}
+                    class="px-5 py-2.5 rounded-default text-white text-sm font-semibold"
+                    style="background:#2E7D57;{% if not stock_held %}opacity:.45;cursor:not-allowed;{% endif %}">
               فُعّل — اعتماد الحجز
             </button>
             <button type="submit" name="decision" value="reject"
@@ -229,6 +239,7 @@ and these are figures an admin types into Qi's platform by hand.{% endcomment %}
               alert('أدخل مرجع الخطة من كي كارد — بدونه لا يمكن إلغاؤها لاحقاً إن أُلغي الطلب.');
               return;
             }
+            if (clicked === 'hold_stock') return;
             var msg = clicked === 'approve'
               ? 'هل فُعّلت الخطة فعلاً في منصة كي كارد؟ الاعتماد يُكمل الحجز فوراً.'
               : 'تأكيد رفض الطلب؟';

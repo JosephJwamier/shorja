@@ -148,3 +148,18 @@ def test_list_includes_archived_chats_with_archived_param():
     results = response.json()['results']
     assert len(results) == 1
     assert results[0]['id'] == chat.id
+
+
+def test_messages_sharing_a_timestamp_are_neither_lost_nor_shuffled():
+    """A message beside the cursor with the same instant used to vanish."""
+    from django.utils import timezone
+    chat = make_chat()
+    messages = add_messages(chat, chat.buyer, MESSAGES_PAGE_SIZE + 5)
+    Message.objects.filter(chat=chat).update(created_at=timezone.now())
+
+    client = APIClient()
+    client.force_authenticate(user=chat.buyer)
+    first = client.get(f'/api/chats/{chat.id}/').json()['messages']
+    assert [m['id'] for m in first] == [m.id for m in messages[5:]]
+    older = client.get(f'/api/chats/{chat.id}/messages/', {'before': first[0]['id']}).json()['data']
+    assert [m['id'] for m in older] == [m.id for m in messages[:5]]

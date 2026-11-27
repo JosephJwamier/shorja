@@ -249,6 +249,39 @@ def park_if_unlisted(item):
     item.save(update_fields=['status'])
 
 
+def coupon_subsidy_due(reservation):
+    """What the platform owes the seller for a coupon it granted on this sale."""
+    collection = reservation.applied_coupon
+    if collection is None or not collection.coupon.platform_funded:
+        return Decimal('0.00')
+    return reservation.coupon_discount or Decimal('0.00')
+
+
+def pay_coupon_subsidy(reservation, scale=Decimal('1')):
+    """The platform's coupon was its own promise: the seller gets the
+    discount from the platform's account, scaled like the rest of the
+    payout on a partial refund. The platform's balance may go below zero:
+    it is the platform's own book, and the seller must not wait on it.
+    Call inside transaction.atomic()."""
+    from django.db.models import F
+    from .models import Wallet
+    from .services.commission import platform_account
+
+    subsidy = (coupon_subsidy_due(reservation) * scale).quantize(Decimal('0.01'))
+    if subsidy <= 0:
+        return Decimal('0.00')
+    links = {'item': reservation.item, 'reservation': reservation}
+    platform = platform_account()
+    Transaction.objects.create(user=platform, transaction_type='coupon_subsidy',
+                               amount=subsidy, status='completed', **links)
+    Wallet.objects.filter(pk=get_or_create_wallet(platform).pk).update(
+        balance=F('balance') - subsidy)
+    credit_earnings(reservation.item.owner, subsidy, 'payout', **links)
+    from ledger.services import add_to_app_sale
+    add_to_app_sale(reservation, subsidy, 'خصم كوبون تتحمّله الشورجة')
+    return subsidy
+
+
 def claw_back_release(reservation, amount):
     """Takes `amount` back, after release, from the people who received it.
 
@@ -311,6 +344,12 @@ def claw_back_release(reservation, amount):
         remaining -= taken
 
     debit_balance(reservation.item.owner, remaining, 'refund', **links)
+    # A platform coupon's discount the seller was paid goes back with the
+    # sale, in the same share: it was paid for a sale that came back.
+    subsidy = share(received(platform, 'coupon_subsidy'))
+    if subsidy > 0:
+        debit_balance(reservation.item.owner, subsidy, 'refund', **links)
+        credit_earnings(platform, subsidy, 'refund', **links)
     if ratio == 1:
         from ledger.services import void_platform_commission
         void_platform_commission(reservation, 'استُردّ ثمن الطلب')
@@ -622,6 +661,7 @@ def release_reservation_payment(reservation, amount=None):
         )
 
     reservation.save(update_fields=update_fields)
+    pay_coupon_subsidy(reservation, payout_scale)
 
     # Bought wholesale: whoever stored these pieces has now delivered them.
     from .services.wholesale import goods_left

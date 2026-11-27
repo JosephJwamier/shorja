@@ -23,7 +23,7 @@ from core.services.installments.cards import scrub_sentry_event
 from core.services.installments.qicard import QiCardProvider
 from core.services.installments.registry import reset_cache
 from core.services.installments.service import (
-    InstallmentNotAllowed, InstallmentReviewError, approve_request, confirm,
+    InstallmentNotAllowed, InstallmentReviewError, approve_request, confirm, hold_stock,
     live_plan_for, mark_reversal_done, options, quote, reject_request,
     request_manual, sync_plan,
 )
@@ -78,6 +78,13 @@ def requested(buyer, seller, **extra):
     reservation = make_reservation(buyer, seller, **extra)
     plan = request_manual(user=buyer, reservation=reservation, account_number=ACCOUNT)
     return reservation, plan
+
+
+def held_approve(plan_id, staff, **kw):
+    """What the admin does: check the stock and hold it, then approve."""
+    if InstallmentPlan.objects.get(pk=plan_id).state == InstallmentPlan.STATE_REQUESTED:
+        hold_stock(plan_id, reviewed_by=staff)
+    return approve_request(plan_id, reviewed_by=staff, **kw)
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +222,7 @@ def test_approving_completes_the_reservation_like_any_paid_order(staff):
     buyer, seller = make_user('m_ok_b'), make_user('m_ok_s')
     reservation, plan = requested(buyer, seller)
 
-    plan = approve_request(plan.pk, reviewed_by=staff, provider_reference='QI-778')
+    plan = held_approve(plan.pk, staff, provider_reference='QI-778')
 
     reservation.refresh_from_db()
     assert reservation.status == 'completed'
@@ -236,8 +243,8 @@ def test_approving_twice_completes_once(staff):
     reservation, plan = requested(buyer, seller)
     stock = reservation.stock_variant.quantity
 
-    approve_request(plan.pk, reviewed_by=staff, provider_reference='QI-1')
-    approve_request(plan.pk, reviewed_by=staff, provider_reference='QI-1')
+    held_approve(plan.pk, staff, provider_reference='QI-1')
+    held_approve(plan.pk, staff, provider_reference='QI-1')
 
     reservation.refresh_from_db()
     assert reservation.stock_variant.quantity == stock - 1
@@ -249,7 +256,7 @@ def test_approval_needs_qi_reference(staff):
     buyer, seller = make_user('m_ref_b'), make_user('m_ref_s')
     _, plan = requested(buyer, seller)
     with pytest.raises(InstallmentReviewError):
-        approve_request(plan.pk, reviewed_by=staff, provider_reference='  ')
+        held_approve(plan.pk, staff, provider_reference='  ')
     plan.refresh_from_db()
     assert plan.state == InstallmentPlan.STATE_REQUESTED
 
@@ -260,7 +267,7 @@ def test_approval_works_after_the_reservation_clock_ran_out(staff):
     reservation.expires_at = timezone.now() - timedelta(days=1)
     reservation.save(update_fields=['expires_at'])
 
-    approve_request(plan.pk, reviewed_by=staff, provider_reference='QI-2')
+    held_approve(plan.pk, staff, provider_reference='QI-2')
     reservation.refresh_from_db()
     assert reservation.status == 'completed'
 
@@ -272,7 +279,7 @@ def test_approval_refuses_a_reservation_that_is_no_longer_pending(staff):
     reservation.save(update_fields=['status'])
 
     with pytest.raises(InstallmentReviewError):
-        approve_request(plan.pk, reviewed_by=staff, provider_reference='QI-3')
+        held_approve(plan.pk, staff, provider_reference='QI-3')
     assert balance(buyer) == Decimal('0.00')
 
 
@@ -283,7 +290,7 @@ def test_approval_refuses_when_the_amount_moved(staff):
     reservation.save(update_fields=['total_price'])
 
     with pytest.raises(InstallmentReviewError):
-        approve_request(plan.pk, reviewed_by=staff, provider_reference='QI-4')
+        held_approve(plan.pk, staff, provider_reference='QI-4')
     reservation.refresh_from_db()
     assert reservation.status == 'pending'
 
@@ -326,7 +333,7 @@ def test_a_rejected_buyer_can_then_pay_from_the_wallet(staff):
 def test_cancelling_an_approved_order_queues_a_manual_reversal(staff):
     buyer, seller = make_user('m_cx_b'), make_user('m_cx_s')
     reservation, plan = requested(buyer, seller)
-    approve_request(plan.pk, reviewed_by=staff, provider_reference='QI-5')
+    held_approve(plan.pk, staff, provider_reference='QI-5')
 
     with patch.object(QiCardProvider, 'reverse_plan') as reverse:
         client = APIClient()
@@ -352,7 +359,7 @@ def test_a_manual_plan_cannot_be_synced(staff):
     from core.services.installments.base import InstallmentError
     buyer, seller = make_user('m_sync_b'), make_user('m_sync_s')
     _, plan = requested(buyer, seller)
-    plan = approve_request(plan.pk, reviewed_by=staff, provider_reference='QI-6')
+    plan = held_approve(plan.pk, staff, provider_reference='QI-6')
     with pytest.raises(InstallmentError):
         sync_plan(plan)
 
@@ -377,6 +384,12 @@ def test_the_review_page_shows_the_number_and_approves(staff):
     assert '>1074000<' in content
     assert '1074000,00' not in content
 
+    refused = client.post(url, {'decision': 'approve', 'provider_reference': 'QI-9'})
+    assert refused.status_code == 200  # the stock is checked first
+    reservation.refresh_from_db()
+    assert reservation.status == 'pending'
+    held = client.post(url, {'decision': 'hold_stock'})
+    assert held.status_code == 302
     done = client.post(url, {'decision': 'approve', 'provider_reference': 'QI-9'})
     assert done.status_code == 302
     reservation.refresh_from_db()
@@ -569,3 +582,69 @@ def test_card_and_account_checks_are_rate_limited(api_mode):
                               'card_number': GOOD_CARD}, format='json').status_code
                  for _ in range(3)]
     assert codes == [200, 200, 429]
+
+
+# ---------------------------------------------------------------------------
+# المخزون: يُتحقّق منه ويُحجز قبل كي كارد
+# ---------------------------------------------------------------------------
+
+def test_approval_waits_for_the_stock_check(staff):
+    buyer, seller = make_user('m_hs0_b'), make_user('m_hs0_s')
+    reservation, plan = requested(buyer, seller)
+    with pytest.raises(InstallmentReviewError):
+        approve_request(plan.pk, reviewed_by=staff, provider_reference='QI-H0')
+    reservation.refresh_from_db()
+    assert reservation.status == 'pending'
+
+
+def test_the_stock_check_holds_the_pieces_and_rejecting_gives_them_back(staff):
+    buyer, seller = make_user('m_hs1_b'), make_user('m_hs1_s')
+    reservation, plan = requested(buyer, seller)
+    before = reservation.stock_variant.quantity
+    assert hold_stock(plan.pk, reviewed_by=staff) == 'held'
+    assert hold_stock(plan.pk, reviewed_by=staff) == 'held'  # a second click takes nothing more
+    reservation.refresh_from_db()
+    assert reservation.stock_held and reservation.stock_variant.quantity == before - reservation.quantity
+
+    reject_request(plan.pk, reviewed_by=staff, notes='غير مقبول في كي كارد')
+    reservation.refresh_from_db()
+    assert not reservation.stock_held and reservation.stock_variant.quantity == before
+
+
+def test_sold_out_rejects_and_tells_the_buyer(staff):
+    buyer, seller = make_user('m_hs2_b'), make_user('m_hs2_s')
+    reservation, plan = requested(buyer, seller)
+    variant = reservation.stock_variant
+    variant.quantity = 0
+    variant.save(update_fields=['quantity'])
+    with patch('core.notifications.notify_push') as push,             patch('django.db.transaction.on_commit', side_effect=lambda f: f()):
+        assert hold_stock(plan.pk, reviewed_by=staff) == 'sold_out'
+    plan.refresh_from_db()
+    assert plan.state == InstallmentPlan.STATE_REJECTED
+    assert 'نفدت' in plan.failure_reason
+    assert any(c.args[0] == buyer for c in push.call_args_list)
+
+
+def test_withdrawing_the_request_gives_the_pieces_back(staff):
+    buyer, seller = make_user('m_hs3_b'), make_user('m_hs3_s')
+    reservation, plan = requested(buyer, seller)
+    before = reservation.stock_variant.quantity
+    hold_stock(plan.pk, reviewed_by=staff)
+    client = APIClient()
+    client.force_authenticate(user=buyer)
+    response = client.post('/api/installments/%s/cancel/' % plan.reference)
+    assert response.status_code == 200, response.data
+    reservation.refresh_from_db()
+    assert reservation.stock_variant.quantity == before and not reservation.stock_held
+
+
+def test_cancelling_the_order_gives_the_pieces_back_once(staff):
+    buyer, seller = make_user('m_hs4_b'), make_user('m_hs4_s')
+    reservation, plan = requested(buyer, seller)
+    before = reservation.stock_variant.quantity
+    hold_stock(plan.pk, reviewed_by=staff)
+    client = APIClient()
+    client.force_authenticate(user=buyer)
+    assert client.post('/api/reservations/%d/cancel/' % reservation.id).status_code == 200
+    reservation.refresh_from_db()
+    assert reservation.stock_variant.quantity == before

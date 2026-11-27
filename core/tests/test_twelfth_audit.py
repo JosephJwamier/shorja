@@ -104,7 +104,7 @@ def test_an_inactive_courier_does_not_count(w):
     assert pay(w, order(w), 'deposit').status_code == 400
 
 
-def test_an_auction_win_keeps_its_deposit(w):
+def test_an_auction_win_needs_a_courier_for_its_deposit_too(w):
     from core.auction_utils import create_winner_reservation
     from core.models import AuctionListing, Bid
     i = fresh(w)
@@ -113,5 +113,9 @@ def test_an_auction_win_keeps_its_deposit(w):
     b = Bid.objects.create(auction=a, bidder=w.buyer, amount=2000, is_winning=True)
     with transaction.atomic():
         r = create_winner_reservation(a, b)
-    x = api(w.buyer).post(f'/api/reservations/{r.id}/complete/', {'payment_type': 'deposit', 'delivery_location_id': w.loc.id}, format='json')
+    body = {'payment_type': 'deposit', 'delivery_location_id': w.loc.id}
+    x = api(w.buyer).post(f'/api/reservations/{r.id}/complete/', body, format='json')
+    assert x.status_code == 400 and x.data['code'] == 'full_payment_only', x.data
+    DeliveryCompany.objects.create(name='dc', account=user('dc'), is_active=True)
+    x = api(w.buyer).post(f'/api/reservations/{r.id}/complete/', body, format='json')
     assert x.status_code == 200, x.data

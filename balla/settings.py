@@ -303,6 +303,12 @@ IMPORT_EXPORT_ESCAPE_FORMULAE_ON_EXPORT = True
 
 OFFER_VALID_HOURS = int(os.environ.get('OFFER_VALID_HOURS', '48'))
 COUPON_MAX_PERCENT = int(os.environ.get('COUPON_MAX_PERCENT', '70'))
+# The smallest price anything can be sold at (the smallest note in use). A
+# 1-dinar "sale" was a confirmed sale and a review for nothing.
+MIN_ITEM_PRICE = int(os.environ.get('MIN_ITEM_PRICE', '250'))
+# A sale counts toward a store's level, and earns its buyer a review, only
+# from this much: two friends otherwise built a diamond store of cheap sales.
+MIN_TRUSTED_SALE = int(os.environ.get('MIN_TRUSTED_SALE', '5000'))
 WITHDRAWAL_MIN = int(os.environ.get('WITHDRAWAL_MIN', '5000'))
 WITHDRAWALS_MAX_PENDING = int(os.environ.get('WITHDRAWALS_MAX_PENDING', '2'))
 # من رفض الاستلام هذا العدد خلال هذه الأيام يدفع كاملاً قبل الشحن.
@@ -370,6 +376,10 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'core.tasks.activate_upcoming_auctions',
         'schedule': crontab(minute='*/1'),  # Every minute
     },
+    'remind-auctions-ending-soon': {
+        'task': 'core.tasks.remind_auctions_ending_soon',
+        'schedule': crontab(minute='*/5'),
+    },
     'process-ended-auctions': {
         'task': 'core.tasks.process_ended_auctions',
         'schedule': crontab(minute='*/1'),  # Every minute
@@ -390,8 +400,23 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'core.tasks.calculate_user_trust_scores',
         'schedule': crontab(hour=2, minute=0),  # Daily at 2 AM
     },
+    # Store levels and the 'verified' badge. These three lived only in the
+    # setup_celery_tasks command: a server where nobody ran it never
+    # recomputed a level.
+    'recompute-store-levels': {
+        'task': 'core.tasks.recompute_store_levels',
+        'schedule': crontab(hour=2, minute=15),
+    },
 
     # Cleanup Tasks
+    'purge-archived-items': {
+        'task': 'core.tasks.purge_archived_items',
+        'schedule': crontab(hour=3, minute=15, day_of_week=0),  # Weekly on Sunday
+    },
+    'decay-category-affinities': {
+        'task': 'core.tasks.decay_category_affinities',
+        'schedule': crontab(hour=3, minute=45, day_of_week=0),  # Weekly on Sunday
+    },
     'cleanup-old-records': {
         'task': 'core.tasks.cleanup_old_notifications_and_tokens',
         'schedule': crontab(hour=3, minute=30),

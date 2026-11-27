@@ -129,6 +129,9 @@ def confirm_received(transfer, units=None):
     goods_left(transfer.item, units)
     # Everything is with them now: custody, and the delivery pickup, follow.
     _close_if_settled(transfer)
+    _tell(transfer.from_user, transfer, 'وصلك ثمن بضاعة الجملة',
+          'حُرِّر لك ثمن %d قطعة من "%%s" (%%s د.ع).' % units,
+          transfer.wholesale_price_per_unit * units)
     return transfer
 
 
@@ -186,6 +189,9 @@ def refund_rest(transfer):
     transfer.refund_requested_at = transfer.handover_claimed_at = None
     transfer.save(update_fields=['refunded_quantity', 'refund_requested_at', 'handover_claimed_at'])
     _close_if_settled(transfer, 'completed' if transfer.released_quantity else 'cancelled')
+    _tell(transfer.to_user, transfer, 'عاد إليك ثمن بضاعة الجملة',
+          'رُدّ إليك ثمن %d قطعة من "%%s" (%%s د.ع)، وعادت القطع إلى البائع.' % units,
+          transfer.wholesale_price_per_unit * units)
     return transfer
 
 
@@ -228,6 +234,15 @@ def held_totals(user):
     for t in ItemTransfer.objects.filter(status='active', escrow=True, to_user=user):
         paid += t.held_amount
     return owed, paid
+
+
+def _tell(user, transfer, title, body, amount):
+    """`body` takes the item's title and the amount."""
+    from ..notifications import bidi_isolate, notify_push
+
+    text = body % (bidi_isolate(transfer.item.title), '{:,.0f}'.format(amount))
+    transaction.on_commit(lambda: notify_push(
+        user, title, text, data={'type': 'general', 'transfer_id': str(transfer.pk)}))
 
 
 def _notify(user, transfer, title, body):

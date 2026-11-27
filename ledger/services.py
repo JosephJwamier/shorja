@@ -318,3 +318,30 @@ def void_app_sale(reservation, reason):
         return
     with transaction.atomic():
         entry.void(reason)
+
+
+def reduce_app_sale(reservation, refunded, reason):
+    """Part of the price went back to the buyer, who kept the goods: the sale
+    stays in the book at what it finally brought in. All of it back retires
+    the row, as a full refund does."""
+    entry = getattr(reservation, 'ledger_entry', None)
+    if entry is None or entry.is_void or refunded <= 0:
+        return
+    left = entry.amount - refunded
+    if left <= 0:
+        entry.void(reason)
+        return
+    entry.amount = left
+    entry.note = ('%s — %s (%s)' % (entry.note, reason, '{:,.0f}'.format(refunded)))[:255]
+    entry.save(update_fields=['amount', 'note', 'updated_at'])
+
+
+def add_to_app_sale(reservation, amount, reason):
+    """The seller was paid more for this sale than its price (the platform's
+    coupon): the book shows what it brought in."""
+    entry = getattr(reservation, 'ledger_entry', None)
+    if entry is None or entry.is_void or amount <= 0:
+        return
+    entry.amount += amount
+    entry.note = ('%s — %s (%s)' % (entry.note, reason, '{:,.0f}'.format(amount)))[:255]
+    entry.save(update_fields=['amount', 'note', 'updated_at'])

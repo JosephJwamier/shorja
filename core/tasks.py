@@ -72,10 +72,38 @@ def process_expired_reservations():
                 processed_count += 1
                 logger.info(f"Processed expired reservation {reservation.id}")
 
+                from .notifications import notify_reservation_lapsed
+                can_rebook = can_still_complete(reservation)
+                transaction.on_commit(
+                    lambda r=reservation, again=can_rebook: notify_reservation_lapsed(r, again))
+
         except Exception as e:
             logger.error(f"Error processing reservation {reservation_id}: {str(e)}")
 
     return f"Processed {processed_count} expired reservations"
+
+
+def _cancel_unclaimed_win(reservation_id, *, forfeit):
+    """Calls off an auction win nobody will complete. Returns the cancelled
+    reservation, or None when it moved on in the meantime."""
+    from .models import Reservation
+    from .services.installments.service import cancel_open_requests
+    from .wallet_utils import (
+        cancel_pending_commission, park_if_unlisted, release_promotions, settle_cancelled_auction_win,
+    )
+
+    with transaction.atomic():
+        locked = Reservation.objects.select_for_update().select_related('item', 'buyer').get(pk=reservation_id)
+        if locked.status != 'pending':
+            return None
+        locked.status = 'cancelled'
+        locked.save(update_fields=['status'])
+        release_promotions(locked)
+        cancel_open_requests(locked, 'انتهت مهلة إتمام الشراء')
+        cancel_pending_commission(locked)
+        settle_cancelled_auction_win(locked, forfeit=forfeit)
+        park_if_unlisted(locked.item)
+    return locked
 
 
 @shared_task
@@ -87,12 +115,18 @@ def auto_complete_unclaimed_auction_reservations():
     deposit option automatically — they already paid the bid deposit and
     committed to the purchase by winning, so unlike a regular reservation
     this should not simply expire and release the item.
+
+    With no courier there is nobody to collect the rest at the door: a deposit
+    order could then never be delivered, handed over or confirmed. The default
+    is paying the rest from the wallet, and a winner whose wallet cannot cover
+    it walked away from the win, as a winner who cancels does.
     """
     from .models import Reservation
-    from .wallet_utils import (
-        OutOfStockError, complete_reservation, settle_cancelled_auction_win,
+    from .delivery_utils import get_active_delivery_company
+    from .wallet_utils import OutOfStockError, complete_reservation
+    from .notifications import (
+        notify_auction_win_lapsed, notify_reservation_cancelled_by_seller, notify_reservation_completed,
     )
-    from .notifications import notify_reservation_cancelled_by_seller, notify_reservation_completed
 
     now = timezone.now()
     unclaimed = Reservation.objects.filter(
@@ -101,15 +135,16 @@ def auto_complete_unclaimed_auction_reservations():
         auction__isnull=False
     ).select_related('item', 'buyer', 'auction')
 
+    payment_type = 'deposit' if get_active_delivery_company() else 'full'
     processed_count = 0
     for reservation in unclaimed:
         try:
             with transaction.atomic():
-                complete_reservation(reservation, 'deposit')
+                complete_reservation(reservation, payment_type)
             processed_count += 1
             logger.info(
                 f"Auto-completed unclaimed auction reservation {reservation.id} "
-                f"(winner {reservation.buyer.username} did not choose in time — defaulted to deposit)"
+                f"(winner {reservation.buyer.username} did not choose in time — defaulted to {payment_type})"
             )
             try:
                 notify_reservation_completed(reservation)
@@ -117,22 +152,44 @@ def auto_complete_unclaimed_auction_reservations():
                 logger.error(f"Failed to send auto-complete notification for reservation {reservation.id}: {e}")
         except OutOfStockError:
             # Nothing left to hand over: the winner gets the deposit back.
-            with transaction.atomic():
-                locked = Reservation.objects.select_for_update().get(pk=reservation.pk)
-                if locked.status != 'pending':
-                    continue
-                locked.status = 'cancelled'
-                locked.save(update_fields=['status'])
-                settle_cancelled_auction_win(locked, forfeit=False)
+            locked = _cancel_unclaimed_win(reservation.pk, forfeit=False)
+            if locked is None:
+                continue
             logger.warning(f"Auction reservation {reservation.id} cancelled: out of stock")
             try:
                 notify_reservation_cancelled_by_seller(locked)
             except Exception as e:
                 logger.error(f"Failed to notify auction winner of reservation {reservation.id}: {e}")
+        except ValueError as e:
+            if payment_type != 'full':
+                logger.error(f"Error auto-completing reservation {reservation.id}: {e}")
+                continue
+            # The wallet could not pay the rest, and nobody will collect it.
+            locked = _cancel_unclaimed_win(reservation.pk, forfeit=True)
+            if locked is None:
+                continue
+            logger.warning(f"Auction reservation {reservation.id} cancelled: winner did not pay ({e})")
+            try:
+                notify_auction_win_lapsed(locked)
+            except Exception as e:
+                logger.error(f"Failed to notify lapsed auction win {reservation.id}: {e}")
         except Exception as e:
             logger.error(f"Error auto-completing reservation {reservation.id}: {str(e)}")
 
     return f"Auto-completed {processed_count} unclaimed auction reservations"
+
+
+def can_still_complete(reservation):
+    """Would paying for it now go through? What complete_reservation checks
+    first: the item still on sale, its seller open, the pieces still there."""
+    from .services.open_sellers import is_open
+    item = reservation.item
+    if item.status not in ('active', 'reserved') or not is_open(item.owner):
+        return False
+    if reservation.stock_held:
+        return True
+    variant = reservation.stock_variant
+    return variant is not None and variant.quantity >= reservation.quantity
 
 
 @shared_task
@@ -150,13 +207,21 @@ def send_pending_reservation_reminders():
     from .notifications import notify_reservation_expiring
 
     now = timezone.now()
+    # Once, in the run that lands 2-6 hours before the end: the task runs
+    # every 4 hours, so each reservation falls in exactly one window. It
+    # used to remind every 4 hours, six times for a day-long reservation.
+    # An open installment request does not expire (process_expired_reservations):
+    # telling that buyer their order is about to end is untrue.
     pending = Reservation.objects.filter(
         status='pending',
-        expires_at__gt=now,
-    ).select_related('item', 'buyer')
+        expires_at__gt=now + timedelta(hours=2),
+        expires_at__lte=now + timedelta(hours=6),
+    ).exclude(installment_plans__state='requested').select_related('item', 'item__owner', 'buyer')
 
     sent_count = 0
     for reservation in pending:
+        if not can_still_complete(reservation):
+            continue
         try:
             hours_remaining = max(
                 1, int((reservation.expires_at - now).total_seconds() / 3600)
@@ -193,6 +258,14 @@ def remind_to_complete_reservation(reservation_id):
     )
     if reservation is None:
         return f"Reservation {reservation_id} is no longer pending - no reminder"
+
+    if not can_still_complete(reservation):
+        # المنتج سُحب أو نفد أو أُغلق متجره: الدعوة إلى إكماله دعوة إلى خطأ.
+        return f"Reservation {reservation_id} can no longer be completed - no reminder"
+
+    if reservation.installment_plans.filter(state='requested').exists():
+        # اختار التقسيط وينتظر اتصالنا: لا يُطلب منه إكمال ما أكمله.
+        return f"Reservation {reservation_id} awaits an installment review - no reminder"
 
     if reservation.expires_at <= timezone.now():
         # انتهت مهلته داخل الساعة: دعوته لإكماله تدعوه إلى باب مغلق.
@@ -420,6 +493,31 @@ def check_cancellation_eligibility():
     return f"Sent {notified_count} cancellation restriction notifications"
 
 @shared_task
+def remind_auctions_ending_soon():
+    """Every 5 minutes: auctions ending 10-15 minutes from now tell their
+    bidders, once — the window is as long as the period. The last minutes
+    are when a price moves, and nobody was told they had come. A live
+    auction runs two minutes in front of its audience, so not those."""
+    from .models import AuctionListing
+    from .notifications import notify_auction_ending_soon
+
+    now = timezone.now()
+    due = AuctionListing.objects.filter(
+        status='active', live_session__isnull=True,
+        end_time__gt=now + timedelta(minutes=10), end_time__lte=now + timedelta(minutes=15),
+    ).select_related('item')
+    sent = 0
+    for auction in due:
+        try:
+            minutes = max(1, int((auction.end_time - now).total_seconds() // 60))
+            notify_auction_ending_soon(auction, minutes)
+            sent += 1
+        except Exception as e:
+            logger.error(f"Ending-soon reminder failed for auction {auction.id}: {e}")
+    return f"Reminded bidders of {sent} auctions ending soon"
+
+
+@shared_task
 def activate_upcoming_auctions():
     from django.utils import timezone
     from .models import AuctionListing
@@ -500,6 +598,13 @@ def process_ended_auctions():
                     notify_auction_won(auction, reservation)
                 except Exception as e:
                     logger.error(f"Failed to send auction-won notification for auction {auction.id}: {e}")
+
+            if not auction.live_session_id:
+                from .notifications import notify_auction_result
+                try:
+                    notify_auction_result(auction)
+                except Exception as e:
+                    logger.error(f"Failed to push auction result for {auction.id}: {e}")
 
             # Safety-net path only (the normal live-auction path settles via
             # finalize_live_auction's precise ETA task) — still report the
@@ -794,6 +899,11 @@ def send_payment_release_notification(reservation_id, release_type='auto_release
             subject=subject,
             message=message
         )
+        # The email above is off on this platform; the push is what arrives.
+        # A dispute's decision tells the seller itself (notify_dispute_resolved).
+        if release_type in ('auto_release', 'buyer_approved'):
+            from .notifications import notify_payment_released
+            notify_payment_released(reservation, 'auto' if release_type == 'auto_release' else 'buyer')
 
         logger.info(f"Sent payment release notification for reservation {reservation_id}")
 
@@ -1513,6 +1623,16 @@ def send_reservation_created_notification(reservation_id, owner_id):
         owner = User.objects.get(id=owner_id)
         item_title = bidi_isolate(reservation.item.title)
 
+        # The email below is off on this platform; the push is what arrives.
+        from .notifications import notify_push
+        via = (' عبر المندوب %s' % bidi_isolate(reservation.representative.username)
+               if reservation.representative else '')
+        notify_push(
+            owner, 'حجز جديد',
+            f'حجز {bidi_isolate(reservation.buyer.username)} "{item_title}"{via} '
+            f'(الكمية {reservation.quantity}). يصلك إشعار حين يدفع.',
+            data={'type': 'reservation_created', 'reservation_id': str(reservation.id)})
+
         if reservation.representative:
             message = (
                 f"حجز جديد من {bidi_isolate(reservation.buyer.username)} "
@@ -1786,6 +1906,7 @@ def remind_sellers_to_hand_over():
             status='completed',          # دفع المشتري، فالدور على البائع
             completed_at__lte=cutoff,
             handover_reminder_sent_at__isnull=True,
+            handed_over_at__isnull=True,  # سلّمه البائع يداً بيد
         )
         # سُلّم فعلاً: أي طلب توصيل صادر من البائع يُسقط التذكير.
         .exclude(delivery_orders__direction='outbound')

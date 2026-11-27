@@ -29,6 +29,14 @@ def plain_static_storage(settings):
 
 
 @pytest.fixture(autouse=True)
+def toy_prices_allowed(settings):
+    """Most tests sell at prices like 100: the floors under prices and under
+    trusted sales have tests of their own that set the real values."""
+    settings.MIN_ITEM_PRICE = 0
+    settings.MIN_TRUSTED_SALE = 0
+
+
+@pytest.fixture(autouse=True)
 def no_request_ceiling(settings):
     """Every test client is one address; a test about the ceiling sets its own."""
     settings.REQUEST_RATES = {k: '1000000/min' for k in settings.REQUEST_RATES}

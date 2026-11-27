@@ -35,7 +35,7 @@ from .models import (
 from .services.disputes import resolve_dispute, DisputeResolutionError
 from .services.withdrawals import approve_withdrawal, reject_withdrawal, WithdrawalReviewError
 from .services.moderation import (
-    archive_item, archive_reel, reactivate_user, stop_live_session, suspend_user,
+    archive_item, archive_reel, close_store, reactivate_user, stop_live_session, suspend_user,
     resolve_report, ReportResolutionError,
 )
 from .services.support import SUPPORT_USERNAME
@@ -384,7 +384,10 @@ class UserStoreAdmin(ModelAdmin):
 
     @admin.action(description='تعطيل المتاجر المحددة', permissions=['change'])
     def deactivate_stores_action(self, request, queryset):
-        count = queryset.filter(is_active=True).update(is_active=False)
+        count = 0
+        for store in queryset.filter(is_active=True):
+            close_store(store)  # and its stream on air, if any
+            count += 1
         self.message_user(request, f'تم تعطيل {count} متجر.', level=messages.SUCCESS)
 
     @admin.action(description='تفعيل المتاجر المحددة', permissions=['change'])
@@ -1723,7 +1726,7 @@ class InstallmentPlanAdmin(ModelAdmin):
     def review_view(self, request, pk):
         from .delivery_utils import compute_delivery_fee
         from .services.installments.service import (
-            InstallmentReviewError, approve_request, financed_amount, reject_request,
+            InstallmentReviewError, approve_request, financed_amount, hold_stock, reject_request,
         )
         plan = get_object_or_404(
             InstallmentPlan.objects.select_related(
@@ -1737,7 +1740,15 @@ class InstallmentPlanAdmin(ModelAdmin):
             decision = request.POST.get('decision')
             notes = request.POST.get('admin_notes', '').strip()
             try:
-                if decision == 'approve':
+                if decision == 'hold_stock':
+                    if hold_stock(plan.pk, reviewed_by=request.user) == 'held':
+                        messages.success(request, 'المنتج متوفّر وحُجزت %d قطعة لهذا الطلب. '
+                                         'تحقّق الآن من قبول المشتري في كي كارد.'
+                                         % plan.reservation.quantity)
+                        return redirect('admin:core_installmentplan_review', pk=plan.pk)
+                    messages.warning(request, 'نفد المنتج — رُفض الطلب وأُبلغ المشتري.')
+                    return redirect('admin:core_installmentplan_changelist')
+                elif decision == 'approve':
                     approve_request(plan.pk, reviewed_by=request.user,
                                     provider_reference=request.POST.get('provider_reference', ''),
                                     notes=notes)
@@ -1797,6 +1808,7 @@ class InstallmentPlanAdmin(ModelAdmin):
             stock=stock,
             stock_short=(stock is not None and not reservation.stock_held
                          and stock < reservation.quantity),
+            stock_held=bool(plan.stock_held_at or reservation.stock_held),
             opts=self.model._meta,
         )
         return TemplateResponse(request, 'admin/core/installmentplan/review.html', context)

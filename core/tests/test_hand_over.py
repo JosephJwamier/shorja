@@ -105,3 +105,116 @@ def test_the_auction_sweep_survives_a_failure(w, monkeypatch):
         raise RuntimeError('x')
     monkeypatch.setattr(au, 'settle_on_winner', boom)
     assert 'Processed 0' in process_ended_auctions()
+
+
+# ---- a handed-over order that comes back: the piece is with the buyer
+
+def stock(w):
+    w.item.default_variant.refresh_from_db()
+    return w.item.default_variant.quantity
+
+
+def handed(w):
+    r = paid(w)
+    assert hand_over(w, r).status_code == 200
+    return r
+
+
+def refund_by_dispute(w, r, action='refund_buyer', **kw):
+    from core.services.disputes import resolve_dispute
+    d = Dispute.objects.create(item=w.item, reservation=r, complainant=w.buyer, defendant=w.seller,
+                               title='t', description='d', status='open')
+    Reservation.objects.filter(pk=r.pk).update(status='disputed')
+    resolve_dispute(d, resolution_action=action, **kw)
+
+
+def test_refunding_a_handed_over_order_keeps_the_stock_until_the_seller_has_it(w):
+    before = stock(w)
+    r = handed(w)
+    refund_by_dispute(w, r)
+    assert stock(w) == before - 1  # the piece is still with the buyer
+    seen = api(w.seller).get(f'/api/reservations/{r.id}/').data
+    assert seen['can_mark_goods_returned'] is True
+    assert api(w.buyer).get(f'/api/reservations/{r.id}/').data['can_mark_goods_returned'] is False
+
+    back = api(w.seller).post(f'/api/reservations/{r.id}/goods-returned/')
+    assert back.status_code == 200, back.data
+    assert stock(w) == before
+    again = api(w.seller).post(f'/api/reservations/{r.id}/goods-returned/')
+    assert again.status_code == 400 and stock(w) == before
+
+
+def test_the_seller_cancelling_after_hand_over_waits_for_the_piece_too(w):
+    before = stock(w)
+    r = handed(w)
+    assert api(w.seller).post(f'/api/reservations/{r.id}/cancel/').status_code == 200
+    assert stock(w) == before - 1
+    assert api(w.seller).post(f'/api/reservations/{r.id}/goods-returned/').status_code == 200
+    assert stock(w) == before
+
+
+def test_an_order_never_handed_over_gets_its_stock_back_at_once(w):
+    before = stock(w)
+    r = paid(w)
+    assert api(w.seller).post(f'/api/reservations/{r.id}/cancel/').status_code == 200
+    assert stock(w) == before
+    assert api(w.seller).post(f'/api/reservations/{r.id}/goods-returned/').status_code == 400
+
+
+def test_only_the_seller_puts_it_back(w):
+    r = handed(w)
+    refund_by_dispute(w, r)
+    assert api(w.buyer).post(f'/api/reservations/{r.id}/goods-returned/').status_code in (403, 404)
+
+
+# ---- a partial refund shows in the seller's book
+
+def test_a_partial_refund_lowers_the_sale_in_the_book(w):
+    from decimal import Decimal
+    from core.models import UserStore
+    UserStore.objects.create(user=w.seller, name='s', is_active=True)
+    r = handed(w)
+    refund_by_dispute(w, r, action='partial_refund', partial_refund_amount=Decimal('20000'))
+    r.refresh_from_db()
+    entry = r.ledger_entry
+    assert entry.amount == P - Decimal('20000') and not entry.is_void
+
+
+# ---- a prepaid delivery fee for a trip that never happened goes back
+
+def test_handing_over_returns_a_prepaid_delivery_fee(w):
+    from decimal import Decimal
+    from unittest.mock import patch
+    from core.models import DeliveryCompany
+    DeliveryCompany.objects.create(name='dc', account=user('dc'), is_active=True,
+                                   intra_governorate_fee=5000, inter_governorate_fee=5000)
+    r = paid(w)
+    r.refresh_from_db()
+    fee = r.delivery_fee
+    assert fee > 0
+    before = bal(w.buyer)
+    with patch('core.views.notify_push') as push:
+        assert hand_over(w, r).status_code == 200
+    r.refresh_from_db()
+    assert r.delivery_fee == Decimal('0.00')
+    assert bal(w.buyer) == before + fee
+    assert push.call_args.args[0] == w.buyer  # a push, which the app does receive
+
+
+# ---- one reminder, and only for an order that can still be completed
+
+def test_no_reminder_for_an_order_that_can_no_longer_be_completed(w):
+    from datetime import timedelta as td
+    from unittest.mock import patch
+    from core.models import Item
+    from core.tasks import send_pending_reservation_reminders
+    soon = timezone.now() + td(hours=4)
+    ok = res(w, expires_at=soon)
+    far = res(w, buyer=user('b4', 1), expires_at=timezone.now() + td(hours=20))
+    other = Item.objects.create(owner=w.seller, current_holder=w.seller, title='x', description='d',
+                                category=w.cat, condition='new', quantity=1, status='archived')
+    gone = res(w, buyer=user('b5', 1), item=other, expires_at=soon)
+    with patch('core.notifications.notify_reservation_expiring') as remind:
+        send_pending_reservation_reminders()
+    assert [c.args[0].pk for c in remind.call_args_list] == [ok.pk]
+    assert far.pk and gone.pk
